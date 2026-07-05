@@ -57,7 +57,10 @@ def test_insert_ignore_renders_native_conflict_handling() -> None:
 
     values = {"queue_name": "q", "class_name": "C"}
     cases = [
+        # Postgres also RETURNINGs the PK: inserted_count() relies on it because psycopg
+        # reports rowcount -1 for compiled single-row INSERTs.
         (PostgresDialect(), postgresql.dialect(), "ON CONFLICT (class_name) DO NOTHING"),
+        (PostgresDialect(), postgresql.dialect(), "RETURNING firm_jobs.id"),
         (MysqlDialect(), mysql.dialect(), "INSERT IGNORE"),
         (SqliteDialect(), sqlite.dialect(), "ON CONFLICT (class_name) DO NOTHING"),
     ]

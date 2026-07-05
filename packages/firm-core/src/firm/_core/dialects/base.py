@@ -8,7 +8,19 @@ from contextlib import AbstractContextManager
 from typing import Any
 
 from sqlalchemy import Engine, Insert, Select, Table
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, CursorResult
+
+
+def inserted_count(result: CursorResult) -> int:
+    """How many rows an executed :meth:`Dialect.insert_ignore` statement actually inserted.
+
+    Postgres statements carry ``RETURNING`` (psycopg reports ``rowcount`` -1 for compiled
+    single-row INSERTs), so there we count the returned rows; MySQL/SQLite report a sane
+    ``rowcount`` directly.
+    """
+    if result.returns_rows:
+        return len(result.fetchall())
+    return result.rowcount
 
 
 class Dialect(ABC):
@@ -48,5 +60,6 @@ class Dialect(ABC):
         self, table: Table, values: Mapping[str, Any], *, index_elements: Sequence[str]
     ) -> Insert:
         """Build an insert-if-absent: on a conflict against the unique index over
-        ``index_elements``, do nothing. Executing it yields ``rowcount`` 1 on insert and 0 on
-        an ignored conflict, on every backend."""
+        ``index_elements``, do nothing. Pass the executed result to :func:`inserted_count` to
+        learn whether the row was inserted (1) or the conflict ignored (0) on every backend —
+        the raw ``rowcount`` is *not* reliable for these statements on Postgres."""

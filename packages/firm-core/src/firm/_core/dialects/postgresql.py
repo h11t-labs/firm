@@ -40,8 +40,12 @@ class PostgresDialect(Dialect):
     def insert_ignore(
         self, table: Table, values: Mapping[str, Any], *, index_elements: Sequence[str]
     ) -> Insert:
+        # RETURNING the PK is how callers can tell insert from ignored conflict: psycopg
+        # reports rowcount -1 for compiled single-row INSERTs, so inserted_count() counts the
+        # returned rows instead (one on insert, none on conflict).
         return (
             pg_insert(table)
             .values(**values)
             .on_conflict_do_nothing(index_elements=list(index_elements))
+            .returning(*table.primary_key.columns)
         )
