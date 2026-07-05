@@ -698,3 +698,21 @@ def test_no_tables_renders_empty_page(tmp_path) -> None:
             assert "Nothing to show" in body
     finally:
         dash.close()
+
+
+def test_out_of_range_id_is_404_not_500(base_url, seed) -> None:
+    """UL-4: /job/<huge digits> passed the route regex, int() succeeded, and the BIGINT
+    overflow surfaced as a DBAPI error -> 500. It is a 404 now."""
+    seed.ready()
+    with pytest.raises(HTTPError) as exc:
+        urlopen(base_url + "/job/99999999999999999999999")
+    assert exc.value.code == 404
+
+
+def test_page_overshoot_clamps_query_to_last_page(base_url, seed) -> None:
+    """UL-2: the pager clamped for display while the query used the raw offset, rendering an
+    empty table under a pager claiming rows exist. The offset now follows the clamp."""
+    seed.cache_entry(key=b"clamp-me", value=b"v")
+    status, body = _get(base_url + "/cache?page=999")
+    assert status == 200
+    assert "clamp-me" in body  # the row is on the (clamped) last page, not an empty page 999

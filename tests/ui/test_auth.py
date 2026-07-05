@@ -209,3 +209,12 @@ def test_oversized_post_body_is_rejected(dashboard, seed) -> None:
         with pytest.raises(HTTPError) as exc:
             urlopen(req, timeout=5)
         assert exc.value.code == 413
+
+
+def test_non_ascii_authorization_header_after_login_is_denied_not_crash() -> None:
+    """UL-5: after a successful login populated the fast-path cache, a header containing
+    non-ASCII (latin-1-decoded) bytes made hmac.compare_digest raise TypeError."""
+    basic = BasicAuth("admin", password="pw")
+    assert isinstance(basic.authenticate(_req({"Authorization": _basic("admin", "pw")})), Allow)
+    verdict = basic.authenticate(_req({"Authorization": "Basic caféÿ"}))
+    assert isinstance(verdict, Deny)
