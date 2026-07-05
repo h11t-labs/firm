@@ -17,7 +17,9 @@ except ImportError as exc:  # pragma: no cover - exercised only without the 'que
         'The firm-queue CLI requires "click". Install the queue extra: pip install "firm[queue]"'
     ) from exc
 
+from .._core import process as process_registry
 from .._core.config import Runtime
+from .._core.process import HeartbeatPoller, ProcessInfo
 from . import __version__
 from .config import configure
 from .dispatcher import dispatch_once, run_maintenance
@@ -29,6 +31,25 @@ from .supervisor import (
     WorkerConfig,
 )
 from .worker import Worker, run_ready
+
+# Matches SupervisorConfig.heartbeat_interval; the standalone commands have no supervisor
+# config to read it from.
+_HEARTBEAT_INTERVAL = 60.0
+
+
+def _register_worker_process(runtime: Runtime, kind_name: str) -> int:
+    """Register a process row for a standalone command, so its claims carry a ``process_id``
+    and a crash leaves a stale row that ``prune_dead`` + recovery can find — a NULL
+    ``process_id`` claim would be stranded forever."""
+    return process_registry.register(
+        runtime.engine,
+        ProcessInfo(
+            kind="Worker",
+            name=process_registry.generate_name(kind_name),
+            pid=os.getpid(),
+        ),
+    )
+
 
 _db_option = click.option(
     "--database-url",
@@ -93,13 +114,22 @@ def start(
 @click.option("--threads", default=3, type=int)
 def work(database_url: str | None, imports: tuple[str, ...], queues: str, threads: int) -> None:
     runtime = _configure(database_url, imports)
-    worker = Worker(runtime, queues=tuple(queues.split(",")), threads=threads)
+    process_id = _register_worker_process(runtime, "worker")
+    worker = Worker(
+        runtime, queues=tuple(queues.split(",")), threads=threads, process_id=process_id
+    )
+    heartbeat = HeartbeatPoller(runtime.engine, process_id, _HEARTBEAT_INTERVAL)
     worker.start()
+    heartbeat.start()
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        pass
+    finally:
         worker.stop()
+        heartbeat.stop()
+        process_registry.deregister(runtime.engine, process_id)
 
 
 @main.command(help="Drain ready jobs once and exit (no polling).")
@@ -109,7 +139,13 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
 @click.option("--limit", default=100, type=int)
 def drain(database_url: str | None, imports: tuple[str, ...], queues: str, limit: int) -> None:
     runtime = _configure(database_url, imports)
-    processed = run_ready(runtime, queues=tuple(queues.split(",")), limit=limit)
+    process_id = _register_worker_process(runtime, "drain")
+    try:
+        processed = run_ready(
+            runtime, queues=tuple(queues.split(",")), limit=limit, process_id=process_id
+        )
+    finally:
+        process_registry.deregister(runtime.engine, process_id)
     click.echo(f"processed {processed} job(s)")
 
 
