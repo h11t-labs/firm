@@ -26,6 +26,7 @@ reinterpretation. Where it differs, it's deliberate and documented.
 | Job arguments       | Active Job + GlobalID (pass records)    | JSON + datetime/date/Decimal/UUID (pass IDs)                                       |
 | Pub/sub trimming    | inline `TrimJob` per broadcast          | async probabilistic trim on a background thread (+ manual `trim()` / CLI)          |
 | Pub/sub delivery    | Action Cable adapter                    | a standalone `Channel` with `broadcast`/`subscribe`/`unsubscribe` (no Action Cable) |
+| Cache value coder   | Marshal (arbitrary Ruby objects)        | **JSON by default** (safer against a writable cache table); `PickleCoder` is one import away |
 
 The at-least-once recovery choice means **jobs should be idempotent** — see
 [Retries & failures](queue/retries-and-failures.md).

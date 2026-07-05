@@ -174,3 +174,38 @@ def test_server_blocks_unauthenticated_post(dashboard, seed) -> None:
         creds = {"Authorization": _basic("admin", "pw")}
         with urlopen(Request(base + "/cache", headers=creds)) as resp:
             assert "keep-me" in resp.read().decode()  # the destructive action did not run
+
+
+def test_unauthenticated_post_body_is_never_read(dashboard, seed) -> None:
+    """S-2: do_POST used to buffer the full attacker-supplied body *before* auth ran. The
+    401 must come back without the server consuming the body."""
+    import socket
+
+    seed.ready()
+    with _running(dashboard, BasicAuth("admin", password="pw")) as base:
+        host, port = base.removeprefix("http://").split(":")
+        with socket.create_connection((host, int(port)), timeout=5) as sock:
+            # Announce a huge body but send none of it: a server that reads-before-auth
+            # would block on the missing bytes instead of answering.
+            sock.sendall(
+                b"POST /cache/clear HTTP/1.1\r\nHost: x\r\nContent-Length: 1073741824\r\n\r\n"
+            )
+            sock.settimeout(5)
+            status = sock.recv(1024).split(b"\r\n", 1)[0]
+        assert b"401" in status
+
+
+def test_oversized_post_body_is_rejected(dashboard, seed) -> None:
+    seed.ready()
+    with _running(dashboard, BasicAuth("admin", password="pw")) as base:
+        req = Request(
+            base + "/settings/refresh",
+            data=b"x" * 16,
+            headers={
+                "Authorization": _basic("admin", "pw"),
+                "Content-Length": str(2 * 1024 * 1024),
+            },
+        )
+        with pytest.raises(HTTPError) as exc:
+            urlopen(req, timeout=5)
+        assert exc.value.code == 413

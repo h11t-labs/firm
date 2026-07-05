@@ -26,6 +26,8 @@ from .context import Dashboard
 _REFRESH_DEFAULTS = {"queue": 5, "cache": 10, "channel": 10, "audit": 10}
 _REFRESH_VALID = frozenset(secs for secs, _ in render.REFRESH_OPTIONS)
 _REFRESH_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
+# Dashboard POSTs carry at most a tiny settings form; anything bigger is abuse of the buffer.
+_MAX_BODY_BYTES = 1 << 20
 
 # Read once at import time -- the dashboard is a short-lived local process, not a place where
 # hot-reloading the stylesheet from disk on every request would buy anything.
@@ -217,10 +219,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         dash = self._dash
         path = urlsplit(self.path).path
-        length = _to_int(self.headers.get("Content-Length", "0"), 0)
-        raw_body = self.rfile.read(length)  # only /settings/refresh reads form fields from this
         if not self._check_auth():
+            # The body was never read: close the connection instead of letting keep-alive
+            # misparse the unread bytes as the next request.
+            self.close_connection = True
             return
+        length = _to_int(self.headers.get("Content-Length", "0"), 0)
+        if length > _MAX_BODY_BYTES:
+            self.close_connection = True
+            self._html(render.error_page(dash.parts, "Request body too large."), 413)
+            return
+        raw_body = self.rfile.read(length)  # only /settings/refresh reads form fields from this
         if not self._origin_ok():
             body = render.error_page(dash.parts, "Cross-origin POST rejected (CSRF guard).")
             self._html(body, 403)
