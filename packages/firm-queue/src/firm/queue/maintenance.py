@@ -64,16 +64,21 @@ def discard_job(runtime: Runtime, job_id: int) -> bool:
     strands blocked work until the semaphore-expiry failsafe.
     """
     with runtime.dialect.begin_claim_tx(runtime.engine) as conn:
-        if conn.execute(select(_claimed.c.id).where(_claimed.c.job_id == job_id)).first():
+        # Take the ready row first rather than doing a non-locking claimed-check: an
+        # in-flight claim transaction holds this row FOR UPDATE, so the DELETE serializes
+        # against it — rowcount 1 proves no worker can be (or become) running this job. The
+        # old SELECT-on-claimed could return "not claimed" and still lose to a racing claim,
+        # letting a discard that reported True execute anyway.
+        ready_deleted = conn.execute(delete(_ready).where(_ready.c.job_id == job_id)).rowcount
+        if not ready_deleted and (
+            conn.execute(select(_claimed.c.id).where(_claimed.c.job_id == job_id)).first()
+            is not None
+        ):
             return False
         row = conn.execute(select(_jobs.c.concurrency_key).where(_jobs.c.id == job_id)).first()
         if row is None:
             return False
-        holds_slot = (
-            row.concurrency_key is not None
-            and conn.execute(select(_ready.c.id).where(_ready.c.job_id == job_id)).first()
-            is not None
-        )
+        holds_slot = row.concurrency_key is not None and bool(ready_deleted)
         conn.execute(delete(_jobs).where(_jobs.c.id == job_id))
         if holds_slot:
             semaphore.forfeit_slot(conn, runtime.dialect, row.concurrency_key)

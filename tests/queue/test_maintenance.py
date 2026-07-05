@@ -83,13 +83,14 @@ def test_discard_job_deletes_job_and_executions(
 def test_discard_job_refuses_claimed(
     runtime: Runtime, engine: Engine, count: Callable[..., int]
 ) -> None:
-    from sqlalchemy import insert
+    from firm.queue.claim import claim_ready
 
     job_id = ok_job.enqueue()
-    with engine.begin() as conn:
-        conn.execute(insert(schema.claimed_executions).values(job_id=job_id, process_id=1))
+    # A real claim: the ready row is consumed and the claim row written atomically.
+    assert claim_ready(engine, runtime.dialect, ["*"], 5, None) == [job_id]
     assert maintenance.discard_job(runtime, job_id) is False
     assert count(schema.jobs) == 1
+    assert count(schema.claimed_executions) == 1
 
 
 def test_discard_slot_holder_promotes_next_blocked(
@@ -129,3 +130,52 @@ def test_preserve_finished_false_deletes_on_finish(
     finally:
         config.set_runtime(None)
         rt.reset()
+
+
+def test_discard_refuses_job_being_claimed_concurrently(
+    runtime: Runtime, engine, add_ready, count: Callable[..., int]
+) -> None:
+    """Q-F7: the old non-locking claimed-check could report "discarded" while a racing claim
+    transaction went on to run the job anyway. Taking the ready row first serializes the
+    discard against the in-flight claim, which must win."""
+    import threading
+    import time as _time
+
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import insert as sa_insert
+    from sqlalchemy import select as sa_select
+
+    from firm._core.clock import now_utc
+
+    job_id = add_ready()
+    outcome: dict[str, bool] = {}
+    done = threading.Event()
+
+    def _discarder() -> None:
+        outcome["discarded"] = maintenance.discard_job(runtime, job_id)
+        done.set()
+
+    discarder = threading.Thread(target=_discarder)
+    with runtime.dialect.begin_claim_tx(engine) as conn:
+        # An in-flight claim: ready row locked, claim inserted, ready deleted — uncommitted.
+        picked = conn.execute(
+            runtime.dialect.with_skip_locked(
+                sa_select(schema.ready_executions.c.id, schema.ready_executions.c.job_id).where(
+                    schema.ready_executions.c.job_id == job_id
+                )
+            )
+        ).one()
+        conn.execute(
+            sa_insert(schema.claimed_executions).values(job_id=job_id, created_at=now_utc())
+        )
+        conn.execute(
+            sa_delete(schema.ready_executions).where(schema.ready_executions.c.id == picked.id)
+        )
+        discarder.start()
+        _time.sleep(0.3)
+        assert not done.is_set(), "discard slipped past an in-flight claim"
+    discarder.join(10)
+
+    assert outcome["discarded"] is False
+    assert count(schema.jobs) == 1
+    assert count(schema.claimed_executions) == 1
