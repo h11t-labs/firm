@@ -15,32 +15,29 @@ a column is a breaking change. Writes must go through :func:`~firm.audit.record`
 from __future__ import annotations
 
 from sqlalchemy import (
-    BigInteger,
     Column,
-    DateTime,
     Index,
-    Integer,
     MetaData,
     String,
     Table,
     Text,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME
 from sqlalchemy.engine import Connection, Engine
 
 from .._core.clock import now_utc
+from .._core.schema import dt_type, pk_bigint
 from .._core.schema_setup import create_all_and_stamp, drop_all_and_unstamp
 
 metadata = MetaData()
 
 VERSION_TABLE = "firm_audit_alembic_version"
 
-_DT = DateTime().with_variant(MYSQL_DATETIME(fsp=6), "mysql")
+_DT = dt_type()
 
 audits = Table(
     "firm_audits",
     metadata,
-    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True),
+    Column("id", pk_bigint(), primary_key=True),
     Column("action", String(255), nullable=False),
     Column("subject_type", String(255)),
     Column("subject_id", String(255)),

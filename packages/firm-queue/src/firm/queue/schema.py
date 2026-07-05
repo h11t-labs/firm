@@ -32,12 +32,11 @@ from sqlalchemy import (
     Table,
     Text,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME
-from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.engine import Connection, Engine
 
 from .._core import schema as _core_schema
 from .._core.clock import now_utc
+from .._core.schema import dt_type, long_text, pk_bigint
 from .._core.schema_setup import create_all_and_stamp, drop_all_and_unstamp
 
 metadata = MetaData()
@@ -52,17 +51,17 @@ def _dt() -> DateTime:
     ordering of ``scheduled_at``/``expires_at`` and the ``(task_key, run_at)`` dedupe; we use
     ``DATETIME(6)`` there. Postgres/SQLite already keep fractional seconds.
     """
-    return DateTime().with_variant(MYSQL_DATETIME(fsp=6), "mysql")
+    return dt_type()
 
 
 def _long_text() -> Text:
     """Text that maps to ``LONGTEXT`` on MySQL (plain ``TEXT`` caps at 64 KiB)."""
-    return Text().with_variant(LONGTEXT, "mysql")
+    return long_text()
 
 
 def _pk() -> Column:
     """A bigint primary key that becomes a SQLite rowid (autoincrement) under the hood."""
-    return Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True)
+    return Column("id", pk_bigint(), primary_key=True)
 
 
 def _job_fk() -> Column:

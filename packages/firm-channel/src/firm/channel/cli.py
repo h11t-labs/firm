@@ -2,34 +2,18 @@
 
 from __future__ import annotations
 
-import os
-
-try:
-    import click
-except ImportError as exc:  # pragma: no cover - exercised only without the 'channel' extra
-    raise ImportError(
-        'The firm-channel CLI requires "click". Install the channel extra: '
-        'pip install "firm[channel]"'
-    ) from exc
-
+from .._core.cli import db_option, require_click, require_url
 from .._core.database import create_engine_for, dispose_engine, transaction
 from . import __version__, messages
 from .channel import Channel
 
-_db_option = click.option(
-    "--database-url",
-    default=None,
-    help="SQLAlchemy URL (or set FIRM_CHANNEL_DATABASE_URL).",
-)
+click = require_click("channel")
+
+_db_option = db_option("FIRM_CHANNEL_DATABASE_URL")
 
 
 def _url(database_url: str | None) -> str:
-    url = database_url or os.environ.get("FIRM_CHANNEL_DATABASE_URL")
-    if not url:
-        raise click.UsageError(
-            "No database URL: pass --database-url or set FIRM_CHANNEL_DATABASE_URL."
-        )
-    return url
+    return require_url(database_url, "FIRM_CHANNEL_DATABASE_URL")
 
 
 @click.group(help="firm-channel — database-backed pub/sub.")

@@ -12,33 +12,29 @@ from __future__ import annotations
 from sqlalchemy import (
     BigInteger,
     Column,
-    DateTime,
     Index,
     Integer,
     LargeBinary,
     MetaData,
     Table,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME
-from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.engine import Connection, Engine
 
 from .._core.clock import now_utc
+from .._core.schema import dt_type, long_blob, pk_bigint
 from .._core.schema_setup import create_all_and_stamp, drop_all_and_unstamp
 
 metadata = MetaData()
 
 VERSION_TABLE = "firm_cache_alembic_version"
 
-# Values can be large; map to MySQL LONGBLOB (plain BLOB caps at 64 KiB). Postgres uses BYTEA
-# and SQLite a BLOB regardless of length. created_at needs sub-second precision on MySQL.
-_VALUE_TYPE = LargeBinary().with_variant(LONGBLOB, "mysql")
-_DT = DateTime().with_variant(MYSQL_DATETIME(fsp=6), "mysql")
+_VALUE_TYPE = long_blob()
+_DT = dt_type()
 
 entries = Table(
     "firm_entries",
     metadata,
-    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True),
+    Column("id", pk_bigint(), primary_key=True),
     Column("key", LargeBinary(1024), nullable=False),
     Column("value", _VALUE_TYPE, nullable=False),
     Column("key_hash", BigInteger, nullable=False),
