@@ -1,5 +1,9 @@
 """Estimating total cache size without scanning every row.
 
+The ``entry_count`` / ``estimate_size`` functions are a supported read surface — the
+dashboard (firm-ui) builds on them, like it builds on ``schema.entries``. Changing their
+signatures is a breaking change.
+
 When the table is small (``count <= samples``) we just sum ``byte_size`` exactly. Above that we
 sum the ``samples`` largest rows exactly (the "outliers"), then estimate the rest from a random
 ``key_hash`` window sized to catch ~``samples`` rows (``key_hash`` is uniformly distributed over

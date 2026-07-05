@@ -16,11 +16,17 @@ from sqlalchemy import Engine, inspect
 
 from firm._core.config import Runtime, Settings
 from firm._core.database import create_engine_for
+from firm.audit import schema as audit_schema
+from firm.cache import schema as cache_schema
+from firm.channel import schema as channel_schema
+from firm.queue import schema as queue_schema
 
-_QUEUE_TABLE = "firm_jobs"
-_CACHE_TABLE = "firm_entries"
-_CHANNEL_TABLE = "firm_messages"
-_AUDIT_TABLE = "firm_audits"
+# Probe names come from the owning schemas, not string literals: a table rename must fail
+# loudly here (import/attribute error), never silently disable a dashboard part.
+_QUEUE_TABLE = queue_schema.jobs.name
+_CACHE_TABLE = cache_schema.entries.name
+_CHANNEL_TABLE = channel_schema.messages.name
+_AUDIT_TABLE = audit_schema.audits.name
 
 
 def _has_table(engine: Engine, table: str) -> bool:
