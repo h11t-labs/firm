@@ -1,4 +1,8 @@
-"""Queue management API: pause/resume/size/clear/latency."""
+"""Queue management API: pause/resume/size/clear/latency.
+
+A supported operational surface: the dashboard (firm-ui) and the CLI call these directly.
+Changing their signatures is a breaking change.
+"""
 
 from __future__ import annotations
 

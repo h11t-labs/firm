@@ -1,4 +1,8 @@
-"""Finished-job retention, manual retry of failed jobs, and manual discard."""
+"""Finished-job retention, manual retry of failed jobs, and manual discard.
+
+These functions are a supported operational surface: the dashboard (firm-ui) and the CLI call
+them directly. Changing their signatures is a breaking change.
+"""
 
 from __future__ import annotations
 
