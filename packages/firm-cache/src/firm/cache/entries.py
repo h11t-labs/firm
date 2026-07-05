@@ -13,6 +13,7 @@ from sqlalchemy import Connection, delete, select
 
 from .._core.clock import now_utc
 from .._core.dialects import get_dialect
+from .._core.dialects.base import inserted_count
 from . import schema
 from .keys import key_hash
 
@@ -47,9 +48,9 @@ def _upsert(conn: Connection, values: dict[str, Any], *, overwrite: bool) -> int
         stmt = dialect.upsert(
             _entries, values, index_elements=("key_hash",), update_columns=_CONFLICT_COLS
         )
-    else:
-        stmt = dialect.insert_ignore(_entries, values, index_elements=("key_hash",))
-    return conn.execute(stmt).rowcount
+        return conn.execute(stmt).rowcount
+    stmt = dialect.insert_ignore(_entries, values, index_elements=("key_hash",))
+    return inserted_count(conn.execute(stmt))
 
 
 def write_entry(conn: Connection, key_bytes: bytes, value_bytes: bytes, encrypted: bool) -> None:
@@ -60,8 +61,9 @@ def write_entry(conn: Connection, key_bytes: bytes, value_bytes: bytes, encrypte
 def ensure_entry(conn: Connection, key_bytes: bytes, value_bytes: bytes, encrypted: bool) -> bool:
     """Insert the entry only if absent; return ``True`` iff this call inserted the row.
 
-    Used by ``increment`` to materialize the row first, and by ``set(unless_exist=True)``: the
-    ``rowcount`` of ``ON CONFLICT DO NOTHING`` / ``INSERT IGNORE`` is 1 on insert, 0 on conflict.
+    Used by ``increment`` to materialize the row first, and by ``set(unless_exist=True)``.
+    Whether the insert happened comes from ``inserted_count`` (row-returning on Postgres,
+    ``rowcount`` elsewhere) — see ``Dialect.insert_ignore``.
     """
     return bool(_upsert(conn, _values(key_bytes, value_bytes, encrypted), overwrite=False))
 
