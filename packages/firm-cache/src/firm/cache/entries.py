@@ -7,6 +7,7 @@ the race the old check-then-insert had on Postgres/MySQL (SQLite hid it behind i
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Connection, delete, select
@@ -68,25 +69,39 @@ def ensure_entry(conn: Connection, key_bytes: bytes, value_bytes: bytes, encrypt
     return bool(_upsert(conn, _values(key_bytes, value_bytes, encrypted), overwrite=False))
 
 
-def read_entry(conn: Connection, key_bytes: bytes) -> bytes | None:
+def read_entry(
+    conn: Connection, key_bytes: bytes, *, min_created_at: datetime | None = None
+) -> bytes | None:
+    """Read a live entry. With ``min_created_at``, an older row reads as a miss — reads must
+    never serve entries past the cache's ``max_age`` just because eviction hasn't caught up."""
     kh = key_hash(key_bytes)
     row = conn.execute(
-        select(_entries.c.key, _entries.c.value).where(_entries.c.key_hash == kh)
+        select(_entries.c.key, _entries.c.value, _entries.c.created_at).where(
+            _entries.c.key_hash == kh
+        )
     ).first()
     if row is None or bytes(row.key) != key_bytes:  # guard against hash collisions
+        return None
+    if min_created_at is not None and row.created_at < min_created_at:
         return None
     return bytes(row.value)
 
 
-def read_entry_locked(conn: Connection, key_bytes: bytes) -> bytes | None:
+def read_entry_locked(
+    conn: Connection, key_bytes: bytes, *, min_created_at: datetime | None = None
+) -> bytes | None:
     """Like :func:`read_entry` but ``SELECT ... FOR UPDATE`` (Postgres/MySQL) so a concurrent
     ``increment`` of the same key waits its turn. A no-op lock on SQLite (the immediate
     transaction already serializes writers)."""
     kh = key_hash(key_bytes)
     row = conn.execute(
-        select(_entries.c.key, _entries.c.value).where(_entries.c.key_hash == kh).with_for_update()
+        select(_entries.c.key, _entries.c.value, _entries.c.created_at)
+        .where(_entries.c.key_hash == kh)
+        .with_for_update()
     ).first()
     if row is None or bytes(row.key) != key_bytes:
+        return None
+    if min_created_at is not None and row.created_at < min_created_at:
         return None
     return bytes(row.value)
 
