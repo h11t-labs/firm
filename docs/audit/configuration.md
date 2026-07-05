@@ -19,6 +19,7 @@ AuditLog(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
+| `on_error` | traceback to stderr | Callback for background-pruning failures. |
 
 Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
 

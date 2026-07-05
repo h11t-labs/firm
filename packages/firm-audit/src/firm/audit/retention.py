@@ -8,6 +8,7 @@ calls into this module. Pruning only happens via an explicit :meth:`Retention.ru
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -63,8 +64,13 @@ class Retention:
 class RetentionLoop(InterruptiblePoller):
     """Optional background loop that runs pruning on a timer. Off by default."""
 
-    def __init__(self, retention: Retention, interval: float = 3600.0) -> None:
-        super().__init__(interval, name="audit-retention")
+    def __init__(
+        self,
+        retention: Retention,
+        interval: float = 3600.0,
+        on_error: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        super().__init__(interval, name="audit-retention", on_error=on_error)
         self.retention = retention
 
     def poll(self) -> int:

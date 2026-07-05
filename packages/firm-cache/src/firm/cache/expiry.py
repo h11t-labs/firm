@@ -9,7 +9,6 @@ over the same rows.
 
 from __future__ import annotations
 
-import contextlib
 import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -49,8 +48,10 @@ class Expiry:
             self._pool.submit(self._safe_run)
 
     def _safe_run(self) -> None:
-        with contextlib.suppress(Exception):
+        try:
             self.run_once()
+        except Exception as exc:
+            self.cache.on_error(exc)
 
     def run_once(self) -> int:
         """Evict one batch if the cache is over a limit or holding aged-out entries."""
@@ -95,7 +96,7 @@ class ExpiryLoop(InterruptiblePoller):
     """Optional background loop that runs eviction on a timer."""
 
     def __init__(self, expiry: Expiry, interval: float = 60.0) -> None:
-        super().__init__(interval, name="cache-expiry")
+        super().__init__(interval, name="cache-expiry", on_error=expiry.cache.on_error)
         self.expiry = expiry
 
     def poll(self) -> int:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -105,8 +106,14 @@ def generate_name(kind: str) -> str:
 class HeartbeatPoller(InterruptiblePoller):
     """Refreshes a process's ``last_heartbeat_at`` on a timer."""
 
-    def __init__(self, engine: Engine, process_id: int, interval: float) -> None:
-        super().__init__(interval, name="heartbeat")
+    def __init__(
+        self,
+        engine: Engine,
+        process_id: int,
+        interval: float,
+        on_error: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        super().__init__(interval, name="heartbeat", on_error=on_error)
         self.engine = engine
         self.process_id = process_id
 

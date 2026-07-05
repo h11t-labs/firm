@@ -33,6 +33,7 @@ Cache(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `auto_expire` | `True` | Disable to evict only via `expiry.run_once()` / the background loop. |
 | `background_expiry` / `expiry_interval` | `False` / `60.0` | Opt-in timer-based eviction. |
+| `on_error` | traceback to stderr | Callback for background-eviction failures (`Exception` -> your handler). |
 
 Call `cache.close()` (or use the `with` form) to stop the background loop and dispose the engine.
 

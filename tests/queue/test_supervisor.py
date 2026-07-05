@@ -142,7 +142,7 @@ def test_fork_supervisor_heartbeats_its_own_row(runtime: Runtime, monkeypatch) -
     created: list[object] = []
 
     class _RecordingHeartbeat:
-        def __init__(self, engine: Engine, process_id: int, interval: float) -> None:
+        def __init__(self, engine: Engine, process_id: int, interval: float, on_error=None) -> None:
             self.process_id = process_id
             self.started = False
             self.stopped = False

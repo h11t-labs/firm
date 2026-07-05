@@ -9,8 +9,17 @@ just pollers with different ``poll()`` bodies.
 
 from __future__ import annotations
 
+import sys
 import threading
+import traceback
 from collections.abc import Callable
+
+
+def default_on_error(exc: BaseException) -> None:
+    """Last-resort error route for background loops: core can't import the queue's hooks
+    (layering) and the project bans stdlib logging, so an unrouted poll error is written to
+    stderr instead of vanishing. Callers override via ``on_error=``."""
+    traceback.print_exception(exc, file=sys.stderr)
 
 
 class InterruptiblePoller:
@@ -25,7 +34,7 @@ class InterruptiblePoller:
         self._interval = interval
         self._idle_interval = idle_interval if idle_interval is not None else interval
         self.name = name
-        self._on_error = on_error
+        self._on_error = on_error if on_error is not None else default_on_error
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -48,13 +57,11 @@ class InterruptiblePoller:
                     did = self.poll()
                 except Exception as exc:
                     did = 0
-                    if self._on_error is not None:
-                        self._on_error(exc)
+                    self._on_error(exc)
                 except BaseException as exc:
                     # Not a per-cycle error (SystemExit, interpreter teardown): surface it,
                     # then let the thread die loudly through on_stop instead of vanishing.
-                    if self._on_error is not None:
-                        self._on_error(exc)
+                    self._on_error(exc)
                     raise
                 wait = self._interval if did else self._idle_interval
                 if self._wake.wait(timeout=wait):

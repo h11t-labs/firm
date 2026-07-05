@@ -23,6 +23,7 @@ from .._core.process import HeartbeatPoller, ProcessInfo
 from . import __version__
 from .config import configure
 from .dispatcher import dispatch_once, run_maintenance
+from .hooks import HOOKS
 from .supervisor import (
     DispatcherConfig,
     ForkSupervisor,
@@ -118,7 +119,9 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
     worker = Worker(
         runtime, queues=tuple(queues.split(",")), threads=threads, process_id=process_id
     )
-    heartbeat = HeartbeatPoller(runtime.engine, process_id, _HEARTBEAT_INTERVAL)
+    heartbeat = HeartbeatPoller(
+        runtime.engine, process_id, _HEARTBEAT_INTERVAL, on_error=HOOKS.fire_error
+    )
     worker.start()
     heartbeat.start()
     try:
