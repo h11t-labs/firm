@@ -15,7 +15,7 @@ import getpass
 import ipaddress
 import os
 
-from . import auth
+from . import __version__, auth
 from .auth import Authenticator
 from .context import build_dashboard
 from .server import create_server
@@ -56,7 +56,13 @@ def main(argv: list[str] | None = None) -> None:
     if not dashboard.parts:
         parser.error("No firm tables found at the given URL(s); nothing to show.")
 
-    server = create_server(dashboard, args.host, args.port, authenticator=authenticator)
+    server = create_server(
+        dashboard,
+        args.host,
+        args.port,
+        authenticator=authenticator,
+        channel_trim_retention=args.channel_trim_retention,
+    )
     print(
         f"firm-ui → http://{args.host}:{args.port}  "
         f"tabs: {', '.join(dashboard.parts)}  auth: {auth_label}  (Ctrl-C to stop)"
@@ -73,6 +79,15 @@ def main(argv: list[str] | None = None) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="firm-ui", description="A small web dashboard for firm.")
+    parser.add_argument("--version", action="version", version=f"firm-ui, version {__version__}")
+    parser.add_argument(
+        "--channel-trim-retention",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Cutoff for the dashboard's channel-trim button (default: 1 day). Set it to your "
+        "app's Channel(message_retention=...) so a click never deletes messages the app keeps.",
+    )
     parser.add_argument(
         "--database-url",
         default=os.environ.get("FIRM_DATABASE_URL"),

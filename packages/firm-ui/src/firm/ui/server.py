@@ -8,6 +8,8 @@ route is guarded by whether that part (queue / cache / channel) is enabled on th
 from __future__ import annotations
 
 import re
+import sys
+import traceback
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -43,10 +45,12 @@ class DashboardServer(ThreadingHTTPServer):
         handler: type,
         dashboard: Dashboard,
         authenticator: Authenticator | None = None,
+        channel_trim_retention: float | None = None,
     ) -> None:
         super().__init__(address, handler)
         self.dashboard = dashboard
         self.authenticator = authenticator
+        self.channel_trim_retention = channel_trim_retention
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -73,6 +77,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
+
+    def _server_error(self, dash, exc: BaseException) -> None:
+        # Full traceback to stderr for the operator; a generic body for the client — the
+        # repr leaked query fragments and paths to anyone who could reach the port.
+        traceback.print_exception(exc, file=sys.stderr)
+        self._html(
+            render.error_page(dash.parts, "Internal error — details are in the server log."), 500
+        )
 
     def _not_found(self) -> None:
         self._html(render.not_found(self._dash.parts), 404)
@@ -185,7 +197,11 @@ class Handler(BaseHTTPRequestHandler):
                     state, page, params.get("queue", [None])[0], params.get("per_page", [None])[0]
                 )
             elif (match := re.fullmatch(r"/job/(\d+)", parsed.path)) and dash.queue is not None:
-                self._job(int(match.group(1)), params.get("queue", [None])[0])
+                job_id = _parse_id(match.group(1))
+                if job_id is None:
+                    self._not_found()
+                else:
+                    self._job(job_id, params.get("queue", [None])[0])
             elif parsed.path == "/cache" and dash.cache is not None:
                 self._cache(
                     max(1, _to_int(params.get("page", ["1"])[0], 1)),
@@ -210,11 +226,15 @@ class Handler(BaseHTTPRequestHandler):
                     params.get("per_page", [None])[0],
                 )
             elif (match := re.fullmatch(r"/audit/(\d+)", parsed.path)) and dash.audit is not None:
-                self._audit_detail(int(match.group(1)))
+                audit_id = _parse_id(match.group(1))
+                if audit_id is None:
+                    self._not_found()
+                else:
+                    self._audit_detail(audit_id)
             else:
                 self._not_found()
         except Exception as exc:  # never crash the server on a bad request
-            self._html(render.error_page(dash.parts, repr(exc)), 500)
+            self._server_error(dash, exc)
 
     def do_POST(self) -> None:
         dash = self._dash
@@ -244,10 +264,18 @@ class Handler(BaseHTTPRequestHandler):
                 actions.resume(dash.queue, unquote(m.group(1)))
                 self._redirect("/")
             elif (m := re.fullmatch(r"/job/(\d+)/retry", path)) and dash.queue is not None:
-                actions.retry(dash.queue, int(m.group(1)))
+                job_id = _parse_id(m.group(1))
+                if job_id is None:
+                    self._not_found()
+                    return
+                actions.retry(dash.queue, job_id)
                 self._redirect("/jobs?state=failed")
             elif (m := re.fullmatch(r"/job/(\d+)/discard", path)) and dash.queue is not None:
-                actions.discard(dash.queue, int(m.group(1)))
+                job_id = _parse_id(m.group(1))
+                if job_id is None:
+                    self._not_found()
+                    return
+                actions.discard(dash.queue, job_id)
                 self._redirect("/jobs?state=failed")
             elif path == "/failed/retry-all" and dash.queue is not None:
                 actions.retry_all(dash.queue)
@@ -256,12 +284,13 @@ class Handler(BaseHTTPRequestHandler):
                 actions.clear_cache(dash.cache)
                 self._redirect("/cache")
             elif path == "/channels/trim" and dash.channel is not None:
-                actions.trim_channel(dash.channel)
+                server = cast(DashboardServer, self.server)
+                actions.trim_channel(dash.channel, retention=server.channel_trim_retention)
                 self._redirect("/channels")
             else:
                 self._not_found()
         except Exception as exc:
-            self._html(render.error_page(dash.parts, repr(exc)), 500)
+            self._server_error(dash, exc)
 
     # -- pages ---------------------------------------------------------------------------------
 
@@ -300,10 +329,11 @@ class Handler(BaseHTTPRequestHandler):
         if state not in queries.STATES:
             state = "ready"
         per_page_n = self._per_page(per_page, render.JOBS_DEFAULT_PER_PAGE)
-        offset = (page - 1) * per_page_n
         with dash.queue.engine.connect() as conn:
-            jobs = queries.jobs_by_state(conn, state, limit=per_page_n, offset=offset, queue=queue)
             counts = queries.state_counts(conn, queue=queue)
+            page = _clamp_page(page, counts.get(state, 0), per_page_n)
+            offset = (page - 1) * per_page_n
+            jobs = queries.jobs_by_state(conn, state, limit=per_page_n, offset=offset, queue=queue)
         body = render.jobs_page(
             dash.parts,
             state,
@@ -331,11 +361,13 @@ class Handler(BaseHTTPRequestHandler):
         dash = self._dash
         assert dash.cache is not None
         per_page_n = self._per_page(per_page, render.CACHE_DEFAULT_PER_PAGE)
-        offset = (page - 1) * per_page_n
         with dash.cache.connect() as conn:
+            stats = cache_queries.cache_stats(conn)
+            page = _clamp_page(page, stats["entries"], per_page_n)
+            offset = (page - 1) * per_page_n
             body = render.cache_page(
                 dash.parts,
-                cache_queries.cache_stats(conn),
+                stats,
                 cache_queries.cache_recent(conn, limit=per_page_n, offset=offset),
                 page=page,
                 per_page=per_page_n,
@@ -351,12 +383,15 @@ class Handler(BaseHTTPRequestHandler):
         assert dash.channel is not None
         top_per_page_n = self._per_page(top_per_page, render.CHANNEL_TOP_DEFAULT_PER_PAGE)
         per_page_n = self._per_page(per_page, render.CHANNEL_MSG_DEFAULT_PER_PAGE)
-        top_offset = (top_page - 1) * top_per_page_n
-        offset = (page - 1) * per_page_n
         with dash.channel.connect() as conn:
+            stats = channel_queries.channel_stats(conn)
+            top_page = _clamp_page(top_page, stats["channels"], top_per_page_n)
+            page = _clamp_page(page, stats["messages"], per_page_n)
+            top_offset = (top_page - 1) * top_per_page_n
+            offset = (page - 1) * per_page_n
             body = render.channel_page(
                 dash.parts,
-                channel_queries.channel_stats(conn),
+                stats,
                 channel_queries.channel_top(conn, limit=top_per_page_n, offset=top_offset),
                 channel_queries.channel_recent(conn, limit=per_page_n, offset=offset),
                 top_page=top_page,
@@ -384,8 +419,16 @@ class Handler(BaseHTTPRequestHandler):
         sort = sort if sort in audit_queries.SORT_COLUMNS else render.AUDIT_DEFAULT_SORT
         dir = dir if dir in ("asc", "desc") else render.AUDIT_DEFAULT_DIR
         per_page_n = self._per_page(per_page, render.AUDIT_DEFAULT_PER_PAGE)
-        offset = (page - 1) * per_page_n
         with dash.audit.connect() as conn:
+            total = audit_queries.audit_count(
+                conn,
+                action=action,
+                subject=subject,
+                actor=actor,
+                correlation_id=correlation_id,
+            )
+            page = _clamp_page(page, total, per_page_n)
+            offset = (page - 1) * per_page_n
             body = render.audit_page(
                 dash.parts,
                 audit_queries.audit_stats(conn),
@@ -406,13 +449,7 @@ class Handler(BaseHTTPRequestHandler):
                     "actor": actor or "",
                     "correlation_id": correlation_id or "",
                 },
-                total=audit_queries.audit_count(
-                    conn,
-                    action=action,
-                    subject=subject,
-                    actor=actor,
-                    correlation_id=correlation_id,
-                ),
+                total=total,
                 page=page,
                 per_page=per_page_n,
                 sort=sort,
@@ -433,6 +470,24 @@ class Handler(BaseHTTPRequestHandler):
             self._html(render.audit_detail_page(dash.parts, event))
 
 
+_MAX_ID = 2**63 - 1  # BIGINT PKs; a longer digit run can't be a row id
+
+
+def _parse_id(raw: str) -> int | None:
+    """Parse a route id; None for values no BIGINT column can hold (-> 404, not a DBAPI
+    error surfacing as a 500)."""
+    value = int(raw)
+    return value if value <= _MAX_ID else None
+
+
+def _clamp_page(page: int, total: int, per_page: int) -> int:
+    """Clamp to the last real page, so the query offset always matches what the pager shows
+    (the pager clamps for display; an unclamped offset rendered an empty table under a pager
+    claiming rows exist)."""
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return min(max(page, 1), total_pages)
+
+
 def _to_int(value: str, default: int) -> int:
     try:
         return int(value)
@@ -446,8 +501,12 @@ def create_server(
     port: int,
     *,
     authenticator: Authenticator | None = None,
+    channel_trim_retention: float | None = None,
 ) -> DashboardServer:
-    return DashboardServer((host, port), Handler, dashboard, authenticator)
+    """``channel_trim_retention`` (seconds) controls the trim button's cutoff; None keeps the
+    1-day default. Set it to your app's ``Channel(message_retention=...)`` so a dashboard
+    click never deletes messages your app still retains."""
+    return DashboardServer((host, port), Handler, dashboard, authenticator, channel_trim_retention)
 
 
 def serve(
@@ -456,10 +515,17 @@ def serve(
     port: int = 8787,
     *,
     authenticator: Authenticator | None = None,
+    channel_trim_retention: float | None = None,
 ) -> None:
     """Create and run the dashboard server until interrupted. The caller owns ``dashboard`` and is
     responsible for closing it; this only manages the HTTP server's lifecycle."""
-    server = create_server(dashboard, host, port, authenticator=authenticator)
+    server = create_server(
+        dashboard,
+        host,
+        port,
+        authenticator=authenticator,
+        channel_trim_retention=channel_trim_retention,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

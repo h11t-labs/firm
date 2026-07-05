@@ -35,7 +35,9 @@ def channel_top(conn: Connection, limit: int = 25, offset: int = 0) -> list[dict
             func.max(_messages.c.created_at).label("last"),
         )
         .group_by(_messages.c.channel)
-        .order_by(func.count().desc())
+        # channel as tiebreaker: count-only ordering lets tied rows repeat/vanish across
+        # pages (audit_search uses an id tiebreaker for the same reason)
+        .order_by(func.count().desc(), _messages.c.channel)
         .limit(limit)
         .offset(offset)
     ).all()

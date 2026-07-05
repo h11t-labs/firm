@@ -118,24 +118,31 @@ class BasicAuth:
         self._password = password
         self._password_hash = password_hash
         self._challenge = {"WWW-Authenticate": f'Basic realm="{realm}", charset="UTF-8"'}
-        self._last_ok: str | None = None  # cache the last good header to skip re-hashing
+        self._last_ok: bytes | None = None  # cache the last good header to skip re-hashing
 
     def authenticate(self, req: AuthRequest) -> Allow | Deny:
         header = req.header("Authorization")
         # The browser re-sends credentials on every request (and the dashboard auto-refreshes), so
         # short-circuit a repeat of the last accepted header instead of hashing again each time.
-        if self._last_ok is not None and hmac.compare_digest(header, self._last_ok):
+        # Compare as bytes: compare_digest raises TypeError on non-ASCII str input, and the
+        # header arrives latin-1-decoded from the socket.
+        if self._last_ok is not None and hmac.compare_digest(
+            header.encode("latin-1", "replace"), self._last_ok
+        ):
             return Allow(self._username)
         if not header.startswith("Basic "):
             return self._deny()
         try:
             user, _, password = base64.b64decode(header[6:]).decode("utf-8").partition(":")
-        except (binascii.Error, UnicodeDecodeError):
+        except ValueError:
+            # Covers every malformed-header shape: binascii.Error (bad base64) and
+            # UnicodeDecodeError (non-UTF-8 credentials) are ValueError subclasses, and
+            # b64decode raises a plain ValueError for non-ASCII input. Deny, never crash.
             return self._deny()
         # Evaluate both checks regardless, so timing does not reveal whether the username matched.
         if not (self._user_ok(user) & self._password_ok(password)):
             return self._deny()
-        self._last_ok = header
+        self._last_ok = header.encode("latin-1", "replace")
         return Allow(self._username)
 
     def _user_ok(self, user: str) -> bool:

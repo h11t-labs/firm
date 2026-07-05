@@ -46,15 +46,21 @@ def clear_cache(engine: Engine) -> int:
         cache.close()
 
 
-def trim_channel(engine: Engine) -> int:
-    """Delete *all* channel messages older than the default retention (1 day) and return the total.
+def trim_channel(engine: Engine, retention: float | None = None) -> int:
+    """Delete *all* channel messages older than ``retention`` seconds (default: 1 day) and
+    return the total.
 
-    ``Channel.trim()`` removes a single batch (``trim_batch_size``), so one dashboard click loops
-    until everything expired is gone — matching the button's "older than 1 day" promise.
+    The dashboard can't see the owning app's ``Channel(message_retention=...)``, so operators
+    running a longer retention must pass it (``--channel-trim-retention`` / ``serve(...)``)
+    or one click silently deletes messages the app still keeps. ``Channel.trim()`` removes a
+    single batch (``trim_batch_size``), so this loops until everything expired is gone.
     """
     from firm.channel import Channel
 
-    channel = Channel(engine=engine, create_schema=False)
+    if retention is not None:
+        channel = Channel(engine=engine, create_schema=False, message_retention=retention)
+    else:
+        channel = Channel(engine=engine, create_schema=False)
     try:
         total = 0
         while True:

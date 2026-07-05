@@ -1,8 +1,9 @@
-"""firm-ui — a small, optional web dashboard for firm-queue.
+"""firm-ui — a small, optional web dashboard for all four firm modules.
 
 Run it with the ``firm-ui`` command (or ``python -m firm.ui``). It's a stdlib HTTP server
-(Jinja2 for templates) and nothing else in firm imports it — it's a pure, optional add-on that
-reads the queue tables and reuses the queue's own pause/resume/retry helpers.
+(Jinja2 for templates) and nothing else in firm imports it — a pure, optional add-on with a
+tab per part found in the database(s): queue (with pause/resume/retry/discard actions), cache,
+channel, and audit.
 
 The public API here is for running the dashboard from your own process — typically to put it
 behind your own authentication::
@@ -14,6 +15,8 @@ behind your own authentication::
 """
 
 from __future__ import annotations
+
+__version__ = "0.1.0"
 
 from .auth import (
     Allow,
@@ -36,6 +39,7 @@ __all__ = [
     "BasicAuth",
     "Deny",
     "ProxyHeaderAuth",
+    "__version__",
     "build_dashboard",
     "create_server",
     "hash_password",
