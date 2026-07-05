@@ -65,6 +65,24 @@ def deregister(engine: Engine, process_id: int) -> None:
         conn.execute(delete(_processes).where(_processes.c.id == process_id))
 
 
+def deregister_children(engine: Engine, supervisor_id: int) -> list[int]:
+    """Delete every process row registered under ``supervisor_id``; return their ids.
+
+    Used by the supervisor's shutdown: a child escalated to SIGKILL never deregisters
+    itself, and its leftover row would hide its claims from the absent-row recovery sweep.
+    """
+    with engine.begin() as conn:
+        children = [
+            row[0]
+            for row in conn.execute(
+                select(_processes.c.id).where(_processes.c.supervisor_id == supervisor_id)
+            )
+        ]
+        if children:
+            conn.execute(delete(_processes).where(_processes.c.id.in_(children)))
+        return children
+
+
 def prune_dead(engine: Engine, alive_threshold_s: float) -> list[int]:
     """Delete processes whose heartbeat is older than the threshold; return their ids."""
     cutoff = now_utc() - timedelta(seconds=alive_threshold_s)

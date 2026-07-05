@@ -222,6 +222,7 @@ class ForkSupervisor:
         self._children: dict[int, ChildConfig] = {}
         self._stop = threading.Event()
         self._immediate = False
+        self._heartbeat: HeartbeatPoller | None = None
 
     def start(self) -> None:
         """Fork children and supervise until a shutdown signal; blocks the caller."""
@@ -238,6 +239,14 @@ class ForkSupervisor:
         HOOKS.fire("supervisor_start")
         for child in self.config.child_configs():
             self._spawn(child)
+        # Heartbeat our own row (children heartbeat theirs): without it, a supervisor
+        # outliving alive_threshold would prune its *own* registration in _supervise and
+        # appear dead in the registry for the rest of its life. Started after forking so
+        # no child inherits the heartbeat thread.
+        self._heartbeat = HeartbeatPoller(
+            self.runtime.engine, self.process_id, self.config.heartbeat_interval
+        )
+        self._heartbeat.start()
         self._supervise()
         self._shutdown()
 
@@ -291,6 +300,9 @@ class ForkSupervisor:
 
     def _shutdown(self) -> None:
         HOOKS.fire("supervisor_stop")
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
+            self._heartbeat = None
         sig = signal.SIGKILL if self._immediate else signal.SIGTERM
         for pid in list(self._children):
             _signal_pid(pid, sig)
@@ -303,6 +315,15 @@ class ForkSupervisor:
             for pid in list(self._children):
                 _signal_pid(pid, signal.SIGKILL)
         self._reap_nohang()
+
+        # Children escalated to SIGKILL (or dead without cleanup) never deregistered; their
+        # leftover rows would hide their in-flight claims from the absent-row sweep below
+        # for up to alive_threshold (~6 minutes of job limbo after every hard shutdown).
+        # The parent knows exactly whom it spawned — clean up and recover explicitly.
+        if self.process_id is not None:
+            killed = process_registry.deregister_children(self.runtime.engine, self.process_id)
+            if killed:
+                recover_orphaned_claims(self.runtime, killed)
 
         recover_orphaned_claims(self.runtime)
         if self.process_id is not None:
