@@ -35,8 +35,10 @@ def stats(database_url: str | None) -> None:
 
 @main.command(help="Delete messages older than the retention window and exit.")
 @_db_option
-@click.option("--retention", default=86400.0, help="Retention in seconds (default 86400 = 1 day).")
-@click.option("--batch-size", default=100, help="Max rows to delete in one pass (default 100).")
+@click.option("--retention", default=86400.0, show_default=True, help="Retention in seconds.")
+@click.option(
+    "--batch-size", default=100, show_default=True, help="Max rows to delete in one pass."
+)
 def trim(database_url: str | None, retention: float, batch_size: int) -> None:
     engine = create_engine_for(_url(database_url))
     try:

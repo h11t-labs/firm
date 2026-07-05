@@ -453,14 +453,14 @@ import json
 ch.broadcast("room:42", json.dumps({"user": "ada", "text": "hi"}).encode())
 ```
 
-Tuning and cleanup. `polling_interval` (default `0.1`s) sets how often the listener checks for new rows; `trim()` deletes one batch of messages older than `message_retention` and returns the count deleted (this also happens automatically when `autotrim=True`):
+Tuning and cleanup. `polling_interval` (default `0.1`s) sets how often the listener checks for new rows; `trim()` deletes one batch of messages older than `message_retention` and returns the count deleted (this also happens automatically when `auto_trim=True`):
 
 ```python
 ch = Channel(
     database_url="sqlite:///channel.db",
     polling_interval=0.1,      # listener poll cadence, seconds
     message_retention=86400.0, # keep messages this long (seconds)
-    autotrim=True,             # trim opportunistically on broadcast
+    auto_trim=True,             # trim opportunistically on broadcast
     trim_batch_size=100,
 )
 
@@ -2817,7 +2817,7 @@ Channel(
     engine=None,              # a pre-built SQLAlchemy Engine, instead of database_url
     polling_interval=0.1,     # seconds the listener sleeps between polls
     message_retention=86400.0,# trim messages older than this many seconds (1 day)
-    autotrim=True,            # let broadcasts probabilistically trigger trimming
+    auto_trim=True,            # let broadcasts probabilistically trigger trimming
     trim_batch_size=100,      # rows per trim pass; also sets the trim-trigger rate (~2/N per write)
     create_schema=True,       # create firm_messages if missing
 )
@@ -2828,7 +2828,7 @@ Channel(
 | `database_url` / `engine` | — | Provide one. `engine` lets several `Channel`es share a pool; bare `postgresql://`/`mysql://` URLs are normalized to the shipped drivers. |
 | `polling_interval` | `0.1` | Lower = lower delivery latency, more queries; `0.1s` balances the two. |
 | `message_retention` | `86400.0` | Age cut-off for trimming (seconds). |
-| `autotrim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
+| `auto_trim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
 | `on_error` | traceback to stderr | Callback for listener/trim failures (subscriber-callback errors stay isolated). |
 | `trim_batch_size` | `100` | Trim batch + write-trigger rate (~`2/N`). |
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
@@ -2877,7 +2877,7 @@ firm-channel stats --database-url postgresql://localhost/myapp
 ### `trim` — delete old messages and exit
 
 Deletes a batch of messages older than the retention window and exits. Useful as a cron job, or if
-you run with `autotrim=False`.
+you run with `auto_trim=False`.
 
 ```bash
 firm-channel trim --retention 86400 --batch-size 100
@@ -2963,7 +2963,7 @@ DELETE FROM firm_messages WHERE id IN (...);
 ```
 
 `SKIP LOCKED` (via the shared dialect seam) means several processes can trim concurrently without
-deleting the same rows or blocking each other. Set `autotrim=False` to trim only via `trim()` / the
+deleting the same rows or blocking each other. Set `auto_trim=False` to trim only via `trim()` / the
 CLI / a cron.
 
 
@@ -3953,7 +3953,7 @@ cache.close()                       # or:  with Cache(...) as cache: ...
 from firm.channel import Channel
 
 channel = Channel("sqlite:///cable.db", engine=None, polling_interval=0.1,
-                  message_retention=86400.0, autotrim=True, trim_batch_size=100,
+                  message_retention=86400.0, auto_trim=True, trim_batch_size=100,
                   create_schema=True)
 
 channel.broadcast(name, payload)    # name/payload: str|bytes (str payloads are UTF-8 encoded)

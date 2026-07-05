@@ -7,8 +7,9 @@ conventions below. (For *using* the library, see [`llms.txt`](llms.txt); this fi
 ## What this is
 
 **firm** — pure-Python ports of the Rails Solid stack: `firm.queue` (background jobs),
-`firm.cache` (caching), `firm.channel` (pub/sub), plus an optional `firm.ui` dashboard and
-`firm.contrib` (Flask/FastAPI glue). No Redis; runs on SQLite/PostgreSQL/MySQL via SQLAlchemy.
+`firm.cache` (caching), `firm.channel` (pub/sub), and `firm.audit` (append-only audit log,
+original to firm), plus an optional `firm.ui` dashboard and `firm.contrib` (Flask/FastAPI
+glue). No Redis; runs on SQLite/PostgreSQL/MySQL via SQLAlchemy.
 
 ## Commands
 
@@ -53,8 +54,10 @@ module carries its own.
 
 ## Conventions
 
-- **Lineage:** name `solid_queue`/`solid_cache`/`solid_cable` ONLY in `README.md` and
-  `docs/comparison-to-rails.md`. Elsewhere use firm's own voice. All tables/indexes are `firm_*`.
+- **Lineage:** name `solid_queue`/`solid_cache`/`solid_cable` ONLY in `README.md`,
+  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`, and the packages'
+  PyPI `keywords`/`description` metadata (discoverability). Elsewhere — code, comments,
+  every other doc — use firm's own voice. All tables/indexes are `firm_*`.
 - **Independence:** queue/cache/channel never import each other; importing `firm.queue` pulls no
   heavy deps. Keep `ui`/`contrib` optional and isolated (lazy framework imports, behind extras).
 - **DB access:** go through `_core` (`transaction`/`immediate_transaction`/the `Dialect` seam);

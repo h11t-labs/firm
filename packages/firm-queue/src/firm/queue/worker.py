@@ -1,7 +1,8 @@
 """Worker — claim ready jobs and run them on a thread pool.
 
-:func:`run_ready` is the synchronous one-shot (claim a batch, run it inline) used by tests and
-the ``work`` one-off. :class:`Worker` is the long-running poller: each cycle claims up to
+:func:`run_ready` is the synchronous one-shot (claim a batch, run it inline) behind the
+``drain`` command and used directly by tests. :class:`Worker` is the long-running poller:
+each cycle claims up to
 ``threads`` jobs and runs them concurrently on a :class:`~concurrent.futures.ThreadPoolExecutor`.
 True multi-core parallelism comes from running several worker *processes* (the supervisor);
 threads here parallelize I/O-bound jobs (and CPU-bound ones under a free-threaded build).

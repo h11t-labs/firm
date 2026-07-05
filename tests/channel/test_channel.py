@@ -138,7 +138,7 @@ def test_listener_errors_reach_on_error(db_url, wait_for) -> None:
     from unittest import mock
 
     seen: list[BaseException] = []
-    ps = Channel(database_url=db_url, polling_interval=0.01, autotrim=False, on_error=seen.append)
+    ps = Channel(database_url=db_url, polling_interval=0.01, auto_trim=False, on_error=seen.append)
     try:
         ps.subscribe("room", lambda payload: None)
         with mock.patch(
