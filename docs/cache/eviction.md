@@ -14,6 +14,11 @@ Set any to `None` to disable it:
 Cache(database_url=..., max_age=3600, max_size=None, max_entries=100_000)
 ```
 
+`max_age` is also enforced at **read time**: an entry older than `max_age` reads as a miss
+(`get` returns `None`, `fetch` recomputes) even if eviction hasn't physically deleted the row
+yet — eviction is opportunistic, so an idle or read-heavy cache would otherwise keep serving
+stale data.
+
 ## How eviction runs
 
 Eviction is **FIFO** — oldest entries (smallest `id`) go first. A run pulls 3× the batch as

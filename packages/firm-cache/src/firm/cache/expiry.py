@@ -35,8 +35,11 @@ class Expiry:
     def __init__(self, cache: Cache) -> None:
         self.cache = cache
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bc-expiry")
+        self._closed = False
 
     def maybe_trigger(self, writes: int = 1) -> None:
+        if self._closed:  # a write after close() never schedules onto the dead pool
+            return
         per_write = (1.0 / self.cache.expiry_batch_size) * EXPIRY_MULTIPLIER
         expected = writes * per_write
         runs = int(expected)
@@ -81,7 +84,11 @@ class Expiry:
             return len(chosen)
 
     def shutdown(self) -> None:
-        self._pool.shutdown(wait=False)
+        # Drain any in-flight/queued eviction before the caller disposes the engine, so a
+        # late run never re-opens connections on an engine the caller believes is closed
+        # (mirrors Trimmer.shutdown in firm-channel).
+        self._closed = True
+        self._pool.shutdown(wait=True, cancel_futures=True)
 
 
 class ExpiryLoop(InterruptiblePoller):

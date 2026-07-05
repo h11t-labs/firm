@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Engine, delete, select
 
+from .._core.clock import now_utc
 from .._core.database import (
     create_engine_for,
     dispose_engine,
@@ -78,9 +80,23 @@ class Cache:
     def _kb(self, key: str | bytes) -> bytes:
         return normalize_key(key, self.max_key_bytesize)
 
+    def _min_created_at(self) -> datetime | None:
+        """Reads treat entries older than ``max_age`` as misses: eviction is opportunistic,
+        so an idle or read-heavy cache would otherwise serve arbitrarily stale data."""
+        if self.max_age is None:
+            return None
+        return now_utc() - timedelta(seconds=self.max_age)
+
+    def _multi_read_stmt(self, hashes: list[int]):
+        stmt = select(_entries.c.key, _entries.c.value).where(_entries.c.key_hash.in_(hashes))
+        min_created = self._min_created_at()
+        if min_created is not None:
+            stmt = stmt.where(_entries.c.created_at >= min_created)
+        return stmt
+
     def get(self, key: str | bytes) -> Any | None:
         with transaction(self.engine) as conn:
-            data = read_entry(conn, self._kb(key))
+            data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
         return None if data is None else self.coder.loads(data)
 
     def set(self, key: str | bytes, value: Any, *, unless_exist: bool = False) -> bool:
@@ -102,7 +118,7 @@ class Cache:
         # Decide hit/miss on row presence, not ``get() is not None`` — a stored ``None`` is a
         # hit (don't recompute it), exactly as a missing key is a miss.
         with transaction(self.engine) as conn:
-            data = read_entry(conn, self._kb(key))
+            data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
         if data is not None:
             return self.coder.loads(data)
         computed = default() if callable(default) else default
@@ -124,7 +140,9 @@ class Cache:
 
     def exist(self, key: str | bytes) -> bool:
         with transaction(self.engine) as conn:
-            return read_entry(conn, self._kb(key)) is not None
+            return (
+                read_entry(conn, self._kb(key), min_created_at=self._min_created_at()) is not None
+            )
 
     def get_multi(self, keys: Iterable[str | bytes]) -> dict[Any, Any]:
         key_list = list(keys)
@@ -132,9 +150,7 @@ class Cache:
         hashes = [key_hash(kb) for kb in kb_map.values()]
         result: dict[Any, Any] = dict.fromkeys(key_list)
         with transaction(self.engine) as conn:
-            rows = conn.execute(
-                select(_entries.c.key, _entries.c.value).where(_entries.c.key_hash.in_(hashes))
-            ).all()
+            rows = conn.execute(self._multi_read_stmt(hashes)).all()
         by_key = {bytes(row.key): bytes(row.value) for row in rows}
         for key in key_list:
             data = by_key.get(kb_map[key])
@@ -158,9 +174,7 @@ class Cache:
         kb_map = {key: self._kb(key) for key in key_list}
         hashes = [key_hash(kb) for kb in kb_map.values()]
         with transaction(self.engine) as conn:
-            rows = conn.execute(
-                select(_entries.c.key, _entries.c.value).where(_entries.c.key_hash.in_(hashes))
-            ).all()
+            rows = conn.execute(self._multi_read_stmt(hashes)).all()
         by_kb = {bytes(row.key): bytes(row.value) for row in rows}
         result: dict[Any, Any] = {}
         to_write: dict[bytes, bytes] = {}
@@ -187,7 +201,7 @@ class Cache:
         # Postgres/MySQL (after ensuring the row exists so there is something to lock).
         with immediate_transaction(self.engine) as conn:
             ensure_entry(conn, kb, zero, self.encrypted)
-            data = read_entry_locked(conn, kb)
+            data = read_entry_locked(conn, kb, min_created_at=self._min_created_at())
             current = int(self.coder.loads(data)) if data is not None else 0
             new_value = current + by
             write_entry(conn, kb, self.coder.dumps(new_value), self.encrypted)

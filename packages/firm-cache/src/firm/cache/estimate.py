@@ -1,8 +1,9 @@
 """Estimating total cache size without scanning every row.
 
 When the table is small (``count <= samples``) we just sum ``byte_size`` exactly. Above that we
-sum the ``samples`` largest rows exactly (the "outliers"), then sample a random ``key_hash``
-window — ``key_hash`` is uniformly distributed — for the rest and scale it up.
+sum the ``samples`` largest rows exactly (the "outliers"), then estimate the rest from a random
+``key_hash`` window sized to catch ~``samples`` rows (``key_hash`` is uniformly distributed over
+rows, so the fraction of hash space equals the fraction of rows caught).
 """
 
 from __future__ import annotations
@@ -23,13 +24,6 @@ def entry_count(conn: Connection) -> int:
     return conn.execute(select(func.count()).select_from(_entries)).scalar() or 0
 
 
-def id_span(conn: Connection) -> int:
-    row = conn.execute(select(func.min(_entries.c.id), func.max(_entries.c.id))).first()
-    if row is None or row[0] is None:
-        return 0
-    return int(row[1]) - int(row[0]) + 1
-
-
 def _exact_size(conn: Connection) -> int:
     return int(conn.execute(select(func.coalesce(func.sum(_entries.c.byte_size), 0))).scalar() or 0)
 
@@ -41,10 +35,14 @@ def estimate_size(conn: Connection, samples: int = 10000) -> int:
     if count <= samples:
         return _exact_size(conn)
 
-    span = id_span(conn)
-    sampled_fraction = min(samples / (span - samples), 1.0) if span > samples else 1.0
+    # Size the window by row *count*, not id span: after churn (deletes leave id holes,
+    # span >> count) a span-based fraction shrinks toward zero, the window catches ~no rows,
+    # and the estimator collapses to its worst-case fallback (min_outlier x every row) —
+    # systematically overestimating and over-evicting. key_hash is uniform over rows, so a
+    # fraction of the hash space captures that fraction of rows regardless of id holes.
+    sampled_fraction = min(samples / max(count - samples, 1), 1.0)
     if sampled_fraction >= 1.0:
-        # The id span is small enough that sampling buys nothing — sum exactly.
+        # Few enough rows that sampling buys nothing — sum exactly.
         return _exact_size(conn)
 
     outliers = conn.execute(

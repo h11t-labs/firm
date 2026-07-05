@@ -73,3 +73,52 @@ def test_no_eviction_when_under_limits(db_url: str) -> None:
         assert cache.expiry.run_once() == 0
     finally:
         cache.close()
+
+
+def test_write_after_close_does_not_raise(db_url) -> None:
+    """C-3: Expiry.shutdown() used shutdown(wait=False) with no closed-guard, so a straggler
+    set() after close() raised 'cannot schedule new futures after shutdown' from
+    maybe_trigger, and a queued eviction could run against the disposed engine."""
+    cache = Cache(database_url=db_url, auto_expire=True)
+    cache.set("a", 1)
+    cache.close()
+    # The write itself succeeds (the engine pool is rebuilt); the expiry trigger must be a
+    # silent no-op instead of an error.
+    cache.set("b", 2)
+
+
+def test_estimate_survives_id_holes_without_collapsing(db_url) -> None:
+    """C-4: the sample window used to be sized by id *span*; after churn (deletes leave
+    holes) the window caught ~no rows and the estimator fell back to min_outlier * count —
+    a systematic worst-case overestimate driving needless eviction."""
+    from sqlalchemy import insert
+
+    from firm._core.clock import now_utc
+    from firm.cache.estimate import estimate_size
+    from firm.cache.keys import key_hash
+
+    cache = Cache(database_url=db_url, auto_expire=False)
+    try:
+        with cache.engine.begin() as conn:
+            for i in range(30):
+                key = f"k{i}".encode()
+                # Huge id gaps simulate a heavily churned table (span >> count).
+                conn.execute(
+                    insert(schema.entries).values(
+                        id=1 + i * 1_000_000,
+                        key=key,
+                        value=b"x",
+                        key_hash=key_hash(key),
+                        byte_size=10_000 if i < 10 else 100,
+                        created_at=now_utc(),
+                    )
+                )
+        true_total = 10 * 10_000 + 20 * 100  # 102_000
+        with cache.engine.connect() as conn:
+            estimate = estimate_size(conn, samples=10)
+        # Span-based sizing produced ~300_000 here (outliers + min_outlier * the rest).
+        # The count-based window catches ~half the non-outliers, so the estimate lands on
+        # the true total (fallback probability ~1e-6).
+        assert estimate < 2 * true_total, f"estimate collapsed to worst case: {estimate}"
+    finally:
+        cache.close()
