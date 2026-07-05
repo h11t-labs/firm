@@ -117,9 +117,15 @@ def immediate_transaction(engine: Engine) -> Iterator[Connection]:
     double-claiming a job.
     """
     with engine.connect() as conn:
+        # conn.info lives on the pooled DBAPI connection and survives check-in, so the flag
+        # must be cleared on the way out — otherwise every later plain transaction() on this
+        # pooled connection would also BEGIN IMMEDIATE, needlessly serializing reads.
         conn.info[_IMMEDIATE_KEY] = True
-        with conn.begin():
-            yield conn
+        try:
+            with conn.begin():
+                yield conn
+        finally:
+            conn.info.pop(_IMMEDIATE_KEY, None)
 
 
 def dispose_engine(engine: Engine, *, close: bool = True) -> None:

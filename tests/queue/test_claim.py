@@ -87,3 +87,34 @@ def test_two_threads_never_double_claim(
     assert len(results) == len(set(results))
     assert count(schema.ready_executions) == 0
     assert count(schema.claimed_executions) == 50
+
+
+def test_immediate_flag_does_not_leak_to_later_transactions(tmp_path) -> None:
+    """conn.info survives pool check-in: without clearing the flag, one immediate
+    transaction turned every later plain transaction on that pooled connection into
+    BEGIN IMMEDIATE, serializing reads for the life of the connection (PLAN 2.2)."""
+    from sqlalchemy import event
+
+    from firm._core.database import (
+        create_engine_for,
+        immediate_transaction,
+        transaction,
+    )
+
+    engine = create_engine_for(f"sqlite:///{tmp_path / 'leak.db'}", pool_size=1, max_overflow=0)
+    begins: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, parameters, context, executemany) -> None:
+        if statement.startswith("BEGIN"):
+            begins.append(statement)
+
+    try:
+        with immediate_transaction(engine) as conn:
+            conn.exec_driver_sql("SELECT 1")
+        with transaction(engine) as conn:  # same pooled connection (pool of one)
+            conn.exec_driver_sql("SELECT 1")
+    finally:
+        engine.dispose()
+
+    assert begins == ["BEGIN IMMEDIATE", "BEGIN"]
