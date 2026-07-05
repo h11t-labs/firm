@@ -63,15 +63,17 @@ class Runtime:
             self._dialect = get_dialect(self.engine)
         return self._dialect
 
-    def reset(self) -> None:
-        """Drop pooled connections. Call this first thing in a forked child.
+    def reset(self, *, close: bool = True) -> None:
+        """Drop pooled connections. Call ``reset(close=False)`` first thing in a forked child:
+        the inherited connections are the parent's live sockets and must be dropped, not
+        closed (closing them would kill server sessions the parent still uses).
 
         An owned engine is recreated lazily from the URL on next use; a caller-provided
         engine is kept — ``dispose()`` already gives it a fresh pool.
         """
         with self._lock:
             if self._engine is not None:
-                dispose_engine(self._engine)
+                dispose_engine(self._engine, close=close)
             if self._provided_engine is None:
                 self._engine = None
             self._dialect = None
