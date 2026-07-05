@@ -153,3 +153,22 @@ def test_zombie_worker_does_not_finalize_reclaimed_job(
     assert count(schema.claimed_executions) == 0
     with engine.connect() as conn:
         assert conn.execute(select(schema.jobs.c.finished_at)).scalar() is not None
+
+
+def test_vanished_job_row_drops_claim_without_raising(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """If the job row disappears between claim and execution, execute_claimed must clean up
+    its claim and return False rather than raising NoResultFound into the worker thread."""
+    from sqlalchemy import delete as sa_delete
+
+    from firm.queue.claim import claim_ready
+    from firm.queue.results import execute_claimed
+
+    record_job.enqueue(9)
+    [job_id] = claim_ready(engine, runtime.dialect, ["*"], 5, None)
+    with engine.begin() as conn:
+        conn.execute(sa_delete(schema.jobs).where(schema.jobs.c.id == job_id))
+
+    assert execute_claimed(runtime, job_id) is False
+    assert count(schema.claimed_executions) == 0

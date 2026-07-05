@@ -50,7 +50,14 @@ def execute_claimed(runtime: Runtime, job_id: int, process_id: int | None = None
                 _jobs.c.attempts,
                 _jobs.c.concurrency_key,
             ).where(_jobs.c.id == job_id)
-        ).one()
+        ).first()
+
+    if row is None:
+        # The job row vanished between claim and execution (a concurrent discard/clear).
+        # Drop our claim and move on instead of raising NoResultFound into the worker.
+        with immediate_transaction(runtime.engine) as conn:
+            _delete_own_claim(conn, job_id, process_id)
+        return False
 
     concurrency_key = row.concurrency_key
     try:

@@ -53,16 +53,24 @@ def is_paused(runtime: Runtime, queue: str) -> bool:
 
 
 def clear(runtime: Runtime, queue: str) -> int:
-    """Discard all ready jobs in ``queue`` (deletes the jobs; cascades to executions)."""
-    with runtime.engine.begin() as conn:
-        job_ids = [
-            row[0]
-            for row in conn.execute(select(_ready.c.job_id).where(_ready.c.queue_name == queue))
-        ]
-        if not job_ids:
+    """Discard all ready jobs in ``queue`` (deletes the jobs; cascades to executions).
+
+    The ready rows are taken ``FOR UPDATE SKIP LOCKED`` inside a claim transaction and
+    deleted before the jobs: a row a worker is claiming right now is skipped (that job runs;
+    it is no longer "ready"), and a row we lock can't be claimed — so a clear can never
+    cascade-delete the claim of a job mid-run.
+    """
+    dialect = runtime.dialect
+    with dialect.begin_claim_tx(runtime.engine) as conn:
+        stmt = dialect.with_skip_locked(
+            select(_ready.c.id, _ready.c.job_id).where(_ready.c.queue_name == queue)
+        )
+        rows = conn.execute(stmt).all()
+        if not rows:
             return 0
-        conn.execute(delete(_jobs).where(_jobs.c.id.in_(job_ids)))
-        return len(job_ids)
+        conn.execute(delete(_ready).where(_ready.c.id.in_([row.id for row in rows])))
+        conn.execute(delete(_jobs).where(_jobs.c.id.in_([row.job_id for row in rows])))
+        return len(rows)
 
 
 def latency(runtime: Runtime, queue: str, now: datetime | None = None) -> float:
