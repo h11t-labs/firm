@@ -36,11 +36,15 @@ def message_count(conn: Connection) -> int:
 
 
 def fetch_since(conn: Connection, channel_hashes: Sequence[int], after_id: int) -> Sequence[Row]:
-    """Messages on the given channels with ``id > after_id``, oldest first."""
+    """Messages on the given channels with ``id > after_id``, oldest first.
+
+    ``created_at`` is included so the listener can advance its scan floor only past rows
+    older than the commit-grace window (see ``Channel._dispatch_new``).
+    """
     if not channel_hashes:
         return []
     stmt = (
-        select(_messages.c.id, _messages.c.channel, _messages.c.payload)
+        select(_messages.c.id, _messages.c.channel, _messages.c.payload, _messages.c.created_at)
         .where(_messages.c.channel_hash.in_(channel_hashes))
         .where(_messages.c.id > after_id)
         .order_by(_messages.c.id)
