@@ -8,7 +8,7 @@ Channel(
     engine=None,              # a pre-built SQLAlchemy Engine, instead of database_url
     polling_interval=0.1,     # seconds the listener sleeps between polls
     message_retention=86400.0,# trim messages older than this many seconds (1 day)
-    autotrim=True,            # let broadcasts probabilistically trigger trimming
+    auto_trim=True,            # let broadcasts probabilistically trigger trimming
     trim_batch_size=100,      # rows per trim pass; also sets the trim-trigger rate (~2/N per write)
     create_schema=True,       # create firm_messages if missing
 )
@@ -19,7 +19,7 @@ Channel(
 | `database_url` / `engine` | — | Provide one. `engine` lets several `Channel`es share a pool; bare `postgresql://`/`mysql://` URLs are normalized to the shipped drivers. |
 | `polling_interval` | `0.1` | Lower = lower delivery latency, more queries; `0.1s` balances the two. |
 | `message_retention` | `86400.0` | Age cut-off for trimming (seconds). |
-| `autotrim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
+| `auto_trim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
 | `on_error` | traceback to stderr | Callback for listener/trim failures (subscriber-callback errors stay isolated). |
 | `trim_batch_size` | `100` | Trim batch + write-trigger rate (~`2/N`). |
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |

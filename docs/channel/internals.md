@@ -69,5 +69,5 @@ DELETE FROM firm_messages WHERE id IN (...);
 ```
 
 `SKIP LOCKED` (via the shared dialect seam) means several processes can trim concurrently without
-deleting the same rows or blocking each other. Set `autotrim=False` to trim only via `trim()` / the
+deleting the same rows or blocking each other. Set `auto_trim=False` to trim only via `trim()` / the
 CLI / a cron.

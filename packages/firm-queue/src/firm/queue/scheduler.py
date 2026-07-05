@@ -62,7 +62,7 @@ class Scheduler:
         """Persist configured tasks to ``recurring_tasks``; drop any no longer configured.
 
         The static config is the source of truth, so a task removed from the config is removed
-        from the table on the next sync (matching solid_queue).
+        from the table on the next sync (upstream-compatible behavior).
         """
         keys = [task.key for task in self.tasks]
         with self.runtime.engine.begin() as conn:

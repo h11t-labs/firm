@@ -45,7 +45,7 @@ class Channel:
         engine: Engine | None = None,
         polling_interval: float = DEFAULT_POLLING_INTERVAL,
         message_retention: float = ONE_DAY_SECONDS,
-        autotrim: bool = True,
+        auto_trim: bool = True,  # named like the cache's auto_expire
         trim_batch_size: int = DEFAULT_TRIM_BATCH_SIZE,
         create_schema: bool = True,
         commit_grace: float = DEFAULT_COMMIT_GRACE_SECONDS,
@@ -63,7 +63,7 @@ class Channel:
         self.dialect = get_dialect(self.engine)
         self.polling_interval = polling_interval
         self.message_retention = message_retention
-        self.autotrim = autotrim
+        self.auto_trim = auto_trim
         self.trim_batch_size = trim_batch_size
         self.commit_grace = commit_grace
         # Listener/trim failures are routed here (default: traceback to stderr). Subscriber
@@ -93,7 +93,7 @@ class Channel:
         data = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
         with transaction(self.engine) as conn:
             messages.insert_message(conn, ch, data)
-        if self.autotrim:
+        if self.auto_trim:
             self.trimmer.maybe_trigger(1)
 
     def subscribe(self, channel: str | bytes, callback: Callback) -> None:

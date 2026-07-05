@@ -136,7 +136,7 @@ cache.close()                       # or:  with Cache(...) as cache: ...
 from firm.channel import Channel
 
 channel = Channel("sqlite:///cable.db", engine=None, polling_interval=0.1,
-                  message_retention=86400.0, autotrim=True, trim_batch_size=100,
+                  message_retention=86400.0, auto_trim=True, trim_batch_size=100,
                   create_schema=True)
 
 channel.broadcast(name, payload)    # name/payload: str|bytes (str payloads are UTF-8 encoded)

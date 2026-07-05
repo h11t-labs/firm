@@ -50,10 +50,10 @@ def test_trim_noop_when_all_recent(channel: Channel) -> None:
     assert channel.trim() == 0
 
 
-def test_autotrim_triggers_trim_on_broadcast(db_url: str) -> None:
+def test_auto_trim_triggers_trim_on_broadcast(db_url: str) -> None:
     # trim_batch_size=2 -> expected trims per write = (1/2) * TRIM_MULTIPLIER(2) = 1.0, so exactly
-    # one trim is submitted per broadcast with no randomness — making the autotrim path testable.
-    ps = Channel(database_url=db_url, autotrim=True, trim_batch_size=2)
+    # one trim is submitted per broadcast with no randomness — making the auto_trim path testable.
+    ps = Channel(database_url=db_url, auto_trim=True, trim_batch_size=2)
     try:
         with ps.engine.begin() as conn:
             conn.execute(
@@ -64,7 +64,7 @@ def test_autotrim_triggers_trim_on_broadcast(db_url: str) -> None:
                     created_at=now_utc() - timedelta(days=2),
                 )
             )
-        ps.broadcast("c", b"new")  # autotrim submits one async trim onto the background pool
+        ps.broadcast("c", b"new")  # auto_trim submits one async trim onto the background pool
         deadline = time.monotonic() + 2.0
         payloads: list[bytes] = []
         while time.monotonic() < deadline:
@@ -73,7 +73,7 @@ def test_autotrim_triggers_trim_on_broadcast(db_url: str) -> None:
             if b"old" not in payloads:
                 break
             time.sleep(0.02)
-        assert b"old" not in payloads  # the aged-out row was trimmed by the autotrim run
+        assert b"old" not in payloads  # the aged-out row was trimmed by the auto_trim run
         assert b"new" in payloads  # the fresh broadcast survived
     finally:
         ps.close()

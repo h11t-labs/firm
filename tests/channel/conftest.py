@@ -43,8 +43,8 @@ def db_url(backend: str, tmp_path) -> str:
 
 @pytest.fixture
 def channel(db_url: str) -> Iterator[Channel]:
-    # Fast polling + no autotrim keeps delivery tests quick and deterministic.
-    ps = Channel(database_url=db_url, polling_interval=0.01, autotrim=False)
+    # Fast polling + no auto_trim keeps delivery tests quick and deterministic.
+    ps = Channel(database_url=db_url, polling_interval=0.01, auto_trim=False)
     try:
         yield ps
     finally:

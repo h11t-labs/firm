@@ -2,7 +2,7 @@
 
 Each test cites its upstream counterpart. They mirror ``test_channel.py``: subscribe a callback
 that appends to a list, broadcast, then assert delivery via ``wait_for`` (the ``channel`` fixture
-polls every 0.01s with autotrim off, keeping delivery fast and deterministic).
+polls every 0.01s with auto_trim off, keeping delivery fast and deterministic).
 """
 
 from __future__ import annotations

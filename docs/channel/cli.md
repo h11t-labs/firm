@@ -19,7 +19,7 @@ firm-channel stats --database-url postgresql://localhost/myapp
 ### `trim` — delete old messages and exit
 
 Deletes a batch of messages older than the retention window and exits. Useful as a cron job, or if
-you run with `autotrim=False`.
+you run with `auto_trim=False`.
 
 ```bash
 firm-channel trim --retention 86400 --batch-size 100

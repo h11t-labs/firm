@@ -267,14 +267,14 @@ import json
 ch.broadcast("room:42", json.dumps({"user": "ada", "text": "hi"}).encode())
 ```
 
-Tuning and cleanup. `polling_interval` (default `0.1`s) sets how often the listener checks for new rows; `trim()` deletes one batch of messages older than `message_retention` and returns the count deleted (this also happens automatically when `autotrim=True`):
+Tuning and cleanup. `polling_interval` (default `0.1`s) sets how often the listener checks for new rows; `trim()` deletes one batch of messages older than `message_retention` and returns the count deleted (this also happens automatically when `auto_trim=True`):
 
 ```python
 ch = Channel(
     database_url="sqlite:///channel.db",
     polling_interval=0.1,      # listener poll cadence, seconds
     message_retention=86400.0, # keep messages this long (seconds)
-    autotrim=True,             # trim opportunistically on broadcast
+    auto_trim=True,             # trim opportunistically on broadcast
     trim_batch_size=100,
 )
 

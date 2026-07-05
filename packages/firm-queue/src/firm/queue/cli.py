@@ -1,4 +1,4 @@
-"""Command-line entry point: ``firm-queue start|work|dispatch|maintenance``.
+"""Command-line entry point: ``firm-queue start|work|drain|dispatch|maintenance``.
 
 Jobs live in the user's own modules, so commands take ``--import`` to load the modules that
 register them, and a database URL via ``--database-url`` or ``FIRM_QUEUE_DATABASE_URL``.
@@ -73,9 +73,9 @@ def main() -> None:
 @main.command(help="Run the full stack (workers + dispatcher).")
 @_db_option
 @_import_option
-@click.option("--queues", default="*", help="Comma-separated queue patterns.")
-@click.option("--threads", default=3, type=int)
-@click.option("--mode", type=click.Choice(["fork", "thread"]), default="fork")
+@click.option("--queues", default="*", show_default=True, help="Comma-separated queue patterns.")
+@click.option("--threads", default=3, type=int, show_default=True)
+@click.option("--mode", type=click.Choice(["fork", "thread"]), default="fork", show_default=True)
 def start(
     database_url: str | None, imports: tuple[str, ...], queues: str, threads: int, mode: str
 ) -> None:
@@ -99,8 +99,8 @@ def start(
 @main.command(help="Run a single worker until interrupted.")
 @_db_option
 @_import_option
-@click.option("--queues", default="*")
-@click.option("--threads", default=3, type=int)
+@click.option("--queues", default="*", show_default=True)
+@click.option("--threads", default=3, type=int, show_default=True)
 def work(database_url: str | None, imports: tuple[str, ...], queues: str, threads: int) -> None:
     runtime = _configure(database_url, imports)
     process_id = _register_worker_process(runtime, "worker")
@@ -126,8 +126,8 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
 @main.command(help="Drain ready jobs once and exit (no polling).")
 @_db_option
 @_import_option
-@click.option("--queues", default="*")
-@click.option("--limit", default=100, type=int)
+@click.option("--queues", default="*", show_default=True)
+@click.option("--limit", default=100, type=int, show_default=True)
 def drain(database_url: str | None, imports: tuple[str, ...], queues: str, limit: int) -> None:
     runtime = _configure(database_url, imports)
     process_id = _register_worker_process(runtime, "drain")
