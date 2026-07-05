@@ -56,7 +56,12 @@ def execute_claimed(runtime: Runtime, job_id: int) -> bool:
     args, kwargs = deserialize(row.arguments)
     try:
         job.perform(*args, **kwargs)
-    except Exception as exc:
+    except BaseException as exc:
+        # BaseException on purpose: a job body raising SystemExit/KeyboardInterrupt must
+        # still be finalized as a failure. Letting it escape would kill the worker's poll
+        # thread while its heartbeat keeps the process row fresh — the claim would then be
+        # neither finalized nor ever recovered (the process still looks alive), and the
+        # worker would silently stop processing inside an apparently healthy process.
         _finalize_failure(
             runtime, job_id, exc, row.attempts, job.retry_policy, concurrency_key, job.concurrency
         )
