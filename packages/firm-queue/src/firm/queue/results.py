@@ -95,8 +95,14 @@ def execute_claimed(runtime: Runtime, job_id: int, process_id: int | None = None
 def _release(
     conn, dialect: Dialect, concurrency_key: str | None, spec: ConcurrencySpec | None
 ) -> None:
-    if concurrency_key and spec is not None:
+    if not concurrency_key:
+        return
+    if spec is not None:
         semaphore.release_and_promote(conn, dialect, concurrency_key, spec.limit, spec.duration)
+    else:
+        # The class is unknown (spec unimportable) but the claim held a slot: hand it to the
+        # next blocked job instead of stranding the key until semaphore expiry (~3 min).
+        semaphore.forfeit_slot(conn, dialect, concurrency_key)
 
 
 def _preserve_finished(runtime: Runtime) -> bool:

@@ -112,6 +112,26 @@ def run_maintenance(runtime: Runtime, batch_size: int = DEFAULT_BATCH_SIZE) -> i
         # Failsafe: drop semaphores whose holder died without releasing.
         conn.execute(delete(_sem).where(_sem.c.expires_at < now))
 
+        # Failsafe promised by semaphore.py: blocked rows whose own expires_at passed are
+        # released to ready outright — whatever held their slot has long expired, and a
+        # crashed holder must not wedge the key until a lucky release comes along.
+        expired = conn.execute(
+            dialect.with_skip_locked(
+                select(_blocked.c.id, _blocked.c.job_id, _blocked.c.queue_name, _blocked.c.priority)
+                .where(_blocked.c.expires_at < now)
+                .limit(batch_size)
+            )
+        ).all()
+        for row in expired:
+            conn.execute(
+                insert(_ready).values(
+                    job_id=row.job_id, queue_name=row.queue_name, priority=row.priority
+                )
+            )
+        if expired:
+            conn.execute(delete(_blocked).where(_blocked.c.id.in_([r.id for r in expired])))
+            promoted += len(expired)
+
         # One representative class_name per blocked key (all jobs sharing a key share a spec).
         keyed = conn.execute(
             select(_blocked.c.concurrency_key, func.min(_jobs.c.class_name))

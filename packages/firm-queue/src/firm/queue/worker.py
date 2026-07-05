@@ -73,5 +73,10 @@ class Worker(InterruptiblePoller):
             for job_id in claimed
         ]
         for future in futures:
-            future.result()
+            try:
+                future.result()
+            except Exception as exc:
+                # Surface every infrastructure failure and keep retrieving the remaining
+                # futures — aborting on the first would drop the siblings' exceptions.
+                HOOKS.fire_error(exc)
         return len(claimed)

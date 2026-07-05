@@ -12,7 +12,7 @@ Routing rules:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Connection, insert
@@ -67,6 +67,11 @@ def enqueue(
 ) -> int | None:
     """Persist ``job`` and return its ``job_id`` (``None`` if discarded on conflict)."""
     rt = runtime or current_runtime()
+    if scheduled_at is not None and scheduled_at.tzinfo is not None:
+        # Timestamps are naive UTC internally, but the idiomatic
+        # datetime.now(UTC) + timedelta must work rather than blow up comparing
+        # aware vs naive.
+        scheduled_at = scheduled_at.astimezone(UTC).replace(tzinfo=None)
     args_blob = serialize(args, kwargs)
     now = now_utc()
     effective_scheduled = scheduled_at or now

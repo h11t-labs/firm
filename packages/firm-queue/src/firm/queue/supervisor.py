@@ -61,6 +61,7 @@ class SupervisorConfig:
     workers: list[WorkerConfig] = field(default_factory=lambda: [WorkerConfig()])
     dispatchers: list[DispatcherConfig] = field(default_factory=lambda: [DispatcherConfig()])
     recurring: list[RecurringTask] = field(default_factory=list)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     alive_threshold: float = 300.0
     shutdown_timeout: float = 5.0
     heartbeat_interval: float = 60.0
@@ -75,7 +76,7 @@ class SupervisorConfig:
     def child_configs(self) -> list[ChildConfig]:
         children: list[ChildConfig] = [*self.workers, *self.dispatchers]
         if self.recurring:
-            children.append(SchedulerConfig())
+            children.append(self.scheduler)
         return children
 
 
@@ -174,9 +175,6 @@ def _run_child(
     runtime: Runtime, supervisor_config: SupervisorConfig, child: ChildConfig, supervisor_id: int
 ) -> int:
     """Body of a forked child: register, run loops + heartbeat, drain on SIGTERM."""
-    # Drop (not close) the connections inherited from the parent: they are the parent's live
-    # sockets, and closing them here would terminate server sessions the parent still holds.
-    runtime.reset(close=False)
     stop = threading.Event()
 
     def _graceful(_signum: int, _frame: FrameType | None) -> None:
@@ -185,9 +183,15 @@ def _run_child(
     def _immediate(_signum: int, _frame: FrameType | None) -> None:
         os._exit(1)
 
+    # Handlers first: between fork and here the child still runs the *parent's* handlers,
+    # and a SIGTERM in that window would set the parent's stop event copy, not ours.
     signal.signal(signal.SIGTERM, _graceful)
     signal.signal(signal.SIGINT, _graceful)
     signal.signal(signal.SIGQUIT, _immediate)
+
+    # Drop (not close) the connections inherited from the parent: they are the parent's live
+    # sockets, and closing them here would terminate server sessions the parent still holds.
+    runtime.reset(close=False)
 
     kind = _kind_of(child)
     process_id = process_registry.register(

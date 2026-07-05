@@ -165,3 +165,16 @@ def test_fork_supervisor_heartbeats_its_own_row(runtime: Runtime, monkeypatch) -
     heartbeat = created[0]
     assert heartbeat.started and heartbeat.stopped
     assert isinstance(heartbeat.process_id, int)
+
+
+def test_scheduler_config_is_reachable_through_supervisor_config() -> None:
+    """QL-5: SupervisorConfig always built SchedulerConfig() with defaults, making its
+    poll_interval unreachable; it is now a configurable field."""
+    from firm.queue.scheduler import RecurringTask
+    from firm.queue.supervisor import SchedulerConfig
+
+    config = SupervisorConfig(
+        recurring=[RecurringTask(key="t", schedule="* * * * *", job=gated_job)],
+        scheduler=SchedulerConfig(poll_interval=9.0),
+    )
+    assert config.child_configs()[-1].poll_interval == 9.0
