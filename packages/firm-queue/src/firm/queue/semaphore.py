@@ -38,16 +38,30 @@ def _decrement(conn: Connection, key: str, expires: datetime, now: datetime) -> 
 
 
 def acquire(conn: Connection, key: str, limit: int, duration_s: float) -> bool:
-    """Take one unit of capacity for ``key``; return ``True`` if acquired, ``False`` if full."""
+    """Take one unit of capacity for ``key``; return ``True`` if acquired, ``False`` if full.
+
+    A ``False`` means the caller inserts a blocked row in this same transaction. The
+    exhausted path therefore re-checks under ``SELECT ... FOR UPDATE`` (a no-op lock on
+    SQLite, whose immediate transaction already serializes writers): the failed decrement
+    locks nothing on Postgres/MySQL, so without the lock a concurrent ``release_and_promote``
+    could run entirely between the failed decrement and the blocked-row commit — seeing no
+    blocked row yet and leaving the slot free while the job waits for the maintenance pass
+    (10 minutes by default). Holding the row lock forces that release to land either before
+    the re-check (we take the freed slot) or after our blocked row is visible (it promotes).
+    """
     now = now_utc()
     expires = now + timedelta(seconds=duration_s)
 
     if _decrement(conn, key, expires, now):
         return True
 
-    # A row exists but is exhausted -> blocked.
-    if conn.execute(select(_sem.c.id).where(_sem.c.key == key)).first() is not None:
-        return False
+    row = conn.execute(
+        select(_sem.c.id, _sem.c.value).where(_sem.c.key == key).with_for_update()
+    ).first()
+    if row is not None:
+        if row.value > 0:  # a release slipped in since the failed decrement
+            return _decrement(conn, key, expires, now)
+        return False  # genuinely exhausted; the row stays locked until we commit
 
     # No row yet -> create it already holding one unit (value = limit - 1).
     try:
