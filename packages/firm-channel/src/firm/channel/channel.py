@@ -4,6 +4,12 @@
 background :class:`Listener` that polls for new rows on the subscribed channels and hands each
 payload to the matching callbacks. A subscriber only receives messages broadcast *after* it
 subscribed; delivery is per-process (every process running a ``Channel`` sees every broadcast).
+
+Delivery guarantee: on Postgres/MySQL concurrent broadcasters can commit out of id order, so
+the listener re-scans a bounded window instead of trusting a max-id watermark — a message is
+delivered as long as its transaction commits within ``commit_grace`` seconds of executing the
+insert (and broadcaster/listener clocks agree within the same margin). Re-scanned rows are
+de-duplicated, so callbacks still see each message once per subscription.
 """
 
 from __future__ import annotations
@@ -11,9 +17,11 @@ from __future__ import annotations
 import contextlib
 import threading
 from collections.abc import Callable
+from datetime import timedelta
 
 from sqlalchemy import Engine
 
+from .._core.clock import now_utc
 from .._core.database import create_engine_for, dispose_engine, transaction
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
@@ -26,6 +34,7 @@ Callback = Callable[[bytes], None]
 DEFAULT_POLLING_INTERVAL = 0.1
 ONE_DAY_SECONDS = 24 * 3600.0
 DEFAULT_TRIM_BATCH_SIZE = 100
+DEFAULT_COMMIT_GRACE_SECONDS = 5.0
 
 
 class Channel:
@@ -39,6 +48,7 @@ class Channel:
         autotrim: bool = True,
         trim_batch_size: int = DEFAULT_TRIM_BATCH_SIZE,
         create_schema: bool = True,
+        commit_grace: float = DEFAULT_COMMIT_GRACE_SECONDS,
     ) -> None:
         if engine is not None:
             self.engine = engine
@@ -54,14 +64,21 @@ class Channel:
         self.message_retention = message_retention
         self.autotrim = autotrim
         self.trim_batch_size = trim_batch_size
+        self.commit_grace = commit_grace
 
         if create_schema:
             schema.create_all(self.engine)
 
         self._lock = threading.Lock()
         self._subscribers: dict[bytes, list[Callback]] = {}
-        self._channel_last_id: dict[bytes, int] = {}
-        self._global_last_id = 0
+        # Per-channel subscription anchor: only ids above it are delivered, so a fresh
+        # subscription never replays the pre-existing backlog.
+        self._channel_anchor: dict[bytes, int] = {}
+        # Scan floor: every id <= floor was either delivered or has out-waited commit_grace.
+        # The listener re-queries everything above it and de-duplicates via _delivered, which
+        # holds the already-dispatched ids still inside the re-scan window.
+        self._scan_floor = 0
+        self._delivered: set[int] = set()
         self._listener: Listener | None = None
         self.trimmer = Trimmer(self)
 
@@ -83,12 +100,11 @@ class Channel:
             self._ensure_listener_locked()
             if ch not in self._subscribers:
                 self._subscribers[ch] = []
-                # A fresh channel only sees messages from now on, not the existing backlog. Anchor
-                # its cursor to the *current* max id rather than the global cursor — the global
-                # cursor only tracks subscribed channels, so it lags behind broadcasts made to a
-                # channel while nobody was listening to it yet (which would otherwise replay).
+                # A fresh channel only sees messages from now on, not the existing backlog.
+                # Anchor at the current max id — a broadcast whose insert raced this subscribe
+                # counts as "before subscribe" and is not delivered.
                 with transaction(self.engine) as conn:
-                    self._channel_last_id[ch] = messages.current_max_id(conn)
+                    self._channel_anchor[ch] = messages.current_max_id(conn)
             self._subscribers[ch].append(callback)
 
     def unsubscribe(self, channel: str | bytes, callback: Callback) -> None:
@@ -102,7 +118,7 @@ class Channel:
                 callbacks.remove(callback)
             if not callbacks:
                 del self._subscribers[ch]
-                self._channel_last_id.pop(ch, None)
+                self._channel_anchor.pop(ch, None)
 
     def trim(self) -> int:
         """Delete a batch of messages older than ``message_retention``. Returns how many."""
@@ -125,47 +141,60 @@ class Channel:
     # -- internals ---------------------------------------------------------------------------
 
     def _ensure_listener_locked(self) -> None:
-        """Start the listener thread once, anchoring ``_global_last_id`` at the current max id so
+        """Start the listener thread once, anchoring the scan floor at the current max id so
         no pre-existing message is delivered. Caller holds ``self._lock``."""
         if self._listener is None:
             with transaction(self.engine) as conn:
-                self._global_last_id = messages.current_max_id(conn)
+                self._scan_floor = messages.current_max_id(conn)
             self._listener = Listener(self, self.polling_interval)
             self._listener.start()
 
     def _dispatch_new(self) -> int:
-        """One listener cycle: fetch messages newer than ``_global_last_id`` on subscribed channels
-        and hand each to its callbacks. Returns the number of (callback) deliveries made."""
+        """One listener cycle: fetch messages above the scan floor on subscribed channels and
+        hand each undelivered one to its callbacks. Returns the number of deliveries made.
+
+        Concurrent broadcasters can commit out of id order (Postgres/MySQL), so a plain
+        max-id watermark would skip a lower id that commits after a higher one was seen.
+        Instead the floor only advances past rows older than ``commit_grace`` — id order
+        tracks insert order, so everything below such a row has either committed (and been
+        fetched) or sat uncommitted longer than the grace period — and the window above the
+        floor is re-scanned each cycle with ``_delivered`` preventing duplicate dispatch.
+        """
         with self._lock:
             if not self._subscribers:
                 return 0
             channels = list(self._subscribers.keys())
-            after = self._global_last_id
+            floor = self._scan_floor
         hashes = [channel_hash(c) for c in channels]
+        cutoff = now_utc() - timedelta(seconds=self.commit_grace)
 
         with transaction(self.engine) as conn:
-            rows = messages.fetch_since(conn, hashes, after)
+            rows = messages.fetch_since(conn, hashes, floor)
 
         delivered = 0
+        confirmed_floor = floor
         for row in rows:
             ch = bytes(row.channel)
             payload = bytes(row.payload)
             message_id = int(row.id)
+            if row.created_at <= cutoff:
+                confirmed_floor = max(confirmed_floor, message_id)
             with self._lock:
-                # Advance the global cursor past every fetched row (including channel_hash
-                # collisions for channels we don't actually subscribe to).
-                self._global_last_id = max(self._global_last_id, message_id)
                 callbacks = self._subscribers.get(ch)
-                last = self._channel_last_id.get(ch)
-                if callbacks is None or (last is not None and last >= message_id):
+                anchor = self._channel_anchor.get(ch, 0)
+                if callbacks is None or message_id <= anchor or message_id in self._delivered:
                     continue
-                self._channel_last_id[ch] = message_id
+                self._delivered.add(message_id)
                 targets = list(callbacks)
             for callback in targets:
                 # A subscriber error never breaks the listener or the other subscribers.
                 with contextlib.suppress(Exception):
                     callback(payload)
                 delivered += 1
+        with self._lock:
+            if confirmed_floor > self._scan_floor:
+                self._scan_floor = confirmed_floor
+                self._delivered = {i for i in self._delivered if i > confirmed_floor}
         return delivered
 
 
