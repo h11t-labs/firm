@@ -2,34 +2,19 @@
 
 from __future__ import annotations
 
-import os
-
-try:
-    import click
-except ImportError as exc:  # pragma: no cover - exercised only without the 'cache' extra
-    raise ImportError(
-        'The firm-cache CLI requires "click". Install the cache extra: pip install "firm[cache]"'
-    ) from exc
-
+from .._core.cli import db_option, require_click, require_url
 from .._core.database import create_engine_for, dispose_engine, transaction
 from . import __version__
 from .estimate import entry_count, estimate_size
 from .store import Cache
 
-_db_option = click.option(
-    "--database-url",
-    default=None,
-    help="SQLAlchemy URL (or set FIRM_CACHE_DATABASE_URL).",
-)
+click = require_click("cache")
+
+_db_option = db_option("FIRM_CACHE_DATABASE_URL")
 
 
 def _url(database_url: str | None) -> str:
-    url = database_url or os.environ.get("FIRM_CACHE_DATABASE_URL")
-    if not url:
-        raise click.UsageError(
-            "No database URL: pass --database-url or set FIRM_CACHE_DATABASE_URL."
-        )
-    return url
+    return require_url(database_url, "FIRM_CACHE_DATABASE_URL")
 
 
 @click.group(help="firm-cache — database-backed cache store.")

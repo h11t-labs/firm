@@ -10,14 +10,8 @@ import importlib
 import os
 import time
 
-try:
-    import click
-except ImportError as exc:  # pragma: no cover - exercised only without the 'queue' extra
-    raise ImportError(
-        'The firm-queue CLI requires "click". Install the queue extra: pip install "firm[queue]"'
-    ) from exc
-
 from .._core import process as process_registry
+from .._core.cli import db_option, require_click, require_url
 from .._core.config import Runtime
 from .._core.process import HeartbeatPoller, ProcessInfo
 from . import __version__
@@ -32,6 +26,8 @@ from .supervisor import (
     WorkerConfig,
 )
 from .worker import Worker, run_ready
+
+click = require_click("queue")
 
 # Matches SupervisorConfig.heartbeat_interval; the standalone commands have no supervisor
 # config to read it from.
@@ -52,11 +48,7 @@ def _register_worker_process(runtime: Runtime, kind_name: str) -> int:
     )
 
 
-_db_option = click.option(
-    "--database-url",
-    default=None,
-    help="SQLAlchemy URL (or set FIRM_QUEUE_DATABASE_URL).",
-)
+_db_option = db_option("FIRM_QUEUE_DATABASE_URL")
 _import_option = click.option(
     "--import",
     "imports",
@@ -66,11 +58,7 @@ _import_option = click.option(
 
 
 def _configure(database_url: str | None, imports: tuple[str, ...]) -> Runtime:
-    url = database_url or os.environ.get("FIRM_QUEUE_DATABASE_URL")
-    if not url:
-        raise click.UsageError(
-            "No database URL: pass --database-url or set FIRM_QUEUE_DATABASE_URL."
-        )
+    url = require_url(database_url, "FIRM_QUEUE_DATABASE_URL")
     for module in imports:
         importlib.import_module(module)
     return configure(database_url=url)

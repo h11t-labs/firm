@@ -13,29 +13,26 @@ from __future__ import annotations
 from sqlalchemy import (
     BigInteger,
     Column,
-    DateTime,
     Index,
-    Integer,
     LargeBinary,
     MetaData,
     Table,
 )
-from sqlalchemy.dialects.mysql import DATETIME as MYSQL_DATETIME
-from sqlalchemy.dialects.mysql import LONGBLOB
 from sqlalchemy.dialects.mysql import VARBINARY as MYSQL_VARBINARY
 from sqlalchemy.engine import Connection, Engine
 
 from .._core.clock import now_utc
+from .._core.schema import dt_type, long_blob, pk_bigint
 from .._core.schema_setup import create_all_and_stamp, drop_all_and_unstamp
 
 metadata = MetaData()
 
 VERSION_TABLE = "firm_channel_alembic_version"
 
-# Payloads can be large; map to MySQL LONGBLOB (plain BLOB caps at 64 KiB). Postgres uses BYTEA and
+# Payloads use the shared long-binary helper. Postgres uses BYTEA and
 # SQLite a BLOB regardless of length. created_at needs sub-second precision on MySQL.
-_PAYLOAD_TYPE = LargeBinary().with_variant(LONGBLOB, "mysql")
-_DT = DateTime().with_variant(MYSQL_DATETIME(fsp=6), "mysql")
+_PAYLOAD_TYPE = long_blob()
+_DT = dt_type()
 # ``channel`` is indexed, so on MySQL it is a VARBINARY rather than a BLOB (a BLOB can't be indexed
 # without a key-prefix length). Postgres/SQLite store it as BYTEA/BLOB.
 _CHANNEL_TYPE = LargeBinary(1024).with_variant(MYSQL_VARBINARY(1024), "mysql")
@@ -43,7 +40,7 @@ _CHANNEL_TYPE = LargeBinary(1024).with_variant(MYSQL_VARBINARY(1024), "mysql")
 messages = Table(
     "firm_messages",
     metadata,
-    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True),
+    Column("id", pk_bigint(), primary_key=True),
     Column("channel", _CHANNEL_TYPE, nullable=False),
     Column("payload", _PAYLOAD_TYPE, nullable=False),
     Column("channel_hash", BigInteger, nullable=False),

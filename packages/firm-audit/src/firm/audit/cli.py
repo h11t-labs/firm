@@ -2,36 +2,21 @@
 
 from __future__ import annotations
 
-import os
-
-try:
-    import click
-except ImportError as exc:  # pragma: no cover - exercised only without the 'audit' extra
-    raise ImportError(
-        'The firm-audit CLI requires "click". Install the audit extra: pip install "firm[audit]"'
-    ) from exc
-
 from sqlalchemy import func, select
 
+from .._core.cli import db_option, require_click, require_url
 from .._core.database import create_engine_for, dispose_engine, transaction
 from . import __version__, schema
 from .events import history as query_history
 from .log import AuditLog
 
-_db_option = click.option(
-    "--database-url",
-    default=None,
-    help="SQLAlchemy URL (or set FIRM_AUDIT_DATABASE_URL).",
-)
+click = require_click("audit")
+
+_db_option = db_option("FIRM_AUDIT_DATABASE_URL")
 
 
 def _url(database_url: str | None) -> str:
-    url = database_url or os.environ.get("FIRM_AUDIT_DATABASE_URL")
-    if not url:
-        raise click.UsageError(
-            "No database URL: pass --database-url or set FIRM_AUDIT_DATABASE_URL."
-        )
-    return url
+    return require_url(database_url, "FIRM_AUDIT_DATABASE_URL")
 
 
 @click.group(help="firm-audit — append-only, database-backed audit log.")
