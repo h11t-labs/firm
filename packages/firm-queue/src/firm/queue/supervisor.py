@@ -171,7 +171,9 @@ def _run_child(
     runtime: Runtime, supervisor_config: SupervisorConfig, child: ChildConfig, supervisor_id: int
 ) -> int:
     """Body of a forked child: register, run loops + heartbeat, drain on SIGTERM."""
-    runtime.reset()  # never reuse the parent's SQLite handles
+    # Drop (not close) the connections inherited from the parent: they are the parent's live
+    # sockets, and closing them here would terminate server sessions the parent still holds.
+    runtime.reset(close=False)
     stop = threading.Event()
 
     def _graceful(_signum: int, _frame: FrameType | None) -> None:

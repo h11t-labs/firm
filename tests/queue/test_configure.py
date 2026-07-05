@@ -70,3 +70,28 @@ def test_configure_carries_queue_settings(db_url: str) -> None:
     assert settings.preserve_finished_jobs is False
     assert settings.pool_size == 5
     rt.reset()
+
+
+def test_reset_close_false_drops_but_does_not_close_inherited_pool(monkeypatch, tmp_path) -> None:
+    """A forked child must dispose the inherited pool with close=False: the pooled
+    connections are the parent's live sockets (SQLAlchemy's post-fork recipe, Q-F5)."""
+    from firm._core.config import Runtime, Settings
+
+    url = f"sqlite:///{tmp_path / 'reset.db'}"
+    rt = Runtime(Settings(database_url=url))
+    engine = rt.engine  # build the lazy engine
+    seen: dict[str, bool] = {}
+
+    def _recording_dispose(close: bool = True) -> None:
+        seen["close"] = close
+
+    monkeypatch.setattr(engine, "dispose", _recording_dispose)
+    rt.reset(close=False)
+    assert seen["close"] is False
+
+    # Genuine shutdown still closes: the connections are ours then.
+    rt2 = Runtime(Settings(database_url=url))
+    engine2 = rt2.engine
+    monkeypatch.setattr(engine2, "dispose", _recording_dispose)
+    rt2.reset()
+    assert seen["close"] is True

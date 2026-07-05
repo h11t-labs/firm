@@ -122,7 +122,12 @@ def immediate_transaction(engine: Engine) -> Iterator[Connection]:
             yield conn
 
 
-def dispose_engine(engine: Engine) -> None:
-    """Dispose an engine's pool. Call this first thing in a forked child so it never reuses a
-    SQLite file handle / pooled connection inherited from the parent."""
-    engine.dispose()
+def dispose_engine(engine: Engine, *, close: bool = True) -> None:
+    """Dispose an engine's pool.
+
+    Pass ``close=False`` from a forked child: the child must *drop* the pooled connections it
+    inherited without closing them — they are the parent's live sockets (SQLAlchemy's
+    documented post-fork recipe). ``close=True`` (the default) is for genuine shutdown, where
+    the connections belong to us and must be closed.
+    """
+    engine.dispose(close=close)
