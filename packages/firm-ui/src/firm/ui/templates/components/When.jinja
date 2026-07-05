@@ -1,0 +1,6 @@
+{#def value #}
+{% if value is none %}
+<Dash />
+{% else %}
+<span title="{{ value | dt }}">{{ value | reltime }}</span>
+{% endif %}

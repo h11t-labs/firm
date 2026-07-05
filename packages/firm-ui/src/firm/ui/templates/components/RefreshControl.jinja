@@ -1,0 +1,4 @@
+{#def active_part, request_path, refresh, label="", choices=None #}
+{# `label` ("auto-refresh 5s" / "auto-refresh off") and `choices` ({seconds, label, active})
+   are precomputed in render.py; each choice posts back to /settings/refresh. #}
+<details class="dropdown refresh"><summary><span class="{{ "pulse" if refresh else "pulse off" }}"></span>{{ label }}{{ icons.chevron }}</summary><div class="dropdown-menu">{% for opt in choices %}<form class="inline" method="post" action="/settings/refresh"><input type="hidden" name="part" value="{{ active_part }}"><input type="hidden" name="seconds" value="{{ opt.seconds }}"><input type="hidden" name="return" value="{{ request_path }}"><button class="dropdown-opt{{ " active" if opt.active else "" }}" type="submit">{{ opt.label }}{% if opt.active %}{{ icons.check }}{% endif %}</button></form>{% endfor %}</div></details>

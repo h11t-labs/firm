@@ -1,0 +1,4145 @@
+# firm — full documentation
+
+> The complete firm docs concatenated into one file for LLMs/agents. firm is a pure-Python port of the Rails Solid stack: database-backed background jobs (queue), caching (cache), and pub/sub (channel), plus an original append-only audit log (audit), no Redis. See llms.txt for a curated index.
+
+
+
+
+================================================================================
+# Source: docs/index.md
+================================================================================
+
+# firm
+
+**Pure-Python ports of the Rails 8 "Solid" stack.** Keep background jobs and caching in the SQL
+database you already run — no Redis, no extra broker, no new infrastructure.
+
+| Package | Ports | Replaces |
+|---|---|---|
+| **[firm-queue](queue/overview.md)** | [`solid_queue`](https://github.com/rails/solid_queue) | Sidekiq / Celery / RQ |
+| **[firm-cache](cache/overview.md)** | [`solid_cache`](https://github.com/rails/solid_cache) | Redis / Memcached cache |
+| **[firm-channel](channel/overview.md)** | [`solid_cable`](https://github.com/rails/solid_cable) | Redis Pub/Sub (Action Cable) |
+| **[firm-audit](audit/overview.md)** | *(none — original to firm)* | Hand-rolled audit logging |
+
+> Inspired by the Rails Solid stack from 37signals.
+
+The four packages are **independent** — install only what you need — but share a design: your
+database is the single source of truth, accessed through SQLAlchemy with per-dialect locking.
+
+## Why database-backed?
+
+- **One fewer moving part.** If you already run PostgreSQL, MySQL, or SQLite, you already have
+  everything you need. Nothing else to deploy, monitor, or secure.
+- **Transactional.** Enqueue a job in the same transaction as the row it depends on.
+- **Inspectable.** Jobs and cache entries are just rows — query them, back them up, debug them.
+
+## Quick taste
+
+```python
+import firm.queue as bq
+
+bq.configure(database_url="postgresql://localhost/myapp")
+
+@bq.job(queue="mailers")
+def send_welcome(user_id: int) -> None:
+    ...
+
+send_welcome.enqueue(42)            # enqueue from your app
+# $ firm-queue start         # run workers + dispatcher
+```
+
+```python
+from firm.cache import Cache
+
+cache = Cache(database_url="postgresql://localhost/myapp")
+cache.fetch("homepage", lambda: render_homepage())
+```
+
+```python
+from firm.channel import Channel
+
+ps = Channel(database_url="postgresql://localhost/myapp")
+ps.subscribe("room:42", lambda payload: print(payload))
+ps.broadcast("room:42", b'{"msg": "hi"}')
+```
+
+```python
+from firm.audit import AuditLog
+
+audit = AuditLog(database_url="postgresql://localhost/myapp")
+audit.record("invoice.paid", subject=invoice, actor=user, data={"amount": 4200})
+```
+
+## Databases
+
+SQLite (default), **PostgreSQL**, and **MySQL/MariaDB** are all supported and tested live. See
+[Database backends](database-backends.md) for drivers, locking semantics, and when to use which.
+
+## Where to next
+
+- New to it? Start with **[queue: getting started](queue/getting-started.md)**,
+  **[cache: getting started](cache/getting-started.md)**,
+  **[channel: getting started](channel/getting-started.md)**, or
+  **[audit: getting started](audit/getting-started.md)**.
+- Coming from Rails? See **[Comparison to Rails](comparison-to-rails.md)**.
+- Contributing? See **[Testing & contributing](testing-and-contributing.md)**.
+
+
+
+================================================================================
+# Source: docs/installation.md
+================================================================================
+
+# Installation
+
+`firm` is a single package with four independent modules — `firm.queue` (jobs),
+`firm.cache` (caching), `firm.channel` (publish/subscribe), and `firm.audit` (an append-only
+audit log) — plus a shared internal core. **You install only what you use** via extras, so a
+queue-only service never pulls cache, pub/sub, or audit dependencies, and vice versa.
+
+```bash
+pip install "firm[queue]"     # just the job queue
+pip install "firm[cache]"     # just the cache
+pip install "firm[channel]"    # just pub/sub
+pip install "firm[audit]"      # just the audit log
+```
+
+> `firm` is an extras-only meta-package: the bare `pip install firm` (no extras) installs **no
+> modules at all** — always name at least one. Each module is also its own package
+> (`pip install firm-queue` ≡ `pip install "firm[queue]"`) if you prefer direct dependencies.
+
+## Extras
+
+| Extra | Pulls in | Use it for |
+|---|---|---|
+| `queue` | `firm-queue` (croniter, click) | the background-job queue (scheduler + the `firm-queue` CLI) |
+| `cache` | `firm-cache` (click) | the cache store + the `firm-cache` CLI |
+| `channel` | `firm-channel` (click) | pub/sub + the `firm-channel` CLI |
+| `audit` | `firm-audit` (click) | the audit log + the `firm-audit` CLI |
+| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) |
+| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) |
+| `postgres` | `psycopg` | running on PostgreSQL |
+| `mysql` | `pymysql` | running on MySQL / MariaDB |
+| `encryption` | `cryptography` | cache at-rest encryption (Fernet) |
+| `msgpack` | `msgpack` | the cache msgpack value coder |
+| `all` | everything above | the full kitchen sink |
+
+Combine freely — extras are additive:
+
+```bash
+pip install "firm[queue,postgres]"          # queue on PostgreSQL
+pip install "firm[cache,encryption]"        # cache with at-rest encryption
+pip install "firm[queue,cache,mysql]"       # both modules on MySQL/MariaDB
+pip install "firm[all]"                     # everything
+```
+
+With `uv`:
+
+```bash
+uv add "firm[queue,postgres]"
+```
+
+## What each install gives you
+
+- **`firm[queue]`** → `import firm.queue as bq`, the `@bq.job` decorator, enqueuing, the
+  worker/dispatcher/scheduler/supervisor, and the `firm-queue` CLI. No cache dependencies.
+- **`firm[cache]`** → `from firm.cache import Cache`, all cache operations, and the
+  `firm-cache` CLI. No queue dependencies (no `croniter`).
+- **`firm[channel]`** → `from firm.channel import Channel`, broadcast/subscribe, the polling
+  listener, message trimming, and the `firm-channel` CLI. No queue dependencies (no `croniter`).
+- **`firm[audit]`** → `from firm.audit import AuditLog, record`, append-only event recording,
+  `history()` querying, opt-in retention, and the `firm-audit` CLI. No queue dependencies (no
+  `croniter`).
+- **SQLite** needs no driver extra. **PostgreSQL/MySQL** need `postgres`/`mysql`. Bare
+  `postgresql://` / `mysql://` URLs are auto-normalized to the shipped drivers — see
+  [Database backends](database-backends.md).
+
+> **Note:** each module is its own wheel sharing the `firm.*` namespace, so an uninstalled
+> module truly isn't there — a queue-only process can never import (or pay for) the cache,
+> pub/sub, or audit code.
+
+## Missing an extra?
+
+If you reach for a feature whose extra isn't installed, you get a clear, actionable error that
+names the extra to add — not a bare `ModuleNotFoundError`:
+
+```text
+>>> Cache(..., encrypt_key=key)                # without [encryption]
+ImportError: At-rest cache encryption requires "cryptography". Install the encryption extra: pip install "firm[cache,encryption]"
+
+>>> bq.configure(database_url="postgresql://…") # without [postgres]
+ImportError: The postgres driver "psycopg" is not installed. Install the postgres extra: pip install "firm[postgres]"
+```
+
+## Next steps
+
+- [Queue: getting started](queue/getting-started.md)
+- [Cache: getting started](cache/getting-started.md)
+- [Channel: getting started](channel/getting-started.md)
+- [Audit: getting started](audit/getting-started.md)
+
+
+
+================================================================================
+# Source: docs/cookbook.md
+================================================================================
+
+# Cookbook
+
+The firm library bundles four database-backed primitives — a job **queue**, a key/value **cache**, a publish/subscribe **channel**, and an append-only **audit** log — that share one storage engine and compose freely. This cookbook walks each primitive on its own, then shows recipes that combine them, web-framework integrations for FastAPI and Flask, and the day-two operations you need to run firm in production. Every example uses the real `firm.*` API and is copy-pasteable; swap the `sqlite://` URLs for `postgresql://…` in production.
+
+- [Queue: define, enqueue, schedule, run](#queue)
+- [Cache: store, fetch, counters, coders, encryption, eviction](#cache)
+- [Channel: broadcast and subscribe](#channel)
+- [Audit: record events, query history, retention](#audit)
+- [Queue + Cache: cache-warming jobs & read-through](#queue--cache)
+- [Queue + Channel: progress updates & notifications](#queue--channel)
+- [Cache + Channel: cross-process cache invalidation](#cache--channel)
+- [Queue + Audit: log job lifecycle events](#queue--audit)
+- [All three together: an end-to-end pipeline](#all-three-together)
+- [FastAPI app (full)](#fastapi)
+- [Flask app (full)](#flask)
+- [Operations & production](#operations--production)
+
+---
+
+## Queue: define, enqueue, schedule, run {#queue}
+
+Configure once at process startup, decorate plain functions with `@bq.job`, then enqueue them now or later. A worker (CLI process, in-process supervisor, or a single `run_ready` drain) claims ready jobs and runs them.
+
+```python
+# jobs.py — define jobs
+import firm.queue as bq
+
+# Configure the process-global runtime once, before enqueuing or working.
+# Returns a Runtime; keyword args shown are the defaults.
+bq.configure(
+    database_url="postgresql://localhost/app",  # bare pg:// / mysql:// auto-normalize
+    busy_timeout_ms=5000,                        # SQLite busy timeout
+    default_queue="default",
+    preserve_finished_jobs=True,                 # keep finished rows for the UI
+)
+
+# @bq.job turns a function into a Job. It stays directly callable (great for tests),
+# while gaining .enqueue / .enqueue_at / .enqueue_in.
+@bq.job(queue="emails", priority=10, attempts=3, backoff=2.0)
+def send_welcome(user_id: int, *, locale: str = "en") -> None:
+    ...  # do the work
+
+# priority: LOWER numbers are claimed first (0 = default). attempts: total attempts (1 = no retry).
+# backoff: base seconds for exponential backoff between attempts.
+
+send_welcome(42, locale="nl")  # runs inline — no queue involved
+```
+
+```python
+# Enqueue — args/kwargs are forwarded to the job and serialized.
+from datetime import datetime, timedelta, timezone
+
+send_welcome.enqueue(42, locale="nl")                  # ready now -> job_id (int)
+send_welcome.enqueue_in(timedelta(minutes=5), 42)      # run after a delay
+send_welcome.enqueue_at(                                # run at an absolute time (UTC)
+    datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc), 42
+)
+# Each returns the new job_id (int), or None if discarded by a concurrency conflict.
+```
+
+Run workers as a separate process via the CLI (production default forks one process per component):
+
+```bash
+# Start the full stack (workers + dispatcher). --import loads modules so @job defs register.
+firm-queue start --database-url postgresql://localhost/app --import myapp.jobs
+firm-queue start --import myapp.jobs --queues emails,default --threads 5
+firm-queue start --import myapp.jobs --mode thread   # threads instead of forked processes
+
+# Or run just one worker, or drain ready jobs once and exit:
+firm-queue work  --import myapp.jobs --queues emails --threads 5
+firm-queue drain --import myapp.jobs --limit 100
+# (--database-url is optional if FIRM_QUEUE_DATABASE_URL is set)
+```
+
+Or embed workers in your own process with `ThreadSupervisor` (non-blocking `.start()`, `.stop()` drains; also a context manager):
+
+```python
+import firm.queue as bq
+from firm.queue import current_runtime
+from firm.queue.supervisor import (
+    ThreadSupervisor, SupervisorConfig, WorkerConfig, DispatcherConfig,
+)
+from firm.queue.scheduler import RecurringTask
+import myapp.jobs  # import so @job definitions register
+from myapp.jobs import nightly_report
+
+bq.configure(database_url="postgresql://localhost/app")
+runtime = current_runtime()
+
+config = SupervisorConfig(
+    workers=[WorkerConfig(queues=("*",), threads=3)],  # ("*",) = all queues
+    dispatchers=[DispatcherConfig()],                  # promotes scheduled -> ready
+    recurring=[                                         # adds a scheduler if non-empty
+        RecurringTask(key="nightly", schedule="0 3 * * *", job=nightly_report),
+    ],
+)
+
+# Context-manager form: starts on enter, drains on exit.
+with ThreadSupervisor(runtime, config):
+    ...  # serve requests, run your app
+
+# Or manage the lifecycle explicitly:
+supervisor = ThreadSupervisor(runtime, config)
+supervisor.start()  # non-blocking
+# ...
+supervisor.stop()   # drains in-flight jobs
+```
+
+Drain once, in-process, without any background threads — handy in tests or a cron-driven one-shot:
+
+```python
+from firm.queue.worker import run_ready
+from firm.queue.dispatcher import dispatch_once, run_maintenance
+from firm.queue import current_runtime
+
+rt = current_runtime()
+dispatch_once(rt)                              # promote due scheduled jobs -> ready
+run_ready(rt, queues=("*",), limit=100)        # claim + run ready jobs inline; returns count
+run_maintenance(rt)                            # expire stale semaphores, unblock jobs
+```
+
+---
+
+## Cache: store, fetch, counters, coders, encryption, eviction {#cache}
+
+`firm.cache.Cache` is a database-backed key/value store: arbitrary Python values (pickled by default), atomic counters, optional at-rest encryption, and FIFO eviction by age/size/count. Construct it with a `database_url` (or a shared `engine`) and close it when done — it's a context manager.
+
+```python
+from firm.cache import Cache
+
+# create the cache; create_schema=True auto-creates the firm_entries table
+cache = Cache(database_url="sqlite:///cache.db")
+
+# store / fetch / probe
+cache.set("user:1", {"name": "Ada", "admin": True})  # value can be any picklable object
+cache.get("user:1")                                   # -> {"name": "Ada", "admin": True}; None if missing
+cache.exist("user:1")                                 # -> True
+cache.delete("user:1")                                # -> True if a row was removed, else False
+
+# fetch: return cached value, else compute + store it (read-through)
+cache.fetch("report", lambda: build_report())         # callable is only invoked on a miss
+cache.fetch("flag", "default")                         # a non-callable is used verbatim
+
+cache.clear()                                          # drop every entry
+cache.close()                                          # stop background loop + dispose owned engine
+```
+
+Keys are `str` or `bytes`; values are arbitrary objects. Prefer the context-manager form so the engine and any background expiry thread are always cleaned up:
+
+```python
+with Cache(database_url="sqlite:///cache.db") as cache:
+    cache.set("k", "v")
+    # cache.close() runs automatically on exit
+```
+
+### Batch get / set
+
+```python
+cache.set_multi({"a": 1, "b": 2, "c": 3})       # one transaction for all writes
+cache.get_multi(["a", "b", "x"])                # -> {"a": 1, "b": 2, "x": None}; misses map to None
+```
+
+### Atomic counters
+
+`increment`/`decrement` do a serialized read-modify-write (BEGIN IMMEDIATE on SQLite, `SELECT ... FOR UPDATE` on Postgres/MySQL), so they're safe under concurrency. A missing key starts at 0.
+
+```python
+cache.increment("hits")            # -> 1 (created at 0, then +1)
+cache.increment("hits", by=10)     # -> 11
+cache.decrement("hits")            # -> 10
+cache.decrement("hits", by=4)      # -> 6
+```
+
+### Coders: JSON vs default pickle
+
+The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
+
+```python
+from firm.cache import Cache, JSONCoder, PickleCoder
+
+cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
+cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
+cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
+
+# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
+cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
+```
+
+### Encryption at rest (Fernet)
+
+Pass `encrypt_key` to encrypt the serialized bytes with Fernet. This needs the `encryption` extra (`cryptography`). The key is a standard Fernet key (str or bytes).
+
+```bash
+pip install "firm[cache,encryption]"
+```
+
+```python
+from cryptography.fernet import Fernet
+from firm.cache import Cache
+
+key = Fernet.generate_key()   # persist this somewhere safe; you need it to read the data back
+cache = Cache(database_url="sqlite:///cache.db", encrypt_key=key)
+cache.set("secret", "token-123")   # stored encrypted; get() transparently decrypts
+cache.get("secret")                # -> "token-123"
+```
+
+Encryption wraps whichever coder you choose, so it composes with `JSONCoder`:
+
+```python
+cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder(), encrypt_key=key)
+```
+
+### Eviction: max_age / max_size / max_entries + background expiry
+
+Eviction is FIFO (oldest entries by insertion order go first). Defaults: `max_age=14 days`, `max_size=256 MiB`, `max_entries=None`. By default expiry runs probabilistically on writes (`auto_expire=True`); set `background_expiry=True` to also run it on a timer.
+
+```python
+from firm.cache import Cache
+
+cache = Cache(
+    database_url="sqlite:///cache.db",
+    max_age=3600,             # evict entries older than 1 hour (seconds; None disables age expiry)
+    max_size=64 * 1024**2,    # evict oldest once estimated size exceeds 64 MiB (None disables)
+    max_entries=10_000,       # evict oldest once row count exceeds this (None = unbounded)
+    expiry_batch_size=100,    # rows considered per eviction pass
+    auto_expire=True,         # run eviction probabilistically on writes (default)
+    background_expiry=True,   # also run eviction on a background timer
+    expiry_interval=60.0,     # seconds between background passes
+)
+# background_expiry starts a thread; close() stops it cleanly
+cache.close()
+```
+
+---
+
+## Channel: broadcast and subscribe {#channel}
+
+`Channel` is database-backed publish/subscribe: `broadcast` inserts a message row, `subscribe` registers a callback and spins up a background polling listener that delivers every *future* message on that channel. Delivery is per-process — every process running a `Channel` sees every broadcast.
+
+```python
+from firm.channel import Channel
+
+# Either a database_url (Channel owns the engine) or a shared engine= is required.
+ch = Channel(database_url="sqlite:///channel.db")
+# create_schema=True (default) auto-creates the firm_messages table.
+```
+
+```python
+# Callback receives the payload as bytes. A subscriber only sees messages
+# broadcast AFTER it subscribes — no backlog replay. The first subscribe()
+# starts the background listener thread.
+def on_message(payload: bytes) -> None:
+    print("got", payload)
+
+ch.subscribe("room:42", on_message)
+
+ch.broadcast("room:42", b"hello")   # bytes pass through unchanged
+ch.broadcast("room:42", "héllo")    # str is UTF-8 encoded -> b"h\xc3\xa9llo"
+
+ch.unsubscribe("room:42", on_message)  # remove this callback; listener keeps running
+```
+
+Payloads are opaque bytes. Serialize structured data yourself:
+
+```python
+import json
+ch.broadcast("room:42", json.dumps({"user": "ada", "text": "hi"}).encode())
+```
+
+Tuning and cleanup. `polling_interval` (default `0.1`s) sets how often the listener checks for new rows; `trim()` deletes one batch of messages older than `message_retention` and returns the count deleted (this also happens automatically when `autotrim=True`):
+
+```python
+ch = Channel(
+    database_url="sqlite:///channel.db",
+    polling_interval=0.1,      # listener poll cadence, seconds
+    message_retention=86400.0, # keep messages this long (seconds)
+    autotrim=True,             # trim opportunistically on broadcast
+    trim_batch_size=100,
+)
+
+deleted = ch.trim()  # -> int: rows removed this batch
+ch.close()           # stops the listener; disposes the engine if Channel created it
+```
+
+Use it as a context manager so the listener thread and engine are cleaned up for you:
+
+```python
+import time
+from firm.channel import Channel
+
+with Channel(database_url="sqlite:///channel.db") as ch:
+    received: list[bytes] = []
+    ch.subscribe("news", received.append)  # callback gets bytes
+    ch.broadcast("news", b"first")
+    ch.broadcast("news", b"second")
+    time.sleep(0.3)            # let the background listener poll (~0.1s/cycle)
+    print(received)            # [b"first", b"second"]
+# listener stopped, engine disposed
+```
+
+---
+
+## Audit: record events, query history, retention {#audit}
+
+`firm.audit` is an append-only, database-backed audit log — not a Solid port (there's no `solid_audit`), but the same "you already have a database" idea. The headline feature is the **same-transaction guarantee**: record the event inside the same transaction as the business change, and it can never exist without it (or vice versa).
+
+```python
+from firm.audit import AuditLog, record
+
+# shared DB, atomic with a business change — join the caller's own transaction:
+def mark_invoice_paid(engine, invoice, user, amount):
+    with engine.begin() as conn:
+        conn.execute(invoices.update().where(invoices.c.id == invoice.id).values(paid=True))
+        record(conn, "invoice.paid", subject=invoice, actor=user, data={"amount": amount})
+    # both the update and the audit row commit together, or neither does
+```
+
+```python
+# standalone (or a separate audit database) — AuditLog manages its own connection
+audit = AuditLog(database_url="sqlite:///audit.db")   # create_schema=True auto-creates firm_audits
+
+audit.record("user.login", actor=("User", 7), context={"ip": "127.0.0.1"})
+audit.record(
+    "invoice.paid",
+    subject=("Invoice", 42),
+    actor=("User", 7),
+    data={"amount": 4200},
+    correlation_id=request_id,   # ties every event from one request together
+)
+```
+
+Querying:
+
+```python
+audit.history(action="invoice.paid")               # most recent first
+audit.history(subject=("Invoice", 42), limit=10)    # this invoice's history
+audit.history(correlation_id=request_id)            # everything from one request
+```
+
+`subject`/`actor` accept a domain object with `.id` (`subject=invoice`) or an explicit `("Type", id)` tuple — `history()` only ever filters on the indexed scalar columns, never inside `data`/`changes`/`context` (they're JSON text, not queryable JSONB — see [Internals](audit/internals.md)).
+
+Events are kept **forever by default** — pruning is opt-in, not automatic, and never triggered by `record()`:
+
+```python
+audit = AuditLog(database_url="sqlite:///audit.db", max_age=90 * 24 * 3600.0)  # 90 days
+audit.retention.run_once()   # -> int: events deleted
+```
+
+```bash
+firm-audit prune --database-url sqlite:///audit.db --max-age 7776000
+```
+
+See **[firm-audit overview](audit/overview.md)** for the full module.
+
+---
+
+## Queue + Cache: cache-warming jobs & read-through {#queue--cache}
+
+Point the queue and the cache at the same database and share one `Engine` so warming jobs and read-through reads hit the same store. A `@bq.job` recomputes the expensive value and writes it with `cache.set()`; everything else reads through `cache.fetch()`, which recomputes-and-stores only on a miss.
+
+```python
+# shared.py — one engine, one database, shared by queue and cache
+import firm.queue as bq
+from firm.cache import Cache
+from firm.queue import current_runtime
+
+# Configure the queue first; its Runtime owns the Engine for this process.
+bq.configure(database_url="postgresql://localhost/myapp")
+
+# Reuse the queue's Engine for the cache (same DB, same connection pool).
+# engine= means the Cache does NOT own/dispose it — the Runtime does.
+cache = Cache(engine=current_runtime().engine)
+```
+
+```python
+# jobs.py — the cache-warming job
+import firm.queue as bq
+from shared import cache
+
+def _recompute_dashboard(account_id: int) -> dict:
+    # ... the slow query / aggregation you don't want on the request path ...
+    return {"account_id": account_id, "revenue": 12345}
+
+@bq.job(queue="cache", attempts=3, backoff=5.0)
+def warm_dashboard(account_id: int) -> None:
+    # Recompute the expensive value and overwrite the cache entry.
+    cache.set(f"dashboard:{account_id}", _recompute_dashboard(account_id))
+
+# The decorated function is still directly callable (handy for tests):
+#   warm_dashboard(42)            # runs the body inline, no enqueue
+#   _recompute_dashboard(42)      # the raw computation
+```
+
+```python
+# web.py — enqueue a warm from your request handler
+from jobs import warm_dashboard
+
+def on_account_changed(account_id: int) -> None:
+    # Fire-and-forget; returns the new job_id (or None if discarded on a concurrency conflict).
+    warm_dashboard.enqueue(account_id)
+```
+
+```python
+# reader.py — read-through anywhere (web handler, another worker, a script)
+from shared import cache
+from jobs import _recompute_dashboard
+
+def get_dashboard(account_id: int) -> dict:
+    # fetch() returns the cached value, or calls the callable on a miss,
+    # stores the result, and returns it. The callable takes no arguments.
+    return cache.fetch(
+        f"dashboard:{account_id}",
+        lambda: _recompute_dashboard(account_id),
+    )
+```
+
+```bash
+# Run the workers that drain the warming jobs (production default: fork mode).
+firm-queue start --import jobs --queues cache,default
+```
+
+To keep entries fresh on a schedule rather than on change, enqueue the same job from a `RecurringTask`:
+
+```python
+# recurring.py — re-warm every 5 minutes via the supervisor
+from firm.queue.scheduler import RecurringTask
+from firm.queue.supervisor import (
+    DispatcherConfig, SupervisorConfig, ThreadSupervisor, WorkerConfig,
+)
+from firm.queue import current_runtime
+from jobs import warm_dashboard
+
+config = SupervisorConfig(
+    workers=[WorkerConfig(queues=("*",), threads=3)],
+    dispatchers=[DispatcherConfig()],
+    recurring=[
+        RecurringTask(key="warm-dashboard-1", schedule="*/5 * * * *",
+                      job=warm_dashboard, args=(1,)),  # 5-field cron
+    ],
+)
+
+with ThreadSupervisor(current_runtime(), config):  # .start() non-blocking; context mgr drains on exit
+    ...
+```
+
+---
+
+## Queue + Channel: progress updates & notifications {#queue--channel}
+
+A long-running `@bq.job` can stream progress and completion events over a `Channel`. The job `broadcast`s to a channel (the queue and the channel just need to point at the same database); a separate process (websocket bridge, log tailer) `subscribe`s and reacts. Payloads are opaque bytes, so serialize structured data yourself (e.g. JSON).
+
+```python
+# jobs.py — the producer side
+import json
+import firm.queue as bq
+from firm.channel import Channel
+
+bq.configure(database_url="postgresql://localhost/app")
+
+# One Channel per process is enough; reuse it across job runs.
+channel = Channel(database_url="postgresql://localhost/app")
+
+
+@bq.job(queue="exports", attempts=3)
+def export_report(report_id: int, row_count: int) -> None:
+    topic = f"export:{report_id}"  # channel name is any str (or bytes)
+    for i in range(row_count):
+        # ... do a unit of work ...
+        if i % 100 == 0:
+            pct = round(100 * i / row_count)
+            # broadcast(channel, payload): payload is str|bytes (str is UTF-8 encoded)
+            channel.broadcast(topic, json.dumps({"report_id": report_id, "percent": pct}))
+
+    # fan-out completion: a per-report topic AND a shared "all exports" topic
+    done = json.dumps({"report_id": report_id, "percent": 100, "status": "done"})
+    channel.broadcast(topic, done)
+    channel.broadcast("exports:completed", done)  # subscribers watching every export
+```
+
+```python
+# enqueue it (the decorated function is still directly callable for unit tests)
+export_report.enqueue(42, row_count=5000)   # -> job_id: int | None
+# export_report(42, row_count=10)           # runs inline, no queue, for testing
+```
+
+Run a worker so the job actually executes (separate process):
+
+```bash
+# starts workers + dispatcher; --import loads the module that defines the job
+firm-queue start --import jobs --queues exports
+```
+
+The subscriber reacts to messages. A subscriber only receives messages broadcast *after* it subscribes, and the callback always receives `bytes`:
+
+```python
+# bridge.py — the consumer side (e.g. a websocket relay or a log)
+import json
+import time
+from firm.channel import Channel
+
+with Channel(database_url="postgresql://localhost/app") as channel:
+    def on_progress(payload: bytes) -> None:  # callback signature: (bytes) -> None
+        event = json.loads(payload)           # decode your own format
+        print(f"report {event['report_id']}: {event['percent']}%")
+        # e.g. await ws.send_json(event) in a real websocket bridge
+
+    def on_completion(payload: bytes) -> None:
+        event = json.loads(payload)
+        print(f"COMPLETED report {event['report_id']}")
+
+    channel.subscribe("export:42", on_progress)            # one specific report
+    channel.subscribe("exports:completed", on_completion)  # fan-out: every completion
+
+    # subscribe() spins up one background polling thread; just keep the process alive.
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        channel.unsubscribe("export:42", on_progress)  # remove a single callback
+```
+
+Notes that matter for correctness:
+- **Delivery is per-process**: every process running a `Channel` against the same DB sees every `broadcast`. The websocket bridge and the worker are different processes — that is the intended split.
+- **No backlog replay**: messages sent before `subscribe` are not delivered. Subscribe before you start broadcasting if you need the first event.
+- **Polling latency**: subscribers fire on the next poll, governed by `polling_interval` (default `0.1`s). Tune via `Channel(..., polling_interval=0.05)`.
+- **Channel names** are `str` or `bytes`; **payloads** are `str` or `bytes` (a `str` is UTF-8 encoded). There is no built-in JSON codec — serialize/deserialize yourself.
+- A subscriber callback that raises is suppressed: it never breaks the listener or other subscribers.
+
+---
+
+## Cache + Channel: cross-process cache invalidation {#cache--channel}
+
+Keep a hot value in the `Cache` (write-through on update) and use a `Channel` to tell every *other* process to drop its copy. The writer broadcasts the changed key; each process subscribes once at startup and calls `cache.delete(key)` on receipt so the next read re-fetches fresh.
+
+```python
+# shared.py — one Engine shared by Cache and Channel (both can ride the same DB connection pool)
+from firm._core.database import create_engine_for
+from firm.cache import Cache
+from firm.channel import Channel
+
+engine = create_engine_for("postgresql://localhost/app")
+
+cache = Cache(engine=engine)        # write-through store; pickle coder by default
+channel = Channel(engine=engine)    # pub/sub for invalidation signals
+
+INVALIDATE = "cache:invalidate"     # the channel name we publish key names on
+```
+
+```python
+# subscriber side — run once per process at startup
+def _evict(payload: bytes) -> None:
+    # callback always receives bytes; the key was broadcast as a UTF-8 string
+    key = payload.decode("utf-8")
+    cache.delete(key)               # returns True if a row was removed; safe if already gone
+
+# only messages broadcast AFTER this call are delivered; delivery is per-process
+channel.subscribe(INVALIDATE, _evict)
+```
+
+```python
+# publisher side — call on every update
+def update_user(user_id: int, name: str) -> None:
+    key = f"user:{user_id}"
+    save_to_db(user_id, name)       # your system of record
+
+    cache.set(key, {"id": user_id, "name": name})   # 1. write-through: this process is fresh
+    channel.broadcast(INVALIDATE, key)              # 2. tell other processes to evict their copy
+```
+
+Note: `broadcast` reaches subscribers in *every* process (including this one), but since the publisher already did `cache.set`, its own `_evict` just deletes the value it just wrote — the next `get` re-fetches. If you want the writer to skip self-eviction, tag the payload with a process id and have `_evict` ignore its own. Reads stay simple:
+
+```python
+# any process — fetch-through fills the cache on a miss (e.g. right after an eviction)
+def get_user(user_id: int) -> dict:
+    key = f"user:{user_id}"
+    return cache.fetch(key, lambda: load_from_db(user_id))  # computes + caches if absent
+```
+
+---
+
+## Queue + Audit: log job lifecycle events {#queue--audit}
+
+Point the queue and the audit log at the same database, and record lifecycle events as part of the job itself — start, completion, failure — each tagged with the job's id as a `correlation_id` so `firm-audit history --correlation-id <id>` (or `audit.history(correlation_id=...)`) shows everything that happened during one run.
+
+```python
+# jobs.py
+import firm.queue as bq
+from firm.audit import AuditLog
+
+bq.configure(database_url="postgresql://localhost/app")
+audit = AuditLog(database_url="postgresql://localhost/app")  # same DB, separate table
+
+
+@bq.job(queue="exports", attempts=3)
+def export_report(report_id: int) -> None:
+    cid = f"export:{report_id}"
+    audit.record("export.started", subject=("Report", report_id), correlation_id=cid)
+    try:
+        # ... do the work ...
+        audit.record("export.finished", subject=("Report", report_id), correlation_id=cid)
+    except Exception as exc:
+        audit.record(
+            "export.failed",
+            subject=("Report", report_id),
+            correlation_id=cid,
+            data={"error": str(exc)},
+        )
+        raise
+```
+
+```python
+# inspect a run's full timeline
+for event in audit.history(correlation_id=f"export:{report_id}"):
+    print(event["created_at"], event["action"])
+```
+
+This is `audit.record()` in its own transaction (the job and the audit write are two separate commits) — fine for an activity trail. If the audit row needs to be atomic with something the job itself writes, pass that write's `conn` to `record(conn, ...)` instead, inside the same `engine.begin()` block — see [Audit: record events, query history, retention](#audit).
+
+---
+
+## All three together: an end-to-end pipeline {#all-three-together}
+
+Here's how queue, cache, and channel compose into one realistic flow: an HTTP request enqueues a `generate_report` job; the worker reads its inputs from the cache, does the work, writes the result back to the cache, and broadcasts `"done"` on a channel so a subscriber can notify the user. All three share one database, so there's nothing extra to run.
+
+```python
+# app/pipeline.py
+import json
+
+import firm.queue as bq
+from firm.cache import Cache, JSONCoder
+from firm.channel import Channel
+
+DATABASE_URL = "sqlite:///app.db"  # use postgresql://… in production
+
+# One configure() call wires up the queue runtime for this process.
+bq.configure(database_url=DATABASE_URL)
+
+# Cache and Channel are plain objects; JSONCoder keeps cached values portable.
+cache = Cache(database_url=DATABASE_URL, coder=JSONCoder())
+channel = Channel(database_url=DATABASE_URL)
+
+
+@bq.job(queue="reports", attempts=3, backoff=5.0)
+def generate_report(report_id: str) -> None:
+    # 1. Read inputs the request stashed in the cache.
+    inputs = cache.get(f"report:{report_id}:inputs")  # -> dict | None
+    if inputs is None:
+        return  # nothing to do
+
+    # 2. Do the work.
+    result = {"rows": len(inputs["records"]), "title": inputs["title"]}
+
+    # 3. Write the result back to the cache for whoever needs it.
+    cache.set(f"report:{report_id}:result", result)
+
+    # 4. Broadcast "done" so subscribers can react. Payload is str/bytes only.
+    channel.broadcast("reports:done", json.dumps({"report_id": report_id}))
+```
+
+The producer side — e.g. inside a request handler — stages the inputs in the cache and enqueues the job:
+
+```python
+# Inside an HTTP request handler
+from app.pipeline import cache, generate_report
+
+cache.set(f"report:{report_id}:inputs", {"title": "Q2", "records": [...]})
+job_id = generate_report.enqueue(report_id)  # -> int (the job_id)
+```
+
+The subscriber side runs wherever you want to notify the user. The callback receives raw `bytes`, and a subscription only sees messages broadcast *after* it subscribes:
+
+```python
+# app/notifier.py
+import json
+
+from app.pipeline import cache, channel
+
+
+def on_report_done(payload: bytes) -> None:
+    report_id = json.loads(payload)["report_id"]
+    result = cache.get(f"report:{report_id}:result")  # fetch the finished result
+    print(f"report {report_id} ready: {result}")  # ...or email/push the user
+
+# Register the callback; the first subscribe starts a background polling listener.
+channel.subscribe("reports:done", on_report_done)
+```
+
+Run the workers that actually execute `generate_report` with the CLI — point `--import` at the module where the job is defined:
+
+```bash
+# Workers pick up the "reports" queue and run the job body
+firm-queue start --import app.pipeline --queues reports
+```
+
+To keep everything in one process (handy for tests or a dev server), embed a worker instead of the CLI:
+
+```python
+from firm.queue.supervisor import (
+    SupervisorConfig,
+    ThreadSupervisor,
+    WorkerConfig,
+    DispatcherConfig,
+)
+
+runtime = bq.configure(database_url=DATABASE_URL)
+config = SupervisorConfig(
+    workers=[WorkerConfig(queues=("reports",), threads=3)],
+    dispatchers=[DispatcherConfig()],
+)
+# .start() is non-blocking; the supervisor is also a context manager that drains on exit.
+with ThreadSupervisor(runtime, config):
+    channel.subscribe("reports:done", on_report_done)
+    generate_report.enqueue("r-123")
+    ...  # wait for the job to run and the notification to fire
+```
+
+---
+
+## FastAPI app (full) {#fastapi}
+
+A single-file FastAPI app: firm's `lifespan` configures the queue on startup, routes enqueue jobs, `enqueue_after_commit` ties an enqueue to a SQLAlchemy commit, and a route reads from the cache. In dev, `embed_workers=True` runs a worker in-process; in prod you leave it `False` and run `firm-queue start` as a separate process.
+
+```python
+# app.py
+from datetime import timedelta
+
+from fastapi import FastAPI
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+import firm.queue as bq
+from firm.cache import Cache
+from firm.contrib.fastapi import lifespan
+from firm.contrib.sqlalchemy import enqueue_after_commit
+
+DATABASE_URL = "postgresql://localhost/app"
+
+# --- jobs: plain functions decorated into enqueueable Jobs ---
+@bq.job(queue="emails", attempts=3, backoff=5.0)
+def send_welcome(user_id: int) -> None:
+    ...  # the function stays directly callable too: send_welcome(1)
+
+@bq.job  # queue="default", priority=0, attempts=1, backoff=3.0
+def reindex(user_id: int) -> None:
+    ...
+
+# --- shared resources ---
+# embed_workers=True runs a worker+dispatcher in-process (dev / single-process).
+# In prod set embed_workers=False and run `firm-queue start` separately.
+app = FastAPI(lifespan=lifespan(database_url=DATABASE_URL, embed_workers=True))
+
+cache = Cache(DATABASE_URL)                 # pickle values by default
+engine = create_engine(DATABASE_URL)        # your app's own SQLAlchemy engine
+
+
+# --- enqueue directly from a route ---
+@app.post("/welcome/{user_id}")
+def welcome(user_id: int) -> dict:
+    job_id = send_welcome.enqueue(user_id)          # returns int | None
+    return {"job_id": job_id}
+
+# enqueue_at / enqueue_in for scheduled work
+@app.post("/welcome/{user_id}/later")
+def welcome_later(user_id: int) -> dict:
+    send_welcome.enqueue_in(timedelta(hours=1), user_id)
+    return {"scheduled": True}
+
+
+# --- enqueue tied to a SQLAlchemy commit (drops on rollback) ---
+@app.post("/users/{user_id}/reindex")
+def reindex_user(user_id: int) -> dict:
+    with Session(engine) as session:
+        # ... mutate rows on `session` ...
+        enqueue_after_commit(session, reindex, user_id)  # fires iff commit succeeds
+        session.commit()                                  # rollback => job never enqueued
+    return {"ok": True}
+
+
+# --- read a cache value ---
+@app.get("/users/{user_id}/profile")
+def profile(user_id: int) -> dict:
+    # fetch(key, default_or_callable): compute + store on miss
+    data = cache.fetch(f"profile:{user_id}", lambda: {"id": user_id})
+    return data
+```
+
+Run it (dev — workers embedded in the app process):
+
+```bash
+uvicorn app:app
+```
+
+In production, set `embed_workers=False` in the `lifespan(...)` call and run workers as their own process:
+
+```bash
+# API process
+uvicorn app:app
+# worker process(es) — point --import at the module that defines your @bq.job functions
+firm-queue start --import app --mode fork
+```
+
+---
+
+## Flask app (full) {#flask}
+
+A complete single-file Flask app: `Firm(app)` configures the queue from `app.config["FIRM_DATABASE_URL"]`, routes enqueue jobs, and a cached endpoint reuses computed results. Run workers out-of-process with `flask firm worker`; flip `embed_workers=True` only for local dev.
+
+```python
+# app.py
+from flask import Flask, jsonify
+import firm.queue as bq
+from firm.cache import Cache
+from firm.contrib.flask import Firm
+
+app = Flask(__name__)
+app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
+
+# Reads app.config["FIRM_DATABASE_URL"] and calls bq.configure() for you.
+# embed_workers=False (default) -> run workers separately via `flask firm worker`.
+# Set embed_workers=True to run an in-process ThreadSupervisor (dev / single process only).
+Firm(app)  # or: Firm(app, embed_workers=True, queues=("*",), threads=3)
+
+# A cache backed by the same database (its own tables; create_schema=True auto-creates them).
+cache = Cache(database_url=app.config["FIRM_DATABASE_URL"])
+
+
+# A plain function that's still directly callable; `.enqueue()` queues it.
+@bq.job(queue="default", attempts=3, backoff=5.0)
+def send_welcome(user_id: int) -> None:
+    print(f"welcomed {user_id}")
+
+
+@app.post("/welcome/<int:user_id>")
+def welcome(user_id):
+    send_welcome.enqueue(user_id)  # returns job_id (int) or None if discarded
+    return "", 202
+
+
+@app.get("/stats/<int:user_id>")
+def stats(user_id):
+    # fetch() returns the cached value, or calls the factory, stores it, and returns it.
+    data = cache.fetch(f"stats:{user_id}", lambda: compute_stats(user_id))
+    return jsonify(data)
+
+
+def compute_stats(user_id: int) -> dict:
+    return {"user_id": user_id, "score": 42}
+```
+
+Run the web server and a worker process side by side:
+
+```bash
+# Terminal 1 — the web app
+flask --app app run
+
+# Terminal 2 — a worker + dispatcher, running until Ctrl-C.
+# `firm` is the CLI group, `worker` the command (registered by Firm(app)).
+flask --app app firm worker --queues "*" --threads 3
+```
+
+---
+
+## Operations & production {#operations--production}
+
+Day-two operations: keeping queues healthy, recovering failures, scheduling recurring work, and running workers as real processes. All of the admin functions take a `Runtime` (from `bq.configure(...)` or `current_runtime()`); the worker fleet runs separately via `ForkSupervisor` or the `firm-queue` CLI.
+
+### Concurrency controls
+
+Limit how many copies of a job run at once, keyed on the arguments. Declared on the decorator; the dispatcher enforces it.
+
+```python
+import firm.queue as bq
+
+# At most ONE sync per account at a time; extra enqueues wait their turn ("block").
+@bq.job(concurrency={
+    "key": lambda account_id: account_id,  # variable part of the lock key (*args, **kwargs)
+    "to": 1,                                # max simultaneous executions per key (default 1)
+    "duration": 300,                        # failsafe TTL in seconds before the lock self-expires
+    "group": None,                          # share a key namespace across jobs; default = this job's name
+    "on_conflict": "block",                 # "block" = queue it; "discard" = drop it silently
+})
+def sync_account(account_id: int) -> None:
+    ...
+
+# Coalesce duplicate refreshes: while one is running/queued, drop the rest.
+@bq.job(concurrency={"key": lambda url: url, "to": 1, "on_conflict": "discard"})
+def warm_cache(url: str) -> None:
+    ...
+```
+
+Blocked jobs are promoted by the dispatcher's maintenance pass (`run_maintenance`, run automatically by `DispatcherConfig.maintenance_interval`).
+
+### Recurring tasks
+
+Pair a 5-field cron expression with a job and hand the list to the supervisor — it starts a scheduler automatically when `recurring` is non-empty. Each `(key, fire-time)` is enqueued exactly once across the whole fleet.
+
+```python
+from firm.queue.scheduler import RecurringTask, Scheduler
+from firm.queue.supervisor import (
+    ThreadSupervisor, SupervisorConfig, WorkerConfig, DispatcherConfig,
+)
+from firm.queue import current_runtime
+
+tasks = [
+    RecurringTask(key="nightly-cleanup", schedule="0 3 * * *", job=cleanup),
+    RecurringTask(key="hourly-sync", schedule="0 * * * *", job=sync, args=(42,)),
+]
+
+config = SupervisorConfig(
+    workers=[WorkerConfig()],
+    dispatchers=[DispatcherConfig()],
+    recurring=tasks,            # non-empty -> a scheduler process/thread is started
+)
+with ThreadSupervisor(current_runtime(), config):
+    ...
+
+# Drive it manually (tests / cron-of-last-resort):
+scheduler = Scheduler(current_runtime(), tasks)
+scheduler.sync_tasks()         # persist definitions to recurring_tasks (for visibility)
+scheduler.tick()               # enqueue anything due for the current period
+```
+
+### Pause / resume / clear queues
+
+```python
+from firm.queue import queues
+from firm.queue import current_runtime
+
+rt = current_runtime()
+
+queues.all_queues(rt)            # -> ["default", "mail", ...] (queues with ready jobs)
+queues.size(rt, "mail")          # -> int: ready jobs waiting
+queues.latency(rt, "mail")       # -> float: seconds the oldest ready job has waited
+
+queues.pause(rt, "mail")         # workers stop claiming from "mail" (jobs stay put)
+queues.is_paused(rt, "mail")     # -> bool
+queues.resume(rt, "mail")        # un-pause
+
+queues.clear(rt, "mail")         # -> int: discards ALL ready jobs in the queue (destructive)
+```
+
+### Retrying failures
+
+```python
+from firm.queue import maintenance
+
+maintenance.retry_failed(rt, job_id)     # -> bool: one failed job back to ready (attempts reset)
+maintenance.retry_all_failed(rt)         # -> int: re-enqueue every failed job
+```
+
+### Finished-job retention
+
+By default finished jobs are preserved (`bq.configure(..., preserve_finished_jobs=True)`). Trim them on a schedule so the table doesn't grow unbounded:
+
+```python
+from datetime import timedelta
+from firm.queue import maintenance
+
+# Delete finished jobs older than 7 days, 500 rows per batch (the default).
+maintenance.clear_finished(rt, older_than=timedelta(days=7), batch_size=500)
+
+# Or all finished jobs, regardless of age:
+maintenance.clear_finished(rt)
+```
+
+Good fit for a `RecurringTask` wrapping a `@bq.job` that calls `clear_finished`.
+
+### The firm-ui dashboard
+
+A small read/act web dashboard. It binds to `127.0.0.1` and exposes tracebacks plus destructive actions (retry / discard / pause / clear) — put it behind a reverse proxy + auth before exposing it. Tabs appear only for the parts (queue / cache / channel) whose tables exist.
+
+```bash
+# One shared database for all parts
+firm-ui --database-url postgresql://localhost/myapp        # http://127.0.0.1:8787
+
+# Per-part databases (any subset); --host/--port to change the bind
+firm-ui --queue-url postgresql://db1/jobs \
+         --cache-url  postgresql://db2/cache \
+         --host 127.0.0.1 --port 8787
+# or set FIRM_DATABASE_URL instead of --database-url
+```
+
+### Alembic migrations per module
+
+Each module ships its own Alembic config and baseline migration. Run them independently — point the right `alembic.<module>.ini` at the right database via the module's env var (or `-x url=...`):
+
+```bash
+# queue
+FIRM_QUEUE_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.queue.ini upgrade head
+
+# cache
+FIRM_CACHE_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.cache.ini upgrade head
+
+# channel
+FIRM_CHANNEL_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.channel.ini upgrade head
+
+# audit
+FIRM_AUDIT_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.audit.ini upgrade head
+
+# alternatively, pass the URL inline:
+alembic -c alembic.queue.ini -x url=postgresql://localhost/myapp upgrade head
+```
+
+In development you can skip Alembic — `Cache(create_schema=True)` (the default) builds its table, and the queue schema can be created directly. Use Alembic for production.
+
+### ThreadSupervisor vs ForkSupervisor
+
+Both take `(runtime, SupervisorConfig)`. `ThreadSupervisor` runs every role as a thread in one process — `.start()` is non-blocking, `.stop()` drains, and it's a context manager; ideal for dev, tests, and embedding (the only option on Windows). `ForkSupervisor` forks a child process per role, reaps and restarts dead children, and recovers their in-flight jobs — the POSIX production default; `.start()` **blocks**, supervising until it gets a shutdown signal.
+
+```python
+from firm.queue.supervisor import ForkSupervisor, SupervisorConfig, WorkerConfig
+from firm.queue import current_runtime
+
+# Production: blocks, supervising, until TERM/INT (drain) or QUIT (immediate).
+ForkSupervisor(
+    current_runtime(),
+    SupervisorConfig(
+        workers=[WorkerConfig(queues=("*",), threads=5)],
+        alive_threshold=300.0,     # prune a process whose heartbeat is this stale
+        shutdown_timeout=5.0,      # grace period for an in-flight drain on TERM
+        heartbeat_interval=60.0,
+    ),
+).start()
+```
+
+> CPU-bound work scales by running **more worker processes** (more forks / more boxes), not more threads — the GIL serializes threads. Threads parallelize I/O-bound jobs.
+
+### Running workers as separate processes
+
+The `firm-queue` CLI is the usual production entrypoint. `--import` loads the modules whose `@job`s must register; the URL comes from `--database-url` or `FIRM_QUEUE_DATABASE_URL`.
+
+```bash
+# Full stack (workers + dispatcher), forked — production default
+firm-queue start --import myapp.jobs --mode fork --threads 5 --queues "*"
+
+# Pin a process to specific queues (e.g. a dedicated mail box)
+firm-queue start --import myapp.jobs --queues "mail,notifications*" --threads 2
+
+# Windows / containers without fork:
+firm-queue start --import myapp.jobs --mode thread
+
+# Single-shot variants (cron, CI, debugging) — drain once and exit, no polling:
+firm-queue drain       --import myapp.jobs --queues "*" --limit 100
+firm-queue dispatch    --import myapp.jobs     # promote due scheduled jobs once
+firm-queue maintenance --import myapp.jobs     # promote blocked (concurrency) jobs once
+```
+
+The single-shot commands map to `firm.queue.worker.run_ready(rt, queues=(...), limit=N)`, `dispatcher.dispatch_once(rt)`, and `dispatcher.run_maintenance(rt)` if you'd rather drive them in-process.
+
+### Pointing modules at separate databases
+
+Nothing forces queue, cache, and channel to share one database — each is configured independently, so you can isolate hot tables or scale them separately. Match each one's migrations and its `firm-ui` tab to the same URL.
+
+```python
+import firm.queue as bq
+from firm.cache import Cache
+from firm.channel import Channel
+
+bq.configure(database_url="postgresql://jobs-db/myapp")     # queue
+cache = Cache(database_url="postgresql://cache-db/myapp")    # cache on its own box
+channel = Channel(database_url="postgresql://bus-db/myapp")  # channel on a third
+
+# Migrate each against its matching database:
+#   FIRM_QUEUE_DATABASE_URL=postgresql://jobs-db/myapp  alembic -c alembic.queue.ini upgrade head
+#   FIRM_CACHE_DATABASE_URL=postgresql://cache-db/myapp alembic -c alembic.cache.ini upgrade head
+
+# To share one Engine between cache and channel on the same DB:
+from firm._core.database import create_engine_for
+engine = create_engine_for("postgresql://localhost/myapp")
+cache = Cache(engine=engine)
+channel = Channel(engine=engine)
+```
+
+
+
+================================================================================
+# Source: docs/queue/overview.md
+================================================================================
+
+# firm-queue — overview
+
+Database-backed background jobs for Python. Run jobs out of SQLite, PostgreSQL, or MySQL/MariaDB
+with no Redis or other broker.
+
+## The model
+
+A job is a registered function. Enqueuing it inserts a row into `firm_jobs` (the source of
+truth) plus one *execution* row that tracks where the job is in its lifecycle. The execution moves
+between tables:
+
+```
+jobs (source of truth)
+  ├─ scheduled_executions   future jobs  ──dispatcher──▶ ready (or blocked)
+  ├─ ready_executions       claimable now ──worker────▶ claimed
+  ├─ blocked_executions     waiting on a concurrency limit
+  ├─ claimed_executions     running ───────────────────▶ finished (jobs.finished_at)
+  └─ failed_executions      raised, retries exhausted        │  or rescheduled for a retry
+```
+
+Eleven tables in total, all namespaced `firm_*`. The supporting tables are `semaphores`
+(concurrency), `pauses` (paused queues), `processes` (running workers/dispatchers + heartbeats),
+and `recurring_tasks` / `recurring_executions`
+(cron schedules + dedupe).
+
+## The four roles
+
+| Role | What it does |
+|---|---|
+| **Worker** | Polls `ready_executions`, claims a batch, runs each job on a thread pool. |
+| **Dispatcher** | Moves due `scheduled_executions` to ready; runs concurrency maintenance. |
+| **Scheduler** | Enqueues recurring tasks on their cron schedule. |
+| **Supervisor** | Starts and supervises the others — as threads or as forked processes — handles signals, heartbeats, and crash recovery. |
+
+You can run all of them with one command (`firm-queue start`), embed them in your own process
+([`ThreadSupervisor`](workers-and-supervisor.md)), or drive individual steps yourself
+(`worker.run_ready`, `dispatcher.dispatch_once`).
+
+## How a claim stays correct
+
+Two workers must never grab the same job. On PostgreSQL/MySQL that's `SELECT … FOR UPDATE SKIP
+LOCKED`; on SQLite (which has no row locking) it's a `BEGIN IMMEDIATE` write lock. The choice is
+hidden behind a small dialect seam, so the rest of the code is database-agnostic. See
+[Internals](internals.md) and [Database backends](../database-backends.md).
+
+## Read on
+
+- **[Getting started](getting-started.md)** — install, configure, run your first job.
+- **[Defining jobs](jobs.md)** — the `@job` decorator and enqueue API.
+- **[Concurrency controls](concurrency.md)**, **[Recurring tasks](recurring.md)**,
+  **[Retries & failures](retries-and-failures.md)**.
+- **[Workers & the supervisor](workers-and-supervisor.md)** — how to actually run it in production.
+
+
+
+================================================================================
+# Source: docs/queue/getting-started.md
+================================================================================
+
+# Getting started
+
+## Install
+
+```bash
+pip install "firm[queue]"            # or: uv add "firm[queue]"
+# add a database driver as needed (SQLite needs nothing):
+pip install "firm[queue,postgres]"   # psycopg
+pip install "firm[queue,mysql]"      # PyMySQL
+```
+
+See **[Installation](../installation.md)** for the full list of extras.
+
+## 1. Configure
+
+Point the library at a database. This is process-global; call it once at startup.
+
+```python
+import firm.queue as bq
+
+bq.configure(database_url="sqlite:///queue.db")
+# or "postgresql://localhost/myapp", or "mysql://user:pw@localhost/myapp"
+```
+
+## 2. Create the schema
+
+For development, create the tables directly:
+
+```python
+from firm.queue import schema
+from firm.queue import current_runtime
+
+schema.create_all(current_runtime().engine)
+```
+
+For production, use the bundled Alembic migration instead (`alembic upgrade head`) — see
+[Database backends](../database-backends.md#migrations).
+
+## 3. Define a job
+
+`@bq.job` turns a plain function into something you can enqueue. It stays directly callable, so you
+can unit-test the body without a database.
+
+```python
+@bq.job(queue="mailers", priority=5)
+def send_welcome(user_id: int, locale: str = "en") -> None:
+    user = load_user(user_id)
+    deliver_welcome_email(user, locale)
+```
+
+## 4. Enqueue
+
+```python
+from datetime import datetime, timedelta
+
+send_welcome.enqueue(42)                          # run as soon as a worker is free
+send_welcome.enqueue(42, locale="fr")             # keyword args work too
+send_welcome.enqueue_in(timedelta(hours=1), 42)   # run later
+send_welcome.enqueue_at(datetime(2026, 7, 1, 9, 0), 42)  # run at a specific time (naive UTC)
+```
+
+Arguments are stored as JSON. Plain JSON types plus `datetime`, `date`, `Decimal`, and `UUID`
+round-trip; anything else raises **at enqueue time** (see [Defining jobs](jobs.md)).
+
+## 5. Run it
+
+### Quick, in-process (great for a test)
+
+```python
+from firm.queue.worker import run_ready
+
+send_welcome.enqueue(42)
+processed = run_ready(current_runtime())   # claim + run all ready jobs inline
+```
+
+### The real thing — a worker process
+
+```bash
+firm-queue start \
+  --database-url sqlite:///queue.db \
+  --import myapp.jobs            # import the module(s) that define your @job functions
+```
+
+`start` runs a supervisor with a worker (thread pool) **and** a dispatcher (so scheduled jobs fire).
+Press `Ctrl-C` for a graceful drain. See the [CLI](cli.md) and
+[Workers & the supervisor](workers-and-supervisor.md) for all the options.
+
+## Full example
+
+```python
+# myapp/jobs.py
+from datetime import timedelta
+import firm.queue as bq
+
+bq.configure(database_url="sqlite:///queue.db")
+
+_sent: list[int] = []
+
+@bq.job()
+def greet(user_id: int) -> None:
+    _sent.append(user_id)
+
+if __name__ == "__main__":
+    from firm.queue import schema
+    from firm.queue import current_runtime
+    from firm.queue.worker import run_ready
+
+    schema.create_all(current_runtime().engine)
+    greet.enqueue(1)
+    greet.enqueue(2)
+    print("processed:", run_ready(current_runtime()))   # -> processed: 2
+    print("sent:", _sent)                                # -> sent: [1, 2]
+```
+
+
+
+================================================================================
+# Source: docs/queue/jobs.md
+================================================================================
+
+# Defining jobs
+
+## The `@job` decorator
+
+```python
+@bq.job(
+    queue="default",     # which queue this job lands in
+    priority=0,          # lower numbers are claimed first
+    attempts=1,          # total attempts before it's marked failed (1 = no retry)
+    backoff=3.0,         # exponential backoff base, in seconds
+    concurrency=None,    # optional concurrency-control dict (see below)
+)
+def my_job() -> None: ...
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `queue` | `"default"` | Queue name. Workers select queues by exact name, `prefix*`, or `*`. |
+| `priority` | `0` | Claim order within a queue — **lower is first**. |
+| `attempts` | `1` | Total attempts. `1` means run once, no retry. See [Retries & failures](retries-and-failures.md). |
+| `backoff` | `3.0` | Base for exponential backoff: attempt _n_ waits `backoff**n` seconds. |
+| `concurrency` | `None` | Limit simultaneous runs — see [Concurrency controls](concurrency.md). |
+
+The decorated object is a `Job`. It is **still directly callable**, so unit tests don't need a
+database:
+
+```python
+@bq.job()
+def add(a: int, b: int) -> int:
+    return a + b
+
+assert add(2, 3) == 5          # calls the function directly
+add.enqueue(2, 3)              # schedules it to run in a worker
+```
+
+## Enqueuing
+
+```python
+from datetime import datetime, timedelta
+
+my_job.enqueue(42)                                    # run now
+my_job.enqueue_in(timedelta(minutes=5), 42)           # run after a delay
+my_job.enqueue_at(datetime(2026, 7, 1, 9, 0), 42)     # run at a specific time (naive UTC)
+```
+
+- `enqueue` puts the job straight into `ready_executions` (or `blocked_executions` if a concurrency
+  limit applies).
+- `enqueue_at` / `enqueue_in` put it into `scheduled_executions`; the **dispatcher** promotes it to
+  ready when its time comes.
+- All three return the new `job_id`, or `None` if the job was **discarded** by a concurrency rule
+  (`on_conflict="discard"`).
+
+> **Note:** datetimes are naive UTC throughout. Pass UTC times to `enqueue_at`.
+
+## How a job is identified
+
+Each job is registered under its `module.qualname` (e.g. `myapp.jobs.send_welcome`). That string is
+stored in `jobs.class_name`, and the worker looks it up in the registry to find the callable. Two
+consequences:
+
+- **Import your job modules** before running a worker (the CLI's `--import` flag does this), so the
+  registry is populated.
+- A job enqueued by an old deploy that no longer defines the function fails cleanly with an
+  "unregistered job" error (recorded as a failed execution), rather than crashing the worker.
+
+## Argument serialization
+
+Arguments are serialized to compact JSON and stored in `jobs.arguments`. Supported types:
+
+- JSON natives: `str`, `int`, `float`, `bool`, `None`, `list`, `dict`.
+- Tagged extras that round-trip exactly: `datetime`, `date`, `Decimal`, `UUID`.
+
+```python
+from datetime import datetime
+from decimal import Decimal
+
+@bq.job()
+def charge(amount: Decimal, at: datetime) -> None: ...
+
+charge.enqueue(Decimal("9.99"), datetime(2026, 1, 1, 12, 0))   # fine
+```
+
+Anything else raises `TypeError` **at enqueue time** — a deliberate fail-fast, so the bug is the
+caller's, not a worker's hours later:
+
+```python
+charge.enqueue(object())   # TypeError: ... is not a serializable job argument
+```
+
+> **Tip:** pass IDs, not objects. There is no equivalent of Rails' GlobalID; serialize a `user_id`
+> and reload the record inside the job.
+
+
+
+================================================================================
+# Source: docs/queue/concurrency.md
+================================================================================
+
+# Concurrency controls
+
+Sometimes you need to cap how many copies of a job run at once — e.g. only one sync per account, or
+at most two report builds per tenant. `concurrency` does that.
+
+```python
+@bq.job(concurrency={"key": lambda order_id: order_id, "to": 1, "duration": 300})
+def charge(order_id: int) -> None:
+    ...
+```
+
+Now at most **one** `charge` runs per `order_id` at a time. Extra enqueues are *blocked* until the
+running one finishes.
+
+## The `concurrency` dict
+
+| Field | Default | Meaning |
+|---|---|---|
+| `key` | — | A callable `(*args, **kwargs) -> value`. The "variable" part of the concurrency key. |
+| `to` | `1` | Max simultaneous executions for a given key. |
+| `duration` | `180.0` | Seconds before the lock is considered stale (failsafe — see below). |
+| `group` | job's name | Namespace for the key. Give two different jobs the same `group` to make them share a limit. |
+| `on_conflict` | `"block"` | `"block"` to queue the job, or `"discard"` to drop it. |
+
+The full key is `"{group}/{key(...)}"`. With the default group (the job's `module.qualname`), each
+job's keys are isolated; set a shared `group` to coordinate across jobs.
+
+## Block vs. discard
+
+```python
+# block (default): the 2nd job waits, then runs when the 1st finishes
+@bq.job(concurrency={"key": lambda id: id, "to": 1})
+def sync(id): ...
+
+# discard: while one is running/queued for the key, new enqueues are dropped
+@bq.job(concurrency={"key": lambda id: id, "to": 1, "on_conflict": "discard"})
+def refresh(id): ...
+
+refresh.enqueue(1)   # -> job_id
+refresh.enqueue(1)   # -> None   (discarded; nothing inserted)
+```
+
+## Throttling with `to > 1`
+
+```python
+@bq.job(concurrency={"key": lambda tenant: tenant, "to": 2})
+def build_report(tenant): ...
+```
+
+The first two enqueues per tenant become ready; the third is blocked until one finishes.
+
+## How it works
+
+A `semaphores` row holds the remaining capacity for a key. Enqueuing a concurrency-limited job
+**acquires** (decrements) it: if capacity remains the job goes to `ready_executions`, otherwise to
+`blocked_executions`. When a job finishes (or fails), the worker **releases** (increments) the
+semaphore and **promotes** the next blocked job for that key to ready.
+
+> **Note:** for jobs enqueued with `enqueue_at`/`enqueue_in`, the concurrency check happens when the
+> **dispatcher** promotes them, not at enqueue time.
+
+### The `duration` failsafe
+
+If a worker dies after acquiring a semaphore but before releasing it, the slot would be stuck
+forever. `duration` bounds that: the semaphore and the blocked entry carry an `expires_at`, and the
+dispatcher's **maintenance** pass reclaims expired semaphores and promotes blocked jobs once a slot
+is free. Set `duration` comfortably longer than the job's worst-case runtime.
+
+> **Performance:** concurrency controls add work (a semaphore row per key, blocked/ready churn). Use
+> them where you need correctness, not as a general throttle for everything.
+
+## On SQLite
+
+SQLite has no row-level locking, so concurrency control there relies on the `BEGIN IMMEDIATE` write
+lock instead — and is fully exercised on SQLite, Postgres, and MySQL here. See [Internals](internals.md).
+
+
+
+================================================================================
+# Source: docs/queue/recurring.md
+================================================================================
+
+# Recurring tasks
+
+Run a job on a cron schedule — daily cleanups, hourly syncs, periodic reports.
+
+```python
+from firm.queue.scheduler import RecurringTask, Scheduler
+
+@bq.job()
+def cleanup() -> None:
+    ...
+
+tasks = [
+    RecurringTask(key="nightly-cleanup", schedule="0 3 * * *", job=cleanup),
+    RecurringTask(key="hourly-sync", schedule="0 * * * *", job=sync_job, args=(tenant_id,)),
+]
+```
+
+## `RecurringTask`
+
+| Field | Default | Meaning |
+|---|---|---|
+| `key` | — | Stable unique identifier for the task. |
+| `schedule` | — | A 5-field cron expression (parsed by [`croniter`](https://github.com/kiorky/croniter)). |
+| `job` | — | The `@job`-decorated function to enqueue. |
+| `args` | `()` | Positional arguments passed to the job. |
+| `kwargs` | `{}` | Keyword arguments passed to the job. |
+
+> **Note:** schedule syntax is standard cron (`"*/5 * * * *"`, `"0 3 * * *"`, …). Natural-language
+> forms (`"every 5 minutes"`, Fugit-style) are not supported.
+
+## Running the scheduler
+
+In production, hand your tasks to the supervisor and it runs the scheduler for you:
+
+```python
+from firm.queue.supervisor import ThreadSupervisor, SupervisorConfig, WorkerConfig, DispatcherConfig
+
+config = SupervisorConfig(
+    workers=[WorkerConfig()],
+    dispatchers=[DispatcherConfig()],
+    recurring=tasks,            # <- scheduler is started automatically when this is non-empty
+)
+with ThreadSupervisor(current_runtime(), config):
+    ...  # runs until the block exits
+```
+
+(The `firm-queue start` CLI builds a similar config; pass recurring tasks by configuring the
+supervisor in your own entrypoint.)
+
+To drive it manually — e.g. in a test — a `Scheduler` has a `tick()`:
+
+```python
+scheduler = Scheduler(current_runtime(), tasks)
+scheduler.sync_tasks()      # persist task definitions to recurring_tasks (for visibility)
+scheduler.tick()            # enqueue anything due for the current period
+```
+
+## Exactly-once per period, even with several schedulers
+
+Each `(task_key, run_at)` pair is recorded in `recurring_executions`, which has a **unique index**
+on `(task_key, run_at)`. If you run several schedulers (for redundancy), only one of them wins the
+insert for a given fire time — the rest skip it. So a recurring job is enqueued exactly once per
+period across the whole fleet.
+
+```python
+# two schedulers, same task, same minute:
+assert Scheduler(rt, tasks).tick(at=noon) == 1   # this one enqueued it
+assert Scheduler(rt, tasks).tick(at=noon) == 0   # deduped
+```
+
+
+
+================================================================================
+# Source: docs/queue/retries-and-failures.md
+================================================================================
+
+# Retries & failures
+
+## Automatic retries
+
+Set `attempts` to the total number of attempts (including the first):
+
+```python
+@bq.job(attempts=3, backoff=2.0)
+def flaky() -> None:
+    call_unreliable_api()
+```
+
+When the job raises:
+
+1. If attempts remain, it's **rescheduled** for a retry at `now + backoff**attempt` seconds (so
+   attempt 1 waits `2s`, attempt 2 waits `4s`, …). The dispatcher promotes it again when due.
+2. When attempts are exhausted, the traceback is written to `failed_executions` and the job stops.
+
+`attempts=1` (the default) means run once, no retry.
+
+Attempt counting is tracked on the `jobs.attempts` column.
+
+> **Note:** firm owns retry semantics itself, which is why there's an `attempts` column on
+> the jobs table tracking each job's tries.
+
+## Inspecting failures
+
+A failed job has a row in `firm_failed_executions` with the full traceback in `error`:
+
+```python
+from sqlalchemy import select
+from firm.queue import schema
+
+with current_runtime().engine.connect() as conn:
+    for row in conn.execute(select(schema.failed_executions.c.job_id, schema.failed_executions.c.error)):
+        print(row.job_id, row.error.splitlines()[-1])
+```
+
+## Manual retry
+
+Move failed jobs back to ready with the `maintenance` helpers:
+
+```python
+from firm.queue import maintenance
+
+maintenance.retry_failed(current_runtime(), job_id)   # one job; returns True if it was failed
+maintenance.retry_all_failed(current_runtime())       # everything; returns how many were retried
+```
+
+Retrying resets the attempt counter and clears `finished_at`, so the job runs fresh.
+
+## Unregistered jobs
+
+If a worker claims a job whose `class_name` isn't in the registry (e.g. the function was removed in
+a deploy), it's recorded as a failed execution with a clear error rather than crashing the worker.
+Make sure workers `--import` every module that defines jobs.
+
+## Crash recovery
+
+If a **worker process dies** mid-job (kill -9, OOM, machine reboot), its claimed job would otherwise
+be stuck. The supervisor detects the dead process (stale heartbeat) and **re-readies** the orphaned
+claim so another worker finishes it. See
+[Workers & the supervisor](workers-and-supervisor.md#crash-recovery).
+
+> **At-least-once:** because recovered jobs are retried, a job can run more than once if a worker
+> dies after the work completed but before the claim was cleared. Make jobs idempotent — the same
+> guidance any at-least-once queue gives.
+
+
+
+================================================================================
+# Source: docs/queue/queues.md
+================================================================================
+
+# Queues & retention
+
+## Inspecting and managing queues
+
+The `queues` module is the management API:
+
+```python
+from firm.queue import queues
+rt = current_runtime()
+
+queues.all_queues(rt)          # -> ["default", "mailers", ...] (queues with ready jobs)
+queues.size(rt, "mailers")     # -> number of ready jobs in the queue
+queues.latency(rt, "mailers")  # -> seconds since the oldest ready job was enqueued
+```
+
+## Pausing a queue
+
+A paused queue is skipped by workers — its jobs stay ready but nothing claims them until you resume.
+
+```python
+queues.pause(rt, "mailers")        # stop processing 'mailers'
+queues.is_paused(rt, "mailers")    # -> True
+queues.resume(rt, "mailers")       # start again
+```
+
+Pausing is durable (a row in `firm_pauses`), so it survives restarts.
+
+## Clearing a queue
+
+```python
+queues.clear(rt, "mailers")   # discard all ready jobs in the queue; returns how many were removed
+```
+
+This deletes the jobs (and cascades to their execution rows). Use it to drain a queue you no longer
+want processed.
+
+## Finished-job retention
+
+By default, finished jobs are **kept** (their `jobs.finished_at` is stamped) so you can inspect what
+ran. Control this with the `preserve_finished_jobs` setting:
+
+```python
+bq.configure(database_url=..., preserve_finished_jobs=False)   # delete jobs as they finish
+```
+
+When preserving (the default), prune old finished jobs periodically with `maintenance.clear_finished`:
+
+```python
+from datetime import timedelta
+from firm.queue import maintenance
+
+maintenance.clear_finished(rt)                                  # delete all finished jobs
+maintenance.clear_finished(rt, older_than=timedelta(days=7))    # only those finished > 7 days ago
+```
+
+It works in batches (`batch_size`, default 500) and returns how many rows it removed; call it in a
+loop or on a schedule (a [recurring task](recurring.md) is a natural fit) until it returns 0.
+
+
+
+================================================================================
+# Source: docs/queue/workers-and-supervisor.md
+================================================================================
+
+# Workers & the supervisor
+
+The supervisor runs the worker(s), dispatcher(s), and (optionally) the scheduler, and keeps them
+alive. There are two flavors.
+
+## ThreadSupervisor (embedded / async)
+
+Runs every role as a thread in the current process. Perfect for development, tests, and embedding
+the queue inside another app. It's a context manager:
+
+```python
+from firm.queue.supervisor import (
+    ThreadSupervisor, SupervisorConfig, WorkerConfig, DispatcherConfig,
+)
+from firm.queue import current_runtime
+
+config = SupervisorConfig(
+    workers=[WorkerConfig(queues=("*",), threads=3, poll_interval=0.1)],
+    dispatchers=[DispatcherConfig()],
+)
+
+with ThreadSupervisor(current_runtime(), config):
+    run_my_app()        # workers run in the background until the block exits
+```
+
+## ForkSupervisor (production)
+
+Forks a separate child process per role. Each child gets process
+isolation and its own thread pool; the supervisor reaps and restarts dead children. This is what the
+[`firm-queue start`](cli.md) CLI uses.
+
+```python
+from firm.queue.supervisor import ForkSupervisor, SupervisorConfig, WorkerConfig
+
+ForkSupervisor(current_runtime(), SupervisorConfig(workers=[WorkerConfig(threads=5)])).start()
+# blocks, supervising, until it receives a shutdown signal
+```
+
+> Fork is POSIX-only. On Windows, use `ThreadSupervisor` (or the CLI `--mode thread`).
+
+## Configuration objects
+
+```python
+SupervisorConfig(
+    workers=[WorkerConfig()],            # one or more workers
+    dispatchers=[DispatcherConfig()],    # usually one
+    recurring=[],                        # RecurringTasks -> a scheduler is started if non-empty
+    alive_threshold=300.0,               # seconds before a silent process is pruned
+    shutdown_timeout=5.0,                # grace period for a TERM drain
+    heartbeat_interval=60.0,             # how often each process refreshes its heartbeat
+)
+
+WorkerConfig(queues=("*",), threads=3, poll_interval=0.1)
+DispatcherConfig(batch_size=500, poll_interval=1.0, maintenance_interval=600.0)
+```
+
+`queues` accepts `"*"` (all non-paused queues, global priority order), exact names, or `prefix*`
+patterns. `threads` is the worker's pool size.
+
+> **Parallelism note:** threads parallelize I/O-bound jobs. Because of the GIL, CPU-bound jobs scale
+> by running **more worker processes** (more forked workers), not more threads. On a free-threaded
+> (no-GIL) Python build, the thread pool parallelizes CPU work too.
+
+## Signals & graceful shutdown
+
+| Signal | Behavior |
+|---|---|
+| `TERM` / `INT` (Ctrl-C) | **Graceful.** Stop claiming, let in-flight jobs finish within `shutdown_timeout`, then exit. |
+| `QUIT` | **Immediate.** Stop now. |
+
+The fork supervisor forwards `TERM` to its children and reaps them; any that overrun the timeout are
+killed.
+
+## Heartbeats & crash recovery {#crash-recovery}
+
+Every running process registers a row in `firm_processes` and refreshes `last_heartbeat_at`
+on a timer. The supervisor:
+
+- **Prunes** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and
+- **Recovers** their in-flight work: any claim held by a dead process is moved back to
+  `ready_executions` so another worker finishes it (`recovery.recover_orphaned_claims`). This also
+  runs on supervisor startup, to clean up after an earlier crash.
+
+This gives at-least-once delivery — see the idempotency note in
+[Retries & failures](retries-and-failures.md).
+
+## Lifecycle hooks
+
+Run code when a process starts/stops/exits, and capture background errors:
+
+```python
+from firm.queue.hooks import on, on_thread_error
+
+@on("worker_start")
+def warm_caches() -> None:
+    ...
+
+@on_thread_error
+def report(exc: BaseException) -> None:
+    sentry.capture_exception(exc)
+```
+
+Events follow `"{role}_{phase}"` where role ∈ `worker/dispatcher/scheduler/supervisor` and phase ∈
+`start/stop/exit`. A hook that raises never breaks the lifecycle — its error is routed to the
+`on_thread_error` handlers. Errors raised inside a poll loop (worker/dispatcher/scheduler) are routed
+there too.
+
+
+
+================================================================================
+# Source: docs/queue/configuration.md
+================================================================================
+
+# Configuration
+
+## `configure()`
+
+Set the process-global runtime once at startup:
+
+```python
+import firm.queue as bq
+
+bq.configure(
+    database_url="postgresql://localhost/myapp",
+    busy_timeout_ms=5000,
+    default_queue="default",
+    preserve_finished_jobs=True,
+)
+```
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `database_url` | — | SQLAlchemy URL. Bare `postgresql://` / `mysql://` are normalized to the shipped drivers. |
+| `engine` | `None` | Share your application's SQLAlchemy engine instead of a URL (you keep ownership; the engine-tuning settings below are then ignored). |
+| `busy_timeout_ms` | `5000` | SQLite only: how long a writer waits on a lock before erroring. |
+| `pool_size` / `max_overflow` | `20` / `40` | Connection-pool sizing for the engine firm builds. |
+| `default_queue` | `"default"` | Reserved for callers that want a shared default. |
+| `preserve_finished_jobs` | `True` | Keep finished jobs (stamp `finished_at`) vs. delete on finish. See [Queues & retention](queues.md#finished-job-retention). |
+
+`configure()` returns a `Runtime` and also installs it as the process-global, retrievable with
+`firm.queue.current_runtime()`. The engine is created lazily on first use, so
+`configure()` is cheap and fork-safe (a forked child calls `runtime.reset()` before its first query).
+
+To reuse your app's existing engine (one pool for app + queue):
+
+```python
+import firm.queue as bq
+from sqlalchemy import create_engine
+
+engine = create_engine("postgresql+psycopg://localhost/myapp")
+bq.configure(engine=engine)
+```
+
+## The engine & connection pool
+
+`configure()` builds a SQLAlchemy engine tuned for firm's access pattern:
+
+- **SQLite:** WAL journal mode, `busy_timeout`, foreign keys on, and `BEGIN IMMEDIATE` for claims.
+- **Postgres/MySQL:** `pool_pre_ping` + `pool_recycle=3600` so idle/stale connections recover
+  transparently.
+- A generous pool (`pool_size=20`, `max_overflow=40`) so many worker threads + the dispatcher,
+  scheduler, and heartbeat loops never starve.
+
+You rarely need to touch these; `configure(pool_size=…, max_overflow=…)` adjusts the pool, and
+`configure(engine=…)` bypasses firm's engine entirely.
+
+## Where settings matter
+
+- `preserve_finished_jobs` and retention → [Queues & retention](queues.md).
+- Worker/dispatcher/scheduler tuning lives in the **supervisor** configs
+  ([Workers & the supervisor](workers-and-supervisor.md)), not here.
+- Database choice and drivers → [Database backends](../database-backends.md).
+
+
+
+================================================================================
+# Source: docs/queue/cli.md
+================================================================================
+
+# CLI
+
+The `firm-queue` command runs and operates the queue. Every command takes the database URL
+(via `--database-url` or the `FIRM_QUEUE_DATABASE_URL` env var) and `--import` to load the
+modules that define your jobs.
+
+```bash
+firm-queue --help
+firm-queue start --help
+```
+
+## Commands
+
+### `start` — run the full stack
+
+Runs a supervisor with a worker and a dispatcher (and a scheduler if you've wired recurring tasks
+into your own entrypoint).
+
+```bash
+firm-queue start \
+  --database-url postgresql://localhost/myapp \
+  --import myapp.jobs \
+  --queues mailers,default \
+  --threads 5 \
+  --mode fork              # 'fork' (default, production) or 'thread'
+```
+
+`Ctrl-C` triggers a graceful drain. `--mode fork` forks one process per role; `--mode thread` runs
+everything as threads in one process (use this on Windows).
+
+### `work` — a single worker
+
+Runs just a worker (no dispatcher), polling until interrupted.
+
+```bash
+firm-queue work --import myapp.jobs --queues default --threads 3
+```
+
+### `drain` — process once and exit
+
+Claims and runs all currently-ready jobs, then exits. Handy for cron-style "process the backlog"
+runs or for tests.
+
+```bash
+firm-queue drain --import myapp.jobs --limit 100
+# processed 7 job(s)
+```
+
+### `dispatch` — promote due scheduled jobs once
+
+```bash
+firm-queue dispatch --import myapp.jobs
+# dispatched 3 job(s)
+```
+
+### `maintenance` — run concurrency maintenance once
+
+Expires stale semaphores and promotes blocked jobs that now have capacity.
+
+```bash
+firm-queue maintenance
+# promoted 1 blocked job(s)
+```
+
+## Tips
+
+- Set `FIRM_QUEUE_DATABASE_URL` once in your environment to omit `--database-url` everywhere.
+- `--import` is repeatable: `--import myapp.jobs --import myapp.mailers`.
+- For a typical deployment, run **one `start`** (or several, for more workers) per host; they
+  coordinate through the database.
+
+
+
+================================================================================
+# Source: docs/queue/internals.md
+================================================================================
+
+# Internals
+
+For contributors and the curious. The public API is small; most of the interesting work is in
+keeping claims correct across three databases.
+
+## The claim path
+
+A worker claims jobs in one short transaction:
+
+```sql
+SELECT id, job_id FROM ready_executions
+  WHERE queue_name = ? ORDER BY priority, job_id LIMIT <idle_threads>;   -- locked, see below
+INSERT INTO claimed_executions (job_id, process_id) VALUES ...;
+DELETE FROM ready_executions WHERE id IN (...);
+```
+
+Two workers must never select the same row. How that's guaranteed depends on the database, and is
+the **only** thing the dialect layer abstracts:
+
+| Database | Transaction | Row locking |
+|---|---|---|
+| SQLite | `BEGIN IMMEDIATE` (takes the single write lock up front) | none needed — writers are serialized |
+| PostgreSQL | ordinary transaction | `SELECT … FOR UPDATE SKIP LOCKED` |
+| MySQL / MariaDB | ordinary transaction | `SELECT … FOR UPDATE SKIP LOCKED` |
+
+The seam is `_core/dialects/Dialect`:
+
+```python
+class Dialect(ABC):
+    def begin_claim_tx(self, engine) -> ContextManager[Connection]: ...   # IMMEDIATE vs plain
+    def with_skip_locked(self, stmt: Select) -> Select: ...               # SKIP LOCKED vs no-op
+```
+
+Every "select rows I'm about to mutate" path uses **both**: it runs inside `begin_claim_tx` and
+wraps its `SELECT` in `with_skip_locked`. That covers the worker claim, the dispatcher's
+scheduled→ready promotion, the semaphore's blocked-job promotion, the maintenance pass, and crash
+recovery. On SQLite `with_skip_locked` is a no-op (the immediate write lock already serializes);
+on PG/MySQL it skips rows another worker holds.
+
+> This is why concurrency works on SQLite here: we serialize on the write lock instead of relying
+> on row-level locking (which SQLite doesn't have).
+
+## Queue selection
+
+`"*"` polls every non-paused queue in a single global `(priority, job_id)` order. A list of exact
+names / `prefix*` patterns polls the matched queues in order, each by `(priority, job_id)`. Paused
+queues (rows in `firm_pauses`) are always excluded.
+
+## Semaphores
+
+`acquire` is an atomic `UPDATE … SET value = value - 1 WHERE key = ? AND value > 0` (the decrement is
+row-safe on its own), falling back to an `INSERT … ON CONFLICT/SAVEPOINT` to create the row. `release`
+is the symmetric increment capped at the limit. `promote_one` selects the next blocked job for a key
+**`FOR UPDATE SKIP LOCKED`** so two concurrent releases can't promote the same job twice.
+
+## Dispatcher & maintenance
+
+- `dispatch_once` promotes due `scheduled_executions` (batched, priority order), applying concurrency
+  rules as it goes.
+- `run_maintenance` (the failsafe) deletes expired semaphores and then, for **every** blocked key
+  with free capacity — not just expired ones — promotes one job. This closes the small window where
+  a release could interleave with a dispatch and leave a job blocked while a slot is free.
+
+## The poller primitive
+
+Worker, dispatcher, scheduler, maintenance, and heartbeat are all `InterruptiblePoller`s: a thread
+that runs `poll()` then sleeps on a `threading.Event` so it can be woken or stopped instantly. The
+loop catches exceptions and routes them to the lifecycle error hooks, so one bad cycle never kills
+the thread.
+
+## The supervisor
+
+`ForkSupervisor` forks a child per role **before** starting any threads (so the parent stays
+single-threaded across `fork`), and each child calls `runtime.reset()` first to drop the engine/pool
+it inherited. Children install minimal signal handlers that just flip a stop event; only the
+supervisor reaps and restarts. `ThreadSupervisor` runs the same pollers as threads in one process.
+
+
+
+================================================================================
+# Source: docs/cache/overview.md
+================================================================================
+
+# firm-cache — overview
+
+A database-backed cache store for Python. Keep a large, durable cache in SQLite, PostgreSQL, or
+MySQL/MariaDB, with no Redis or Memcached.
+
+## Why cache in the database?
+
+Modern SSDs are fast enough that a database-backed cache can be **much larger** than an in-memory
+one — you're bounded by disk, not RAM. You also get durability (the cache survives restarts),
+encryption at rest, and one fewer service to run. The trade-off is higher per-op latency than Redis;
+for most read-through caches that's a fine deal.
+
+## The model
+
+One table, `firm_entries`:
+
+| Column | Purpose |
+|---|---|
+| `id` | Autoincrement — also the FIFO eviction order (oldest = smallest id). |
+| `key` | The raw key bytes (truncated past `max_key_bytesize`). |
+| `value` | The serialized (optionally encrypted) value. |
+| `key_hash` | A signed 64-bit hash of the key — the **unique lookup** column. |
+| `byte_size` | Estimated row size, used by the eviction estimator. |
+| `created_at` | Insertion time, used for age-based expiry. |
+
+Lookups go through `key_hash` (so there's no index on the up-to-1 KiB key), and writes are a single
+atomic upsert.
+
+## What it does
+
+- `get` / `set` / `fetch` / `delete` / `exist`, plus `get_multi` / `set_multi`, `increment` /
+  `decrement`, and `clear` — see [Operations](operations.md).
+- **Eviction** by age (`max_age`), total size (`max_size`), or entry count (`max_entries`), FIFO
+  (oldest first) — see [Eviction & expiry](eviction.md).
+- **Pluggable serialization** (pickle / JSON / your own) and optional **at-rest encryption** —
+  see [Encryption & coders](encryption-and-coders.md).
+
+```python
+from firm.cache import Cache
+
+cache = Cache(database_url="postgresql://localhost/myapp")
+cache.set("user:42", {"name": "Ada"})
+cache.fetch("homepage", lambda: render_homepage())   # read-through
+```
+
+Read on: **[Getting started](getting-started.md)**.
+
+
+
+================================================================================
+# Source: docs/cache/getting-started.md
+================================================================================
+
+# Getting started
+
+## Install
+
+```bash
+pip install "firm[cache]"              # or: uv add "firm[cache]"
+pip install "firm[cache,postgres]"     # psycopg, for PostgreSQL
+pip install "firm[cache,mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install "firm[cache,encryption]"   # cryptography, for at-rest encryption
+```
+
+See **[Installation](../installation.md)** for the full list of extras.
+
+## Create a cache
+
+```python
+from firm.cache import Cache
+
+cache = Cache(database_url="sqlite:///cache.db")
+```
+
+By default `Cache(...)` creates the `firm_entries` table if it's missing
+(`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
+`create_schema=False` — see [Database backends](../database-backends.md#migrations).
+
+## Use it
+
+```python
+cache.set("user:42", {"name": "Ada", "admin": True})
+cache.get("user:42")                 # -> {"name": "Ada", "admin": True}
+cache.get("missing")                 # -> None
+
+# read-through: compute and store on a miss, return the cached value on a hit
+value = cache.fetch("report:2026", lambda: build_expensive_report())
+
+cache.delete("user:42")              # -> True
+cache.exist("user:42")               # -> False
+```
+
+## Clean up
+
+A `Cache` owns a connection pool (and, optionally, a background expiry thread). Close it when you're
+done, or use it as a context manager:
+
+```python
+with Cache(database_url="sqlite:///cache.db") as cache:
+    cache.set("k", "v")
+# closed automatically
+```
+
+## A complete example
+
+```python
+from firm.cache import Cache
+
+with Cache(database_url="sqlite:///cache.db") as cache:
+    cache.set("greeting", "hello")
+    print(cache.get("greeting"))                       # hello
+    print(cache.fetch("pi", lambda: 3.14159))          # computes -> 3.14159
+    print(cache.fetch("pi", lambda: 0))                # cached  -> 3.14159
+    cache.increment("hits")
+    cache.increment("hits", 4)
+    print(cache.get("hits"))                           # 5
+```
+
+Next: **[Operations](operations.md)** and **[Eviction & expiry](eviction.md)**.
+
+
+
+================================================================================
+# Source: docs/cache/operations.md
+================================================================================
+
+# Operations
+
+All methods are on a `Cache` instance. Keys are `str` or `bytes`; values are any object your
+[coder](encryption-and-coders.md) can serialize (pickle by default).
+
+## Single key
+
+```python
+cache.set("k", value)          # store (last write wins)
+cache.get("k")                 # -> value, or None if absent
+cache.delete("k")              # -> True if a row was removed, else False
+cache.exist("k")               # -> True/False, without deserializing the value
+```
+
+## Read-through with `fetch`
+
+`fetch` returns the cached value on a hit, or computes it, stores it, and returns it on a miss:
+
+```python
+value = cache.fetch("user:42", lambda: load_user(42))
+# you can also pass a plain (non-callable) default:
+value = cache.fetch("flag", False)
+```
+
+> **Note:** a stored `None` is treated as a miss (there is no "cached None" sentinel), so `fetch`
+> will recompute keys whose value is `None`.
+
+## Many keys at once
+
+```python
+cache.set_multi({"a": 1, "b": 2})
+cache.get_multi(["a", "b", "c"])    # -> {"a": 1, "b": 2, "c": None}
+```
+
+`get_multi` is a single round-trip (one `WHERE key_hash IN (...)` query); missing keys come back as
+`None`.
+
+## Counters
+
+```python
+cache.increment("hits")        # -> 1   (creates the key at 0 first)
+cache.increment("hits", 5)     # -> 6
+cache.decrement("hits", 2)     # -> 4
+```
+
+`increment`/`decrement` are **atomic**: they run the read-modify-write under a serialized
+transaction (`BEGIN IMMEDIATE` on SQLite, `SELECT … FOR UPDATE` on Postgres/MySQL), so concurrent
+counters don't lose updates.
+
+## Clear everything
+
+```python
+cache.clear()                  # delete every entry
+```
+
+## Keys
+
+Keys are normalized to bytes. A key longer than `max_key_bytesize` (default 1024) is truncated and
+given a hash suffix so it stays unique — so very long keys are fine, just don't rely on the stored
+`key` bytes being the full original for huge keys. Lookups always go through the 64-bit `key_hash`,
+with a byte-for-byte key comparison to guard against the (astronomically rare) hash collision.
+
+
+
+================================================================================
+# Source: docs/cache/eviction.md
+================================================================================
+
+# Eviction & expiry
+
+The cache bounds its own size by evicting entries. Three independent limits, all optional:
+
+| Limit | Default | Evicts when… |
+|---|---|---|
+| `max_age` | 2 weeks (`1209600.0` s) | an entry is older than this |
+| `max_size` | 256 MiB | the estimated total byte size exceeds this |
+| `max_entries` | `None` (off) | the row count exceeds this |
+
+Set any to `None` to disable it:
+
+```python
+Cache(database_url=..., max_age=3600, max_size=None, max_entries=100_000)
+```
+
+## How eviction runs
+
+Eviction is **FIFO** — oldest entries (smallest `id`) go first. A run pulls 3× the batch as
+candidates and randomly samples the batch from them, so concurrent eviction passes rarely fight over
+the same rows.
+
+It's triggered two ways:
+
+- **Probabilistically, on write.** Each `set`/`set_multi` has a small chance (~`2 /
+  expiry_batch_size`, so ~2% with the default `expiry_batch_size=100`) of kicking off a background
+  eviction run. This keeps eviction pace with writes without running on every one. Disable with
+  `auto_expire=False`.
+- **On a timer**, if you opt in with `background_expiry=True` (runs every `expiry_interval` seconds).
+
+You can also run a pass yourself:
+
+```python
+cache.expiry.run_once()    # -> number of entries evicted
+```
+
+## Estimating size cheaply
+
+`max_size` needs to know the cache's total byte size without scanning every row. For small caches
+it's an exact `SUM(byte_size)`. Above `size_estimate_samples` (default 10,000) rows it switches to
+sampling: it sums the largest rows exactly (the "outliers") and samples a random `key_hash` window —
+`key_hash` is uniformly distributed — for the rest, then scales up. The result is a good estimate at
+constant cost.
+
+## Tuning
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `expiry_batch_size` | `100` | Rows removed per eviction run; also sets the ~2/N write-trigger probability. |
+| `size_estimate_samples` | `10000` | Exact-sum threshold and sample size for the estimator. |
+| `auto_expire` | `True` | Whether writes can trigger eviction. |
+| `background_expiry` | `False` | Run a background eviction loop. |
+| `expiry_interval` | `60.0` | Seconds between background runs (when enabled). |
+
+> **Note:** with all of `max_age`/`max_size`/`max_entries` disabled, the cache never evicts — it
+> grows until you `clear()` or `delete()`.
+
+
+
+================================================================================
+# Source: docs/cache/encryption-and-coders.md
+================================================================================
+
+# Encryption & coders
+
+## Coders
+
+A *coder* turns a value into bytes and back. The default is **pickle**, which handles arbitrary
+Python objects (the cache stores your own data, not untrusted input). JSON is available for
+interop, and you can supply your own.
+
+```python
+from firm.cache import Cache, JSONCoder, PickleCoder
+
+Cache(database_url=..., coder=JSONCoder())     # JSON values only (dict/list/str/num/bool/None)
+Cache(database_url=..., coder=PickleCoder())   # default
+```
+
+A custom coder is anything with `dumps(value) -> bytes` and `loads(bytes) -> value`:
+
+```python
+import msgpack   # pip install "firm[cache,msgpack]"
+
+class MsgpackCoder:
+    def dumps(self, value): return msgpack.packb(value, use_bin_type=True)
+    def loads(self, data):  return msgpack.unpackb(data, raw=False)
+
+Cache(database_url=..., coder=MsgpackCoder())
+```
+
+> **Security:** `PickleCoder` deserializes with `pickle`, which can execute arbitrary code. That's
+> fine for values your own app wrote, but never point a pickle-coded cache at a database other
+> processes can write untrusted bytes into. Use `JSONCoder` (or msgpack) if that's a concern.
+
+## Encryption at rest
+
+Wrap any coder with Fernet encryption by passing an `encrypt_key`:
+
+```python
+from cryptography.fernet import Fernet   # pip install "firm[cache,encryption]"
+
+key = Fernet.generate_key()              # store this securely; rotating it invalidates the cache
+cache = Cache(database_url=..., encrypt_key=key)
+
+cache.set("secret", "s3kr3t")
+# the stored `value` bytes are ciphertext; cache.get("secret") returns "s3kr3t"
+```
+
+The serialized value is encrypted before it's written and decrypted on read, so the plaintext never
+touches the database. Encryption adds ~170 bytes of overhead per entry, which is accounted for in
+`byte_size` (and therefore in `max_size` eviction).
+
+
+
+================================================================================
+# Source: docs/cache/configuration.md
+================================================================================
+
+# Configuration
+
+Every `Cache(...)` option, with its default:
+
+```python
+Cache(
+    database_url=None,            # SQLAlchemy URL (or pass engine=)
+    engine=None,                  # a pre-built SQLAlchemy Engine, instead of database_url
+    coder=None,                   # value coder; defaults to PickleCoder()
+    encrypt_key=None,             # Fernet key -> encrypt values at rest
+    max_age=1209600.0,            # evict entries older than this many seconds (2 weeks); None = off
+    max_size=268435456,           # evict when estimated total bytes exceed this (256 MiB); None = off
+    max_entries=None,             # evict when row count exceeds this; None = off
+    expiry_batch_size=100,        # rows per eviction run; also sets the write-trigger probability
+    max_key_bytesize=1024,        # keys longer than this are truncated + hash-suffixed
+    size_estimate_samples=10000,  # exact-sum threshold / sample size for the size estimator
+    create_schema=True,           # create firm_entries if missing
+    auto_expire=True,             # let writes probabilistically trigger eviction
+    background_expiry=False,      # run an eviction loop on a timer
+    expiry_interval=60.0,         # seconds between background eviction runs
+)
+```
+
+| Option | Default | Notes |
+|---|---|---|
+| `database_url` / `engine` | — | Provide one. `engine` lets two caches share a pool; bare `postgresql://`/`mysql://` URLs are normalized to the shipped drivers. |
+| `coder` | `PickleCoder()` | See [Encryption & coders](encryption-and-coders.md). |
+| `encrypt_key` | `None` | Fernet key (needs the `[encryption]` extra). |
+| `max_age` / `max_size` / `max_entries` | 2 wk / 256 MiB / off | Eviction limits — see [Eviction & expiry](eviction.md). |
+| `expiry_batch_size` | `100` | Eviction batch + write-trigger rate (~`2/N`). |
+| `max_key_bytesize` | `1024` | Long-key truncation. |
+| `size_estimate_samples` | `10000` | Estimator tuning. |
+| `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
+| `auto_expire` | `True` | Disable to evict only via `expiry.run_once()` / the background loop. |
+| `background_expiry` / `expiry_interval` | `False` / `60.0` | Opt-in timer-based eviction. |
+
+Call `cache.close()` (or use the `with` form) to stop the background loop and dispose the engine.
+
+## Sharing an engine
+
+```python
+from firm._core.database import create_engine_for
+engine = create_engine_for("postgresql://localhost/myapp")
+cache_a = Cache(engine=engine, max_entries=100_000)
+cache_b = Cache(engine=engine, create_schema=False)
+```
+
+
+
+================================================================================
+# Source: docs/cache/cli.md
+================================================================================
+
+# CLI
+
+The `firm-cache` command operates a cache database. Pass the URL with `--database-url` or the
+`FIRM_CACHE_DATABASE_URL` env var.
+
+```bash
+firm-cache --help
+```
+
+## Commands
+
+### `stats` — entry count and estimated size
+
+```bash
+firm-cache stats --database-url postgresql://localhost/myapp
+# entries: 1240
+# estimated_size: 5012345 bytes
+```
+
+### `clear` — delete every entry
+
+```bash
+firm-cache clear --database-url sqlite:///cache.db
+# cleared
+```
+
+### `trim` — run one eviction pass
+
+Evicts a batch according to the cache's `max_age`/`max_size`/`max_entries` limits and exits. Useful
+as a cron job if you run with `auto_expire=False`.
+
+```bash
+firm-cache trim
+# evicted 100 entries
+```
+
+> **Tip:** set `FIRM_CACHE_DATABASE_URL` in your environment to omit `--database-url`.
+
+
+
+================================================================================
+# Source: docs/cache/internals.md
+================================================================================
+
+# Internals
+
+## Schema
+
+One table, `firm_entries`:
+
+```
+id          autoincrement PK, FIFO eviction order
+key         BLOB (≤ 1024 bytes), the raw key
+value       large BLOB (LONGBLOB on MySQL), the serialized/encrypted value
+key_hash    BIGINT, UNIQUE — the lookup column
+byte_size   INT — estimated row size for the size estimator
+created_at  timestamp — for age-based eviction
+```
+
+Indexes: unique on `key_hash`, plus `(key_hash, byte_size)` and `byte_size` to support the estimator.
+
+## Key hashing
+
+`key_hash = signed_int64(SHA256(key)[:8])` (big-endian). Lookups and the unique constraint use
+`key_hash`, so there's no index on the up-to-1 KiB `key` column. Reads compare the stored `key`
+bytes to guard against the (vanishingly unlikely) 64-bit hash collision. Keys longer than
+`max_key_bytesize` are truncated with a `:hash:<hex>` suffix.
+
+## Writes are atomic upserts
+
+`write_entry` is a single dialect-native upsert keyed on `key_hash`, so concurrent writers to the
+same key never collide on the unique index:
+
+| Database | Statement |
+|---|---|
+| PostgreSQL | `INSERT … ON CONFLICT (key_hash) DO UPDATE …` |
+| MySQL / MariaDB | `INSERT … ON DUPLICATE KEY UPDATE …` |
+| SQLite | `INSERT … ON CONFLICT (key_hash) DO UPDATE …` |
+
+`increment` needs a read-modify-write, so it runs inside a serialized transaction (`BEGIN IMMEDIATE`
+on SQLite; `ensure_entry` to materialize the row, then `SELECT … FOR UPDATE` on Postgres/MySQL)
+before upserting the new value.
+
+## byte_size
+
+`byte_size = len(key) + len(value) + 140` (plus 170 if encrypted) — a fixed per-row overhead
+estimate. It's bookkeeping for the eviction estimator only; it never gates a write.
+
+## The size estimator
+
+`estimate_size` avoids scanning the whole table. When the row count is `≤ size_estimate_samples` it
+returns an exact `SUM(byte_size)`. Above that it sums the `samples` largest rows exactly (outliers),
+then samples a random `key_hash` window proportional to the table's id-span (since `key_hash` is
+uniform) and scales the sampled sum up, adding the outliers back. Constant cost, good accuracy.
+
+## Portability types
+
+`value` is `LargeBinary().with_variant(LONGBLOB, "mysql")` (plain `BLOB` caps at 64 KiB on MySQL),
+and `created_at` is `DATETIME(6)` on MySQL for sub-second precision. The id PK uses the `Integer`
+variant on SQLite so it maps to `INTEGER PRIMARY KEY` (rowid) and autoincrements.
+
+
+
+================================================================================
+# Source: docs/channel/overview.md
+================================================================================
+
+# firm-channel — overview
+
+Database-backed publish/subscribe for Python. Broadcast messages and subscribe to channels out of
+SQLite, PostgreSQL, or MySQL/MariaDB — no Redis, no message broker, no websocket server required.
+
+## The model
+
+A broadcast inserts a row into `firm_messages`. Subscribers register an in-process callback
+per channel; a background **listener** polls the table for rows newer than the last id it has seen
+on those channels and hands each payload to the matching callbacks.
+
+```
+broadcast("room:42", payload) ──▶ INSERT firm_messages (channel, payload, channel_hash, …)
+
+listener (every polling_interval):
+  SELECT … WHERE channel_hash IN (subscribed) AND id > last_id  ──▶ callback(payload)
+```
+
+One table, `firm_messages`:
+
+| Column | Purpose |
+|---|---|
+| `id` | Autoincrement — the delivery cursor (subscribers track the last id they've seen). |
+| `channel` | The channel the message was broadcast to (BLOB ≤ 1024 bytes). |
+| `payload` | The opaque message bytes (large BLOB / `LONGBLOB` on MySQL). |
+| `channel_hash` | A signed 64-bit hash of the channel — the indexed column the listener filters on. |
+| `created_at` | Insertion time — drives age-based trimming. |
+
+## Delivery semantics
+
+- **Per-process fan-out.** Every process running a `Channel` against the same database sees every
+  broadcast; each tracks its own cursor, so there's no competition for messages (unlike the queue,
+  where exactly one worker claims a job).
+- **From-now-on.** A subscription only receives messages broadcast *after* it was created — the
+  backlog already in the table is skipped.
+- **Opaque payloads.** Payloads are bytes in, bytes out (a `str` is UTF-8 encoded on broadcast).
+  Serialize structured data yourself (e.g. JSON) before broadcasting.
+
+## Trimming
+
+Old messages are deleted automatically. Each broadcast has a small (~2%) chance of triggering a
+**trim** that removes a batch of messages older than `message_retention` (default 1 day), using
+`FOR UPDATE SKIP LOCKED` so concurrent trimmers never fight. You can also trim on demand
+(`channel.trim()` or the [CLI](cli.md)).
+
+## Read on
+
+- **[Getting started](getting-started.md)** — install, broadcast, subscribe.
+- **[Configuration](configuration.md)** — every `Channel(...)` option.
+- **[CLI](cli.md)** — `firm-channel stats|trim`.
+- **[Internals](internals.md)** — the listener, channel hashing, and trimming in detail.
+
+
+
+================================================================================
+# Source: docs/channel/getting-started.md
+================================================================================
+
+# Getting started
+
+## Install
+
+```bash
+pip install "firm[channel]"             # or: uv add "firm[channel]"
+pip install "firm[channel,postgres]"    # psycopg, for PostgreSQL
+pip install "firm[channel,mysql]"       # PyMySQL, for MySQL/MariaDB
+```
+
+See **[Installation](../installation.md)** for the full list of extras.
+
+## Create a Channel
+
+```python
+from firm.channel import Channel
+
+ps = Channel(database_url="sqlite:///channel.db")
+```
+
+By default `Channel(...)` creates the `firm_messages` table if it's missing
+(`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
+`create_schema=False` — see [Database backends](../database-backends.md#migrations).
+
+## Subscribe and broadcast
+
+```python
+def on_message(payload: bytes) -> None:
+    print("got", payload)
+
+ps.subscribe("room:42", on_message)   # start listening (spins up the background listener)
+ps.broadcast("room:42", b"hello")     # on_message fires on the next poll (~0.1s)
+
+ps.broadcast("room:42", "héllo")      # a str payload is UTF-8 encoded -> b"h\xc3\xa9llo"
+ps.unsubscribe("room:42", on_message) # stop listening
+```
+
+Payloads are opaque bytes. To send structured data, serialize it yourself:
+
+```python
+import json
+ps.broadcast("room:42", json.dumps({"user": "ada", "text": "hi"}).encode())
+```
+
+## Clean up
+
+A `Channel` owns a connection pool and (once you subscribe) a background listener thread. Close it
+when you're done, or use it as a context manager:
+
+```python
+with Channel(database_url="sqlite:///channel.db") as ps:
+    ps.subscribe("room:42", on_message)
+    ps.broadcast("room:42", b"hi")
+# listener stopped, engine disposed
+```
+
+## A complete example
+
+```python
+import time
+from firm.channel import Channel
+
+with Channel(database_url="sqlite:///channel.db") as ps:
+    received: list[bytes] = []
+    ps.subscribe("news", received.append)
+    ps.broadcast("news", b"first")
+    ps.broadcast("news", b"second")
+    time.sleep(0.3)                 # let the listener poll
+    print(received)                 # [b"first", b"second"]
+```
+
+Next: **[Configuration](configuration.md)** and **[Internals](internals.md)**.
+
+
+
+================================================================================
+# Source: docs/channel/configuration.md
+================================================================================
+
+# Configuration
+
+Every `Channel(...)` option, with its default:
+
+```python
+Channel(
+    database_url=None,         # SQLAlchemy URL (or pass engine=)
+    engine=None,              # a pre-built SQLAlchemy Engine, instead of database_url
+    polling_interval=0.1,     # seconds the listener sleeps between polls
+    message_retention=86400.0,# trim messages older than this many seconds (1 day)
+    autotrim=True,            # let broadcasts probabilistically trigger trimming
+    trim_batch_size=100,      # rows per trim pass; also sets the trim-trigger rate (~2/N per write)
+    create_schema=True,       # create firm_messages if missing
+)
+```
+
+| Option | Default | Notes |
+|---|---|---|
+| `database_url` / `engine` | — | Provide one. `engine` lets several `Channel`es share a pool; bare `postgresql://`/`mysql://` URLs are normalized to the shipped drivers. |
+| `polling_interval` | `0.1` | Lower = lower delivery latency, more queries; `0.1s` balances the two. |
+| `message_retention` | `86400.0` | Age cut-off for trimming (seconds). |
+| `autotrim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
+| `trim_batch_size` | `100` | Trim batch + write-trigger rate (~`2/N`). |
+| `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
+
+Call `channel.close()` (or use the `with` form) to stop the listener and dispose the engine.
+
+## Sharing an engine
+
+```python
+from firm._core.database import create_engine_for
+engine = create_engine_for("postgresql://localhost/myapp")
+pub = Channel(engine=engine)                       # a publisher
+sub = Channel(engine=engine, create_schema=False)  # a subscriber sharing the pool
+```
+
+## Tuning latency vs. load
+
+The listener polls every `polling_interval` seconds, so delivery latency is at most one interval.
+Drop it (e.g. `0.05`) for snappier delivery at the cost of more `SELECT`s, or raise it on a busy
+database where a little extra latency is fine.
+
+
+
+================================================================================
+# Source: docs/channel/cli.md
+================================================================================
+
+# CLI
+
+The `firm-channel` command operates a pub/sub database. Pass the URL with `--database-url` or
+the `FIRM_CHANNEL_DATABASE_URL` env var.
+
+```bash
+firm-channel --help
+```
+
+## Commands
+
+### `stats` — number of buffered messages
+
+```bash
+firm-channel stats --database-url postgresql://localhost/myapp
+# messages: 312
+```
+
+### `trim` — delete old messages and exit
+
+Deletes a batch of messages older than the retention window and exits. Useful as a cron job, or if
+you run with `autotrim=False`.
+
+```bash
+firm-channel trim --retention 86400 --batch-size 100
+# trimmed 100 messages
+```
+
+> **Tip:** set `FIRM_CHANNEL_DATABASE_URL` in your environment to omit `--database-url`.
+
+
+
+================================================================================
+# Source: docs/channel/internals.md
+================================================================================
+
+# Internals
+
+## Schema
+
+One table, `firm_messages`:
+
+```
+id            autoincrement PK, the delivery cursor
+channel       BLOB (≤ 1024 bytes), the channel name (VARBINARY(1024) on MySQL so it can be indexed)
+payload       large BLOB (LONGBLOB on MySQL), the opaque message bytes
+channel_hash  signed 64-bit hash of the channel — the listener's filter column
+created_at    insertion time (DATETIME(6) on MySQL), drives trimming
+```
+
+Three indexes: on `channel`, on `channel_hash`, and on `created_at`.
+
+## channel_hash
+
+`channel_hash = SHA256(channel)[:8]` reinterpreted as a **signed** big-endian 64-bit integer — the
+same scheme the cache uses for `key_hash`. Subscriptions and the listener query filter on this
+indexed integer instead of the raw (up to 1 KiB) channel bytes. It's signed because Postgres and
+SQLite have no unsigned 64-bit integer, so about half of all channels hash to a negative value (the
+column is a signed `BigInteger` to match).
+
+A 64-bit hash can in principle collide, so the listener filters candidate rows by `channel_hash` but
+dispatches strictly by the exact `channel` — a colliding-but-different channel is fetched and then
+skipped.
+
+## The listener
+
+`subscribe` starts one background **listener** thread (an `InterruptiblePoller`) the first time it's
+called. Each cycle, every `polling_interval` seconds, it:
+
+1. snapshots the subscribed channels and the global cursor `last_id`;
+2. runs `SELECT id, channel, payload WHERE channel_hash IN (subscribed) AND id > last_id ORDER BY id`;
+3. for each row, advances `last_id`, and — guarding against re-delivery with a **per-channel**
+   cursor — calls every callback registered for that exact channel.
+
+Two cursors are tracked: a **global** `last_id` (so the next query only fetches genuinely new rows)
+and a **per-channel** last id (so a channel subscribed later never receives messages that predate
+its subscription). A subscriber error is swallowed so it can't break the listener or the others.
+
+The listener thread sleeps on a `threading.Event`, so `close()` interrupts it immediately rather
+than waiting out the poll interval.
+
+## Trimming
+
+`firm_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
+a ~`2 / trim_batch_size` chance (≈ 2% at the default batch of 100) of submitting a **trim** to a
+single background thread — the same probabilistic trigger the cache uses for eviction. A trim is:
+
+```sql
+SELECT id FROM firm_messages WHERE created_at < :cutoff
+  FOR UPDATE SKIP LOCKED LIMIT :batch_size;   -- SKIP LOCKED on PG/MySQL; BEGIN IMMEDIATE on SQLite
+DELETE FROM firm_messages WHERE id IN (...);
+```
+
+`SKIP LOCKED` (via the shared dialect seam) means several processes can trim concurrently without
+deleting the same rows or blocking each other. Set `autotrim=False` to trim only via `trim()` / the
+CLI / a cron.
+
+
+
+================================================================================
+# Source: docs/audit/overview.md
+================================================================================
+
+# firm-audit — overview
+
+An append-only, database-backed audit log for Python. Record who did what, when, and to what — in
+the same database (and, if you want, the same transaction) as the change itself — on SQLite,
+PostgreSQL, or MySQL/MariaDB.
+
+firm-audit is **not a port of a Rails Solid gem** — there is no `solid_audit`. It's an original
+firm module that shares the same "you already have a database" thesis as `firm.cache` and
+`firm.channel`. See [Comparison to Rails](../comparison-to-rails.md).
+
+## Why an audit log in the database?
+
+The reason to put an audit trail in the same database as the data it describes — rather than an
+external log shipper or event store — is the **same-transaction guarantee**: write the audit row
+inside the transaction that makes the change, and a recorded event can never exist without its
+business change, or vice versa. That guarantee is only available when both live in one database;
+nothing external can give it to you.
+
+firm-audit also supports a **separate** audit database when you'd rather isolate it — durable, but
+no longer atomic with the business write. See [Configuration](configuration.md).
+
+## The model
+
+One table, `firm_audits`:
+
+| Column | Purpose |
+|---|---|
+| `id` | Autoincrement — total event order. |
+| `action` | What happened, e.g. `"invoice.paid"`. |
+| `subject_type` / `subject_id` / `subject_label` | Polymorphic target of the action — each part optional; `*_label` is a display name captured at event time. |
+| `actor_type` / `actor_id` / `actor_label` | Polymorphic actor — who (or what) did it; same optional shape. |
+| `correlation_id` | Groups events from one request/transaction. |
+| `data` | Free-form JSON payload. |
+| `changes` | Free-form JSON before/after diff (`{field: [before, after]}`). |
+| `context` | Free-form JSON request metadata (ip, request id, ...). |
+| `created_at` | When the event was recorded. |
+
+Actor and subject are **references**: pass a domain object (`.id` → its id), an explicit
+`("Type", id)` tuple, a bare `"label"` string (a role/kind like `"cron"` — stored as the type), or
+a `Ref(type, id, name)` — and each of type / id / name is optional, so a non-entity actor needs no
+invented id. See [Getting started](getting-started.md#references-the-subject-and-the-actor).
+
+`data`/`changes`/`context` are stored as JSON **text**, not native JSON/JSONB — see
+[Internals](internals.md) for why, and what it means for querying. `subject_label`/`actor_label`
+are display-only and, like the JSON payloads, never filtered on in SQL.
+
+## What it does
+
+- `record` — append one event, optionally inside a caller-supplied transaction (the
+  same-transaction path) — see [Getting started](getting-started.md).
+- `history` — query events by subject / actor / action / correlation id / time — filter by a full
+  subject/actor, or by type or id alone — see [Retention & querying](retention-and-querying.md).
+- **Append-only by construction**: the public API has no update or delete. The only thing that
+  ever removes a row is opt-in, age-based **retention** — off by default (keep forever) — see
+  [Retention & querying](retention-and-querying.md).
+
+```python
+from firm.audit import AuditLog, record
+
+# shared DB, atomic with a business change:
+with engine.begin() as conn:
+    mark_invoice_paid(conn, invoice_id)
+    record(conn, "invoice.paid", subject=invoice, actor=user, data={"amount": 4200})
+
+# standalone:
+log = AuditLog(database_url="sqlite:///audit.db")
+log.record("user.login", actor=user)
+log.record("sync.ran", actor="cron")  # a non-entity actor — a role, no id
+log.history(action="user.login")
+```
+
+Read on: **[Getting started](getting-started.md)**.
+
+
+
+================================================================================
+# Source: docs/audit/getting-started.md
+================================================================================
+
+# Getting started
+
+## Install
+
+```bash
+pip install "firm[audit]"              # or: uv add "firm[audit]"
+pip install "firm[audit,postgres]"     # psycopg, for PostgreSQL
+pip install "firm[audit,mysql]"        # PyMySQL, for MySQL/MariaDB
+```
+
+See **[Installation](../installation.md)** for the full list of extras.
+
+## Create an audit log
+
+```python
+from firm.audit import AuditLog
+
+audit = AuditLog(database_url="sqlite:///audit.db")
+```
+
+By default `AuditLog(...)` creates the `firm_audits` table if it's missing
+(`create_schema=True`). For production schema management, use the bundled Alembic migration and
+pass `create_schema=False` — see [Database backends](../database-backends.md#migrations).
+
+## Record events
+
+```python
+audit.record(
+    "invoice.paid",
+    subject=invoice,                  # a domain object with `.id`, or ("Invoice", invoice_id)
+    actor=current_user,
+    data={"amount": 4200, "currency": "USD"},
+    correlation_id=request_id,
+)
+
+audit.history(action="invoice.paid")  # -> most recent events first
+```
+
+## References: the subject and the actor
+
+`subject` and `actor` are **references**, and both accept the same forms — type and id are each
+optional, so you're never forced to invent an id for a non-entity actor:
+
+| You pass | Stored as `(type, id, name)` | When |
+|---|---|---|
+| a domain object with `.id` | `(ClassName, str(obj.id), None)` | the common case — a model instance |
+| `("Invoice", 42)` | `("Invoice", "42", None)` | explicit type + id |
+| `"cron"` (a bare string) | `("cron", None, None)` | a **role/kind** with no record: `system`, `cron`, a webhook, an LLM |
+| `Ref("User", 7, name="alice@example.com")` | `("User", "7", "alice@example.com")` | attach a human-readable **display name** |
+| `None` (the default) | `(None, None, None)` | a system event with no actor/subject |
+
+```python
+from firm.audit import Ref
+
+audit.record("sync.ran", actor="cron")                        # a role, no id
+audit.record("user.login", actor=Ref("User", 7, name=email))  # id + display name
+audit.record("system.boot")                                   # no actor at all
+```
+
+The display **name** is stored so the row stays legible after the referenced record is deleted or
+renamed — an audit log outlives the data it describes. It's display-only; filters never touch it. A
+bare string becomes the *type* (a role you can filter on with `history(actor="cron")`), so pass a
+string *identity* like an email as `("user", email)`, not bare. For a model whose audit identity
+isn't `.id`, define `__firm_audit_ref__(self) -> Ref` on it and it will be used automatically.
+
+Two more free-form channels ride alongside `data`: `changes` for a before/after diff (by convention
+`{field: [before, after]}`, e.g. `changes={"status": ["pending", "paid"]}`) and `context` for
+request metadata (`{"ip": ..., "request_id": ...}`).
+
+## The same-transaction guarantee
+
+The reason to reach for firm-audit instead of an external log: when your app and the audit log
+share a database, pass the **connection already inside your transaction**, and the audit row
+commits or rolls back together with the business change — never one without the other.
+
+```python
+from firm.audit import record
+
+with engine.begin() as conn:
+    mark_invoice_paid(conn, invoice_id)
+    record(conn, "invoice.paid", subject=invoice, actor=current_user, data={"amount": 4200})
+# both commit together, or both roll back — there is no in-between state
+```
+
+`AuditLog.record(..., conn=...)` does the same thing through the facade — pass `conn` to join an
+existing transaction, or omit it to let `AuditLog` open and commit its own (a separate,
+non-atomic write — see [Configuration](configuration.md#two-topologies)).
+
+## Clean up
+
+An `AuditLog` owns a connection pool (and, optionally, a background retention thread). Close it
+when you're done, or use it as a context manager:
+
+```python
+with AuditLog(database_url="sqlite:///audit.db") as audit:
+    audit.record("user.login", actor=user)
+# closed automatically
+```
+
+## A complete example
+
+```python
+from firm.audit import AuditLog
+
+with AuditLog(database_url="sqlite:///audit.db") as audit:
+    audit.record("user.login", actor=("User", 7), context={"ip": "127.0.0.1"})
+    audit.record(
+        "invoice.paid", subject=("Invoice", 42), actor=("User", 7), data={"amount": 4200}
+    )
+
+    for event in audit.history(limit=10):
+        print(event["created_at"], event["action"])
+```
+
+Next: **[Retention & querying](retention-and-querying.md)** and
+**[Configuration](configuration.md)**.
+
+
+
+================================================================================
+# Source: docs/audit/retention-and-querying.md
+================================================================================
+
+# Retention & querying
+
+## Querying with `history()`
+
+```python
+audit.history(
+    subject=None,            # a domain object, ("Type", id), a Ref, or a bare "label" string
+    subject_type=None,        # or filter by type alone …
+    subject_id=None,           # … or id alone (either, or both, independently)
+    actor=None,                  # same shape as subject
+    actor_type=None,
+    actor_id=None,
+    action=None,                    # exact match
+    correlation_id=None,
+    since=None,                        # datetime — only events at/after this time
+    limit=100,
+)
+```
+
+A reference passed to `subject=`/`actor=` filters on its `(type, id)` — any display name is
+ignored. A bare string is a type, so `actor="cron"` is exactly `actor_type="cron"`: it filters by
+type only and matches every role-labelled `cron` event regardless of id.
+
+Filters combine with AND. Results are newest-first (by `id`). Every filter hits an indexed
+scalar column — `history()` never filters on `data`/`changes`/`context` (see
+[Internals](internals.md)). Pass either the paired form (`subject=`) or the split form
+(`subject_type=`/`subject_id=`) for a given field, never both — mixing them raises `ValueError`.
+
+```python
+audit.history(subject=invoice, limit=10)                  # this invoice's history
+audit.history(actor=user, since=last_week)                 # what this user did recently
+audit.history(action="invoice.paid", correlation_id=rid)   # one request's payment event
+audit.history(subject_type="Invoice")                       # every invoice, any id
+audit.history(actor_type="model")                             # everything a model actor did
+audit.history(actor="cron")                                    # a role/label actor (type only)
+```
+
+The same-transaction `record(conn, ...)` path has no equivalent inline query — open your own
+connection and call `audit.history(...)`, or query `firm.audit.schema.audits` directly if you
+need something `history()` doesn't express.
+
+## Retention
+
+firm-audit keeps events **forever by default** (`max_age=None`) — an audit log that silently
+drops history defeats its own purpose, so pruning is opt-in, not automatic.
+
+```python
+AuditLog(database_url="postgresql://localhost/myapp", max_age=7776000.0)   # prune after 90 days
+```
+
+Unlike `firm.cache`'s eviction, retention is **never triggered by writes** — `record()` never
+calls into it, no matter how short `max_age` is. Pruning only happens when you ask for it:
+
+```python
+audit.retention.run_once()    # -> number of events deleted
+```
+
+or on a timer, if you opt in:
+
+```python
+AuditLog(
+    database_url="postgresql://localhost/myapp",
+    max_age=7776000.0,
+    background_retention=True,
+    retention_interval=3600.0,
+)
+```
+
+or from the CLI — see [CLI](cli.md):
+
+```bash
+firm-audit prune --database-url sqlite:///audit.db --max-age 7776000
+```
+
+> **Note:** with `max_age` unset, the audit log never prunes — it grows until you explicitly set
+> a retention policy. For compliance-sensitive deployments, this is the point: nothing deletes
+> audit history unless you've configured it to.
+
+
+
+================================================================================
+# Source: docs/audit/configuration.md
+================================================================================
+
+# Configuration
+
+Every `AuditLog(...)` option, with its default:
+
+```python
+AuditLog(
+    database_url=None,              # SQLAlchemy URL (or pass engine=)
+    engine=None,                    # a pre-built SQLAlchemy Engine, instead of database_url
+    create_schema=True,             # create firm_audits if missing
+    max_age=None,                   # prune events older than this many seconds; None = keep forever
+    background_retention=False,     # run a retention loop on a timer
+    retention_interval=3600.0,      # seconds between background retention runs
+)
+```
+
+| Option | Default | Notes |
+|---|---|---|
+| `database_url` / `engine` | — | Provide one. `engine` lets the audit log share a pool with your application — see [Two topologies](#two-topologies). |
+| `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
+| `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
+| `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
+
+Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
+
+## Two topologies
+
+**Shared database** — pass `engine=` pointing at your application's own engine (or the same
+`database_url`). `AuditLog.record(..., conn=...)` and the module-level `record(conn, ...)` then
+write inside *your* transaction: atomic with the business change, the same-transaction guarantee.
+
+```python
+from firm.audit import AuditLog
+
+audit = AuditLog(engine=app_engine)          # same database as the rest of the app
+```
+
+**Separate database** — point `database_url` at a dedicated audit database. Writes are durable
+but **not atomic** with the business change (they're different databases — no single transaction
+can span both). `record()` raises on failure; the caller decides what to do. A transactional
+outbox (atomic append into a local table, relayed to the remote audit database) would close this
+gap, but firm-audit doesn't build one — it's out of scope for now.
+
+```python
+audit = AuditLog(database_url="postgresql://audit-host/audit_db")  # independent durable write
+```
+
+Both topologies use the same `record()` / `history()` API — the only difference is whether you
+pass `conn`.
+
+## Sharing an engine
+
+```python
+from firm._core.database import create_engine_for
+
+engine = create_engine_for("postgresql://localhost/myapp")
+audit_a = AuditLog(engine=engine)
+audit_b = AuditLog(engine=engine, create_schema=False)
+```
+
+
+
+================================================================================
+# Source: docs/audit/cli.md
+================================================================================
+
+# CLI
+
+The `firm-audit` command operates an audit database. Pass the URL with `--database-url` or the
+`FIRM_AUDIT_DATABASE_URL` env var.
+
+```bash
+firm-audit --help
+```
+
+## Commands
+
+### `stats` — total event count
+
+```bash
+firm-audit stats --database-url postgresql://localhost/myapp
+# events: 1240
+```
+
+### `history` — list recent events
+
+```bash
+firm-audit history --database-url sqlite:///audit.db --action invoice.paid --limit 10
+# 2026-06-30 12:00:00  invoice.paid  subject=Invoice:42  actor=User:7 (alice@example.com)
+```
+
+References render as `Type:id`, with a display name in parentheses when one was recorded; a
+role/label actor (no id) shows just its type, and an absent actor/subject shows `-`:
+
+```
+2026-06-30 12:00:05  sync.ran         subject=-            actor=cron
+2026-06-30 12:00:04  system.boot      subject=-            actor=-
+2026-06-30 12:00:00  invoice.paid     subject=Invoice:42   actor=User:7 (alice@example.com)
+```
+
+Filters: `--action`, `--subject-type`, `--subject-id`, `--actor-type`, `--actor-id`,
+`--correlation-id`, `--limit` (default 20). Each is independent — use any one alone, any
+combination, or all of them together.
+
+```bash
+firm-audit history --database-url sqlite:///audit.db --actor-type model   # everything a model actor did
+firm-audit history --database-url sqlite:///audit.db --actor-type cron    # a role/label actor
+```
+
+### `prune` — delete events older than `max_age`
+
+A no-op unless you pass `--max-age` (seconds) — pruning is opt-in, matching the library's
+keep-forever default. See [Retention & querying](retention-and-querying.md).
+
+```bash
+firm-audit prune --database-url sqlite:///audit.db --max-age 7776000   # 90 days
+# pruned 12 events
+```
+
+> **Tip:** set `FIRM_AUDIT_DATABASE_URL` in your environment to omit `--database-url`.
+
+
+
+================================================================================
+# Source: docs/audit/internals.md
+================================================================================
+
+# Internals
+
+## Schema
+
+One table, `firm_audits`:
+
+```
+id              autoincrement PK, total event order
+action          VARCHAR(255), not null — what happened
+subject_type    VARCHAR(255) — polymorphic target type
+subject_id      VARCHAR(255) — polymorphic target id
+subject_label   VARCHAR(255) — display name captured at event time (display-only)
+actor_type      VARCHAR(255) — polymorphic actor type
+actor_id        VARCHAR(255) — polymorphic actor id
+actor_label     VARCHAR(255) — display name captured at event time (display-only)
+correlation_id  VARCHAR(255) — groups events from one request/transaction
+data            TEXT — JSON-encoded free-form payload
+changes         TEXT — JSON-encoded before/after diff
+context         TEXT — JSON-encoded request metadata
+created_at      timestamp — when the event was recorded
+```
+
+Every part of a reference is nullable: an actor/subject may have a type without an id (a role
+label like `cron`), an id without a type, or neither (a system event) — see
+[Getting started](getting-started.md#references-the-subject-and-the-actor).
+
+Indexes: `(subject_type, subject_id)`, `(actor_type, actor_id)`, `action`, `correlation_id`,
+`created_at` — every column `history()` filters on. `subject_label`/`actor_label` are display-only
+(they preserve a human name after the referenced record is gone) and, like
+`data`/`changes`/`context`, are **not** indexed or queryable in SQL; see below.
+
+## Append-only, by construction
+
+`firm.audit.events.append` is the only function in the package that writes a row, and it only
+ever issues an `INSERT`. `firm.audit.record` and `AuditLog.record` both funnel through it. There
+is no `update`, and the only `delete` anywhere in the package is opt-in, age-based retention (see
+[Retention & querying](retention-and-querying.md)) — recording never triggers it.
+
+This is an application-level guarantee, not a database constraint: nothing stops raw SQL against
+`firm_audits` from outside firm-audit. The guarantee is "the module is the sole writer, and it
+only inserts."
+
+## JSON-as-text, not JSONB
+
+`data`/`changes`/`context` are stored as `Text` holding a JSON string — the same approach
+`firm.queue` uses for job arguments — rather than native `JSON`/`JSONB`. This keeps the column
+dialect-uniform (SQLite has no native JSON type) at the cost of SQL-side queryability: you can't
+filter or index into the payload from SQL. In practice this is rarely a real loss —
+`history()` filters on the indexed scalar columns (`action`, `subject`, `actor`,
+`correlation_id`, `created_at`), and those are the fields an audit search actually needs. If you
+need to query *inside* payloads routinely, consider also recording the relevant value as its own
+scalar field, or query the table directly with your dialect's JSON functions on `data` after
+parsing it yourself.
+
+A small tagged-object protocol round-trips `datetime`/`date`/`Decimal`/`UUID` values inside
+`data`/`changes`/`context`, independent of `firm.queue.serialization`.
+
+## Same-transaction guarantee — the fine print
+
+`record(conn, ...)` writes on exactly the connection you pass. The atomicity guarantee holds
+only when `firm_audits` lives in the same database that connection belongs to — pass a
+connection from a different database and the row is simply written there, untethered from
+whatever transaction you think it's joining. There's no cheap way to detect this misuse at
+runtime, so it's a documented contract rather than an enforced one.
+
+## Portability types
+
+The `id` PK uses the `Integer` variant on SQLite (so it maps to `INTEGER PRIMARY KEY`/rowid and
+autoincrements), `BigInteger` elsewhere. `created_at` is `DATETIME(6)` on MySQL for sub-second
+precision, matching `firm.cache` and `firm.queue`.
+
+
+
+================================================================================
+# Source: docs/contrib.md
+================================================================================
+
+# Framework integration
+
+`firm.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
+is opt-in, behind its own extra, and **nothing in core imports it** — if you don't use it, it costs
+nothing. You still define jobs the normal way with `@bq.job`.
+
+| Import | Install | What it does |
+|---|---|---|
+| `firm.contrib.fastapi.lifespan` | `firm[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.contrib.flask.Firm` | `firm[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+
+## FastAPI
+
+```python
+from fastapi import FastAPI
+from firm.contrib.fastapi import lifespan
+
+app = FastAPI(lifespan=lifespan(database_url="postgresql://localhost/app"))
+
+@app.post("/welcome/{user_id}")
+def welcome(user_id: int):
+    send_welcome.enqueue(user_id)      # a normal @bq.job
+    return {"queued": True}
+```
+
+The lifespan calls `configure(...)` on startup so your handlers can enqueue. Pass
+`embed_workers=True` (with `queues=`, `threads=`) to also run a worker + dispatcher **inside the app
+process** — convenient for development or a single-process deploy; it's stopped on shutdown.
+
+## Flask
+
+```python
+from flask import Flask
+from firm.contrib.flask import Firm
+
+app = Flask(__name__)
+app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
+Firm(app)                         # or Firm(app, database_url="...")
+
+@app.post("/welcome/<int:user_id>")
+def welcome(user_id):
+    send_welcome.enqueue(user_id)
+    return "", 202
+```
+
+The extension configures the queue and registers a CLI group, so you run workers with:
+
+```bash
+flask firm worker --threads 5 --queues default,mailers
+```
+
+`Firm(app, embed_workers=True)` runs the worker inside the web process instead (dev /
+single-process only — otherwise every web worker starts its own supervisor).
+
+## Transactional enqueue
+
+`enqueue_after_commit` defers an enqueue until your SQLAlchemy session commits, and drops it on
+rollback — so you never enqueue a job for a request that didn't persist:
+
+```python
+from firm.contrib.sqlalchemy import enqueue_after_commit
+
+def create_order(session, payload):
+    order = Order(**payload)
+    session.add(order)
+    enqueue_after_commit(session, charge_card, order.id)   # fires iff the commit succeeds
+    session.commit()
+```
+
+> The job is enqueued in firm's own transaction just **after** your commit — so it's
+> "enqueue iff the request committed," not one atomic transaction. A crash in the narrow window
+> between the two commits could still drop the enqueue; for most apps that's the right trade.
+
+## Production shape
+
+Embed workers for dev; in production run them as **separate processes** (`firm-queue start`
+or `flask firm worker`) so you scale web and worker capacity independently. See
+[Workers & the supervisor](queue/workers-and-supervisor.md).
+
+
+
+================================================================================
+# Source: docs/ui.md
+================================================================================
+
+# Dashboard (UI)
+
+`firm-ui` is a small, **optional** web dashboard for inspecting and operating a firm
+database — the **queue**, the **cache**, the **channel** (pub/sub) store, and the **audit** log.
+It's a stdlib HTTP server (Jinja2 for templates), and nothing else in firm imports it — it's a
+pure add-on you can ignore entirely.
+
+## Run it
+
+```bash
+firm-ui --database-url sqlite:///app.db            # or set FIRM_DATABASE_URL
+firm-ui --database-url postgresql://localhost/app --host 127.0.0.1 --port 8787
+python -m firm.ui --database-url sqlite:///app.db  # equivalent
+```
+
+A tab appears for each part whose table exists in the database you point it at, so one
+`--database-url` lights up whatever's present. If your parts live in **separate databases**, give
+each its own URL (any omitted one falls back to `--database-url`):
+
+```bash
+firm-ui --queue-url postgresql://db/jobs \
+              --cache-url postgresql://db/cache \
+              --channel-url postgresql://db/cable \
+              --audit-url postgresql://db/audit
+```
+
+It points at existing databases — it never creates or migrates a schema.
+
+## What you get
+
+- **Queue** — job counts per state (ready / scheduled / blocked / claimed / failed / finished),
+  per-queue size + latency with **pause/resume**, live worker/dispatcher processes (with a
+  stale-heartbeat badge), and recurring schedules; jobs-by-state lists; and a job detail page with
+  arguments, the full traceback, and **retry** / **discard** (plus retry-all). Auto-refreshes.
+- **Cache** — entry count, estimated total size, recent entries, and a **Clear all** action.
+- **Channels** — buffered-message count, distinct channels, the busiest channels, recent messages,
+  and a **Trim** action (deletes messages older than the 1-day default retention).
+- **Audit** — total event count, a search/feed over recorded events filterable by subject, actor,
+  action, and correlation id, and a detail page per event with the full (pretty-printed)
+  `data`/`changes`/`context` payloads. Read-only — there's no delete action in the dashboard;
+  pruning is a deliberate CLI/cron operation, not a click away.
+
+Queue actions reuse the library's own helpers (`queues.pause/resume`, `maintenance.retry_failed`),
+so the UI applies exactly the same semantics as the library and CLIs.
+
+## Security
+
+It's an **internal ops tool**: it exposes tracebacks and destructive actions (retry / discard /
+pause / clear / trim, each behind a confirm dialog). It **binds to `127.0.0.1` by default**, and it
+**refuses to bind a non-loopback `--host` unless you configure authentication** (or pass
+`--insecure` to override). Destructive actions are POSTs guarded by a same-origin `Origin`/`Referer`
+check (a basic CSRF defense, so another site can't auto-submit a form to your dashboard); that guard
+stays on no matter how you authenticate.
+
+## Authentication
+
+Auth is one pluggable chokepoint with three backends — choose whichever fits your deployment. All of
+them still run the CSRF guard, and Basic credentials travel in clear text, so keep the bind on
+loopback or put TLS in front.
+
+### HTTP Basic auth (built-in)
+
+The secret comes from the environment (kept out of `argv`/`ps`), as plaintext or a hash:
+
+```bash
+# plaintext secret
+FIRM_UI_PASSWORD=s3cret firm-ui --database-url sqlite:///app.db --basic-auth-user admin
+
+# or a hash, so no plaintext is stored
+firm-ui --hash-password                       # prompts, prints a "pbkdf2_sha256$…" string
+FIRM_UI_PASSWORD_HASH='pbkdf2_sha256$…' \
+  firm-ui --database-url sqlite:///app.db --basic-auth-user admin
+```
+
+The browser shows its native sign-in dialog; no login page or cookies are involved.
+
+### Tie into an upstream auth proxy
+
+If you already run oauth2-proxy, Cloudflare Access, or nginx `auth_request`, let it authenticate and
+forward the user in a header:
+
+```bash
+firm-ui --database-url sqlite:///app.db \
+         --trust-auth-header X-Forwarded-User --trusted-proxy 127.0.0.1
+```
+
+The header is trusted **only** when the request's immediate peer is a `--trusted-proxy` (default
+loopback), so a direct client can't spoof it — bind the dashboard where only the proxy can reach it.
+
+### Your own authentication
+
+An `Authenticator` is any object with `authenticate(req) -> Allow | Deny`. Load one by import path:
+
+```bash
+firm-ui --database-url sqlite:///app.db --authenticator myapp.security:dashboard_auth
+```
+
+…or run the dashboard from your own process and pass it in:
+
+```python
+from firm.ui import Allow, Deny, build_dashboard, serve
+
+class SessionAuth:
+    def authenticate(self, req):
+        user = my_store.user_for(req.header("Cookie"))
+        return Allow(user) if user else Deny(302, {"Location": "https://sso/login"})
+
+dashboard = build_dashboard(database_url="sqlite:///app.db")
+serve(dashboard, host="0.0.0.0", port=8787, authenticator=SessionAuth())
+```
+
+`req` exposes `.method`, `.path`, `.header(name, default="")`, and `.client_addr`; `Deny(status,
+headers, message)` decides the response (a `401` challenge, a `403`, or a redirect to your own
+login). A runnable version is in [examples/secured_dashboard.py](../examples/secured_dashboard.py).
+
+## How it stays optional
+
+The dashboard ships in the wheel but is only reached via the `firm-ui` command. It imports
+the standard library, SQLAlchemy (already required), Jinja2 (for templates), and the parts'
+read/maintenance functions — so skipping it costs nothing, and the rest of firm never loads it.
+
+
+
+================================================================================
+# Source: docs/database-backends.md
+================================================================================
+
+# Database backends
+
+Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick with the
+`database_url` you pass to `bq.configure(...)` or `Cache(...)`.
+
+## Drivers
+
+| Database        | URL                                    | Driver                                     | Install       |
+|-----------------|----------------------------------------|--------------------------------------------|---------------|
+| SQLite          | `sqlite:///path.db`                    | stdlib `sqlite3`                           | (built in)    |
+| PostgreSQL      | `postgresql+psycopg://user:pw@host/db` | [psycopg 3](https://www.psycopg.org/)      | `…[postgres]` |
+| MySQL / MariaDB | `mysql+pymysql://user:pw@host/db`      | [PyMySQL](https://pymysql.readthedocs.io/) | `…[mysql]`    |
+
+```bash
+pip install "firm[queue,postgres]"   # queue on PostgreSQL  (or [queue,mysql])
+pip install "firm[cache,postgres]"   # cache on PostgreSQL  (or [cache,mysql])
+```
+
+**Bare URLs are normalized for you:** `postgresql://…` becomes `postgresql+psycopg://…` and
+`mysql://…` becomes `mysql+pymysql://…`, so you don't have to remember the driver suffix. An
+explicit `+driver` is always respected.
+
+## How concurrency stays correct on each
+
+This is the one place the databases genuinely differ, and it's fully abstracted (see
+[queue internals](queue/internals.md)):
+
+| Database           | Claim transaction            | Row locking                    |
+|--------------------|------------------------------|--------------------------------|
+| PostgreSQL / MySQL | ordinary transaction         | `FOR UPDATE SKIP LOCKED`       |
+| SQLite             | `BEGIN IMMEDIATE` write lock | not needed (writers serialize) |
+
+The same guarantee — two workers never claim the same job, two writers never lose a cache update —
+holds on all three.
+
+## Choosing one
+
+- **SQLite** — zero setup, perfect for development, tests, single-process apps, and low-to-moderate
+  volume on one host. Its one writer at a time means write-heavy, multi-worker, multi-host
+  deployments will serialize on the write lock. WAL + `busy_timeout` keep that smooth up to a point.
+  On Kubernetes/shared storage it needs special care — see [SQLite on Kubernetes](#sqlite-on-kubernetes-and-other-shared-network-storage).
+- **PostgreSQL** — the recommended default for production and anything multi-host: real
+  `SKIP LOCKED`, no global writer lock, scales horizontally.
+- **MySQL / MariaDB** — equally supported; same `SKIP LOCKED` path. MariaDB 10.6+ supports
+  `SKIP LOCKED`.
+
+## SQLite on Kubernetes (and other shared/network storage)
+
+SQLite on firm relies on two OS-level mechanisms for correctness: **WAL mode** (which uses a
+sidecar `-wal` file plus a `-shm` shared-memory file) and **byte-range file locks** on the database
+file. The job-claim path leans on this directly — on SQLite, `BEGIN IMMEDIATE` takes the single
+write lock so two workers never claim the same job. Both mechanisms assume **one host, one local
+filesystem**. Container orchestrators quietly violate that assumption, so read this before reaching
+for a `PersistentVolumeClaim`.
+
+**The core problem:** SQLite's file locking is unreliable on network filesystems, and WAL is worse —
+the `-shm` file coordinates processes through shared memory that only works when they are on the same
+host. The SQLite project states outright that WAL "does not work over a network filesystem." What
+this means for the common PVC storage classes:
+
+- **NFS-backed / `ReadWriteMany` volumes** (EFS, Filestore, most `nfs` classes) — `fcntl` locks over
+  NFS are racy, and WAL's `-shm` coordination isn't there at all. Expect `database is locked`
+  errors, silently lost writes, or outright **corruption**. `busy_timeout` (default 5000 ms) masks
+  contention on a local disk but cannot fix broken locking semantics. **Avoid.**
+- **Block-based / `ReadWriteOnce` volumes** (EBS, GCE PD, Ceph RBD, most default classes) — these are
+  real block devices with a normal filesystem, so SQLite + WAL works **correctly, but only from one
+  pod**. The volume can only be mounted read-write by a single node at a time.
+
+**Multiple pods sharing one SQLite database is not supported.** `BEGIN IMMEDIATE` only serializes
+claimers that see the same file with working locks — which, per the above, they can't do safely over
+a shared PVC. A `ReadWriteOnce` PVC won't even let two pods on different nodes mount it. This is a
+fundamental SQLite limitation, not a firm bug.
+
+| Deployment shape                       | Works? | Notes                                                                                                   |
+|----------------------------------------|:------:|---------------------------------------------------------------------------------------------------------|
+| 1 pod, `ReadWriteOnce` block PVC       |   ✅   | Correct SQLite + WAL. Fine for dev, low volume, single-tenant.                                           |
+| 1 pod, NFS / `ReadWriteMany` PVC       |   ⚠️   | Locking may misbehave; corruption possible even with one writer. Avoid.                                 |
+| 2+ pods, shared PVC                    |   ❌   | Broken locking (NFS) or can't mount (RWO). The no-double-claim guarantee does not hold.                 |
+| Any multi-replica / HA setup           |   ❌   | Use PostgreSQL.                                                                                          |
+
+**If you must run SQLite in Kubernetes,** treat it as a single-writer appliance:
+
+- Use a **`StatefulSet` with a single replica** and a block-backed (`ReadWriteOnce`) volume, not a
+  `Deployment`.
+- Set the update strategy so a rolling update never runs two pods against the volume at once —
+  `Recreate` (Deployment) or the `StatefulSet` default `OnDelete`/rolling behavior with
+  `replicas: 1`. Overlapping pods during a deploy is the most common way people corrupt the file.
+- Keep the `-wal` and `-shm` sidecar files on the **same volume** as the `.db` file (they will be, as
+  long as the whole directory lives on the PVC).
+
+**For anything multi-pod, HA, or that you expect to scale — use PostgreSQL.** Point firm at it with
+the same `database_url` you'd pass for SQLite; the dialect layer switches to real
+`FOR UPDATE SKIP LOCKED` and workers scale horizontally across pods with no shared-filesystem
+requirement. This is the recommended production path.
+
+## MySQL specifics
+
+The schema is tuned so MySQL behaves like the others:
+
+- `value` (cache) and large text columns map to **`LONGBLOB`/`LONGTEXT`** — plain `BLOB`/`TEXT` would
+  silently cap at 64 KiB.
+- Timestamps use **`DATETIME(6)`** for sub-second precision (needed for correct ordering and the
+  recurring `(task_key, run_at)` dedupe).
+
+## Migrations
+
+Each package ships an Alembic baseline migration that creates its schema. Point Alembic at the
+package's `alembic.ini` (or pass the URL via env / `-x`):
+
+```bash
+# queue
+FIRM_QUEUE_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.queue.ini upgrade head
+
+# cache
+FIRM_CACHE_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.cache.ini upgrade head
+```
+
+Each package keeps its own Alembic version table (`firm_<module>_alembic_version`), so all four
+can migrate one shared database independently.
+
+For development you can skip Alembic and call `schema.create_all(engine)` (queue) or let
+`Cache(create_schema=True)` (the default) build the table. Either way the schema stays
+upgradable: auto-creation also stamps the package's version table at the migration head, so a
+later `alembic upgrade` picks up from the baseline instead of trying to re-run it.
+
+## What's tested
+
+The full test suite runs against **SQLite, PostgreSQL, and MySQL/MariaDB** — the same correctness
+specs (no-double-claim under contention, concurrency block/promote, dispatch, recovery, cache
+upsert/increment/eviction) execute on every backend. See
+[Testing & contributing](testing-and-contributing.md).
+
+
+
+================================================================================
+# Source: docs/api.md
+================================================================================
+
+# API cheatsheet
+
+A flat, greppable reference of firm's public API — return types are shown in `# ->` comments, and
+keyword-only parameters are simply listed by name. See the [Cookbook](cookbook.md) for worked,
+runnable examples.
+
+## firm.queue
+
+```python
+import firm.queue as bq
+from firm.queue import current_runtime
+
+# bq.configure(database_url, ...) -> Runtime (process-global). All but database_url are keyword-only;
+# pass engine=<your SQLAlchemy engine> instead of a URL to share your app's engine/pool:
+bq.configure("postgresql://localhost/app", busy_timeout_ms=5000,
+             pool_size=20, max_overflow=40,
+             default_queue="default", preserve_finished_jobs=True)
+current_runtime()        # -> Runtime
+
+
+@bq.job(queue="default", priority=0, attempts=1, backoff=3.0, concurrency=None)
+def my_job(x):           # the function stays directly callable
+    ...
+
+
+my_job.enqueue(x)                    # -> int | None  (job id, or None if discarded)
+my_job.enqueue_at(when, x)           # when: datetime
+my_job.enqueue_in(delta, x)          # delta: timedelta
+```
+
+Concurrency (the `concurrency=` dict on `@bq.job`):
+
+```python
+concurrency = {
+    "key": lambda *a, **k: a[0],  # the variable part of the concurrency key
+    "to": 1,                      # max simultaneous executions per key
+    "duration": 300,              # seconds before the semaphore expires (failsafe)
+    "group": None,                # share a key namespace across jobs (default: this job)
+    "on_conflict": "block",       # "block" (queue it) or "discard" (drop it)
+}
+```
+
+Management (`from firm.queue import queues`), each takes a `Runtime`:
+
+```python
+from firm.queue import queues
+
+queues.all_queues(rt)    # -> list[str]
+queues.size(rt, q)       # -> int
+queues.pause(rt, q)
+queues.resume(rt, q)
+queues.is_paused(rt, q)  # -> bool
+queues.clear(rt, q)      # -> int  (jobs removed)
+queues.latency(rt, q)    # -> float  (seconds since the oldest ready job)
+```
+
+Maintenance (`from firm.queue import maintenance`):
+
+```python
+from datetime import timedelta
+from firm.queue import maintenance
+
+maintenance.retry_failed(rt, job_id)                          # -> bool
+maintenance.retry_all_failed(rt)                              # -> int
+maintenance.clear_finished(rt, older_than=timedelta(days=7), batch_size=500)  # -> int
+```
+
+Running workers:
+
+```python
+# CLI (production):
+#   firm-queue start --import myapp.jobs [--mode fork|thread] [--threads N] [--queues a,b]
+
+from firm.queue import current_runtime
+from firm.queue.supervisor import (ThreadSupervisor, ForkSupervisor, SupervisorConfig,
+                                     WorkerConfig, DispatcherConfig)
+
+config = SupervisorConfig(workers=[WorkerConfig(queues=("*",), threads=3)],
+                          dispatchers=[DispatcherConfig()], recurring=[])
+sup = ThreadSupervisor(current_runtime(), config)   # in-process; .start() is non-blocking
+sup.start()
+sup.stop()                                          # or:  with ThreadSupervisor(rt, config): ...
+ForkSupervisor(current_runtime(), config).start()   # production default (POSIX); blocks
+```
+
+Single steps (no long-lived process):
+
+```python
+from firm.queue.worker import run_ready
+from firm.queue.dispatcher import dispatch_once, run_maintenance
+
+run_ready(rt, queues=("*",), limit=100)   # -> int  (claim + run one batch)
+dispatch_once(rt)                          # -> int  (promote due scheduled jobs)
+run_maintenance(rt)                         # -> int  (release blocked jobs with capacity)
+```
+
+Recurring (`from firm.queue.scheduler import RecurringTask, Scheduler`):
+
+```python
+from firm.queue.scheduler import RecurringTask, Scheduler
+
+# 5-field cron; pass a list as SupervisorConfig(recurring=[...]) to start a scheduler automatically
+task = RecurringTask(key="nightly", schedule="0 3 * * *", job=my_job, args=(), kwargs={})
+Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
+```
+
+## firm.cache
+
+```python
+from firm.cache import Cache, JSONCoder, PickleCoder
+
+# database_url is positional; everything after it is keyword-only (defaults shown):
+cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
+              max_age=1209600.0, max_size=268435456, max_entries=None,   # 2 weeks / 256 MiB / off
+              expiry_batch_size=100, max_key_bytesize=1024, size_estimate_samples=10000,
+              create_schema=True, auto_expire=True, background_expiry=False, expiry_interval=60.0)
+
+cache.get(key)                      # -> Any | None
+cache.set(key, value)
+cache.fetch(key, default_or_callable)   # -> Any  (compute + store on a miss)
+cache.delete(key)                   # -> bool
+cache.exist(key)                    # -> bool
+cache.get_multi(keys)               # -> dict
+cache.set_multi(mapping)
+cache.increment(key, by=1)          # -> int
+cache.decrement(key, by=1)          # -> int
+cache.clear()
+cache.close()                       # or:  with Cache(...) as cache: ...
+# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
+# encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
+```
+
+## firm.channel
+
+```python
+from firm.channel import Channel
+
+channel = Channel("sqlite:///cable.db", engine=None, polling_interval=0.1,
+                  message_retention=86400.0, autotrim=True, trim_batch_size=100,
+                  create_schema=True)
+
+channel.broadcast(name, payload)    # name/payload: str|bytes (str payloads are UTF-8 encoded)
+channel.subscribe(name, callback)   # callback(payload: bytes); only future messages; per-process
+channel.unsubscribe(name, callback)
+channel.trim()                      # -> int
+channel.close()                     # or:  with Channel(...) as channel: ...
+```
+
+## firm.audit
+
+```python
+from firm.audit import AuditLog, Ref, record
+
+# database_url is positional; everything after it is keyword-only (defaults shown):
+audit = AuditLog("sqlite:///audit.db", engine=None, create_schema=True,
+                 max_age=None, background_retention=False, retention_interval=3600.0)
+
+audit.record(action, subject=None, actor=None, data=None, changes=None,
+             correlation_id=None, context=None, conn=None)
+audit.history(subject=None, subject_type=None, subject_id=None,
+              actor=None, actor_type=None, actor_id=None, action=None,
+              correlation_id=None, since=None, limit=100)   # -> list[dict]
+# subject_type=/subject_id= filter independently (either alone, or both); same for actor_*.
+# pass either subject= or subject_type=/subject_id= for a field, never both (raises ValueError).
+# a bare-string filter (actor="cron") filters by type only.
+audit.close()                       # or:  with AuditLog(...) as audit: ...
+
+# shared-DB, same-transaction (atomic with the business change):
+record(conn, action, subject=None, actor=None, data=None, changes=None,
+       correlation_id=None, context=None)
+
+# subject/actor accept the same forms — type and id are each optional:
+#   invoice                     domain object with `.id`  -> (ClassName, id)
+#   ("Invoice", 42)             tuple; either half may be None (empty/None id -> NULL)
+#   "cron"                      bare string -> a role/kind label, stored as the type (no id)
+#   Ref("User", 7, name="…")    explicit, with an optional human-readable display name
+#   None                        no actor/subject (a system event)
+# An object may define __firm_audit_ref__(self) -> Ref to customize its audit identity.
+# Each event dict from history()/get() carries subject_label/actor_label (the display names).
+# data/changes/context: dicts stored as JSON text (not native JSON/JSONB).
+```
+
+## firm.contrib (optional — `[flask]` / `[fastapi]` extras)
+
+```python
+# FastAPI: app = FastAPI(lifespan=lifespan(database_url=..., embed_workers=False,
+#                                          queues=("*",), threads=3))
+from firm.contrib.fastapi import lifespan
+
+# Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
+#   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
+from firm.contrib.flask import Firm
+
+from firm.contrib.sqlalchemy import enqueue_after_commit
+enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
+```
+
+## Command-line tools
+
+```bash
+firm-queue start|work|drain|dispatch|maintenance --database-url ... --import myapp.jobs
+firm-cache stats|clear|trim --database-url ...
+firm-channel stats|trim --database-url ...
+firm-audit stats|history|prune --database-url ...
+firm-ui --database-url ... [--queue-url ... --cache-url ... --channel-url ... --audit-url ...] [--host --port]
+```
+
+Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. Bare
+`postgresql://` / `mysql://` URLs auto-normalize to the shipped drivers (`[postgres]` / `[mysql]`).
+
+
+
+================================================================================
+# Source: docs/comparison-to-rails.md
+================================================================================
+
+# Comparison to Rails
+
+firm is a faithful port of the Rails Solid stack — queue, cache, and pub/sub — not a
+reinterpretation. Where it differs, it's deliberate and documented.
+
+## What's the same
+
+- **Schema.** Every column, index, and the execution-table lifecycle match the gems one-for-one.
+  The tables carry firm's own names (`firm_*`).
+- **Behavior.** The job lifecycle, the four process roles, concurrency semaphores with the
+  `expires_at` failsafe, recurring `(task_key, run_at)` dedupe, FIFO cache eviction with sampling
+  size estimation, the `key_hash` lookup, the probabilistic expiry trigger, and the pub/sub polling
+  listener with per-channel cursors, `channel_hash` routing, and probabilistic message trimming —
+  all match.
+- **Locking.** `FOR UPDATE SKIP LOCKED` on PostgreSQL/MySQL, exactly as the gems (the queue's
+  claim path, and the pub/sub trim).
+
+## Deliberate divergences
+
+| Area                | solid_queue / solid_cache / solid_cable | firm                                                                         |
+|---------------------|-----------------------------------------|------------------------------------------------------------------------------------|
+| Retry counting      | tracked by Active Job                   | a `jobs.attempts` column (we own retries)                                          |
+| Crash recovery      | orphaned claims are marked **failed**   | orphaned claims are **re-readied** (at-least-once; another worker finishes them)   |
+| SQLite concurrency  | row-level locking tests are skipped     | `BEGIN IMMEDIATE` gives the same guarantee, so concurrency is fully tested on SQLite |
+| Recurring schedules | Fugit (cron **and** natural language)   | cron only (`croniter`)                                                            |
+| Job arguments       | Active Job + GlobalID (pass records)    | JSON + datetime/date/Decimal/UUID (pass IDs)                                       |
+| Pub/sub trimming    | inline `TrimJob` per broadcast          | async probabilistic trim on a background thread (+ manual `trim()` / CLI)          |
+| Pub/sub delivery    | Action Cable adapter                    | a standalone `Channel` with `broadcast`/`subscribe`/`unsubscribe` (no Action Cable) |
+
+The at-least-once recovery choice means **jobs should be idempotent** — see
+[Retries & failures](queue/retries-and-failures.md).
+
+## Beyond the port: firm-audit
+
+`firm.audit` is **not** a port — there is no `solid_audit` gem in Rails. It's an original firm
+module: an append-only, database-backed audit log that shares the ported modules' "you already
+have a database" thesis, but isn't a reproduction of anything in Solid. See
+[firm-audit overview](audit/overview.md).
+
+## Not (yet) ported
+
+firm stands alone — there's no Rails — so the Active Job / Action Cable ecosystems aren't
+reproduced, and a few pieces are still future work:
+
+- **Active Job integration** (callbacks, `perform_later`, GlobalID, middleware) — replaced by the
+  standalone `@job` decorator.
+- **Action Cable integration** (channels, connections, the websocket server) — `firm-channel`
+  ports the database-backed pub/sub broker, not the websocket layer on top of it.
+- **Active Support / Notifications instrumentation** — replaced by lifecycle hooks + your own
+  logging.
+- **Cache sharding** (multi-database consistent hashing) and the **Mission Control** dashboard.
+
+See the [roadmap](#) — `IMPROVEMENTS.md` in the repo root — for the full list of planned work.
+
+
+
+================================================================================
+# Source: docs/testing-and-contributing.md
+================================================================================
+
+# Testing & contributing
+
+## Layout
+
+A [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/): each module is its own
+publishable package under `packages/`, all sharing one lockfile and dev environment. They install
+into the single `firm` import namespace (PEP 420), so imports are always `firm.queue`, `firm.cache`,
+etc. — regardless of which packages you installed.
+
+```
+firm/
+├── pyproject.toml                 # virtual workspace root: members, dev tools, lint/type config
+├── packages/
+│   ├── firm-core/    src/firm/_core/    # shared: engine, dialects, poller, clock, config, process
+│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + firm.contrib + migrations/
+│   ├── firm-cache/   src/firm/cache/     # firm.cache  (cache)  + migrations/
+│   ├── firm-channel/ src/firm/channel/   # firm.channel (pub/sub) + migrations/
+│   ├── firm-audit/   src/firm/audit/     # firm.audit  (audit log) + migrations/
+│   ├── firm-ui/      src/firm/ui/        # firm.ui     (dashboard; depends on all four)
+│   └── firm/                             # meta-package (no code; installs the four modules)
+├── tests/{queue,cache,channel,audit,ui,contrib}/
+└── docs/
+```
+
+Each module depends only on `firm-core`; `firm-ui` depends on all four; the `firm` meta-package pins
+them together. See [Split into a uv workspace](https://github.com/h11t-labs/firm) for the rationale.
+
+## Setup
+
+```bash
+uv sync    # venv + all workspace packages (editable) + all dev tools/drivers
+```
+
+## The gate
+
+```bash
+uv run pytest                                  # tests
+uv run ruff check && uv run ruff format --check # lint + format
+uv run ty check packages                       # types
+```
+
+All three must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
+with `ruff`.
+
+## Running against Postgres and MySQL
+
+By default the suite runs on SQLite. Point it at live databases and every database-touching test
+*also* runs against them (fresh schema per test):
+
+```bash
+# spin up servers (any Docker works)
+docker run -d --name bb_pg    -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=bb -p 5433:5432 postgres:15
+docker run -d --name bb_mysql -e MARIADB_ROOT_PASSWORD=pw -e MARIADB_DATABASE=bb -p 3307:3306 mariadb:11
+
+export FIRM_TEST_PG_URL="postgresql+psycopg://postgres:pw@localhost:5433/bb"
+export FIRM_TEST_MYSQL_URL="mysql+pymysql://root:pw@localhost:3307/bb"
+
+uv run pytest -p no:cacheprovider     # sqlite + postgres + mysql
+```
+
+Test ids are suffixed with the backend (`...[postgres]`, `...[mysql]`); run one backend with
+`-k postgres`.
+
+Notes:
+
+- **Fork-mode** tests (the forking supervisor) are SQLite-only — the fork model is independent of the
+  SQL backend, so it's exercised once.
+- **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
+  render correctly for Postgres/MySQL with no live database.
+
+## Conventions
+
+- Tests are spec-style and grouped by behavior. New behavior gets a failing test first.
+- Keep the public API small; internal machinery lives under `_core/`.
+- Match the surrounding style — concise docstrings, explicit SQL via SQLAlchemy Core, no clever
+  metaprogramming.
+
+## Building the docs
+
+The documentation site is built with [Zensical](https://zensical.org) (configured in
+`zensical.toml` at the repo root):
+
+```bash
+uv run zensical serve     # live preview with hot reload
+uv run zensical build     # render the static site to ./site
+```

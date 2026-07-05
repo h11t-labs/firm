@@ -1,0 +1,12 @@
+{% extends "layout.html" %}
+{% block content %}
+<a class="crumb" href="/audit">{{ icons.back }}Audit</a>
+<div class="pagehead"><h1>Event #{{ event.id }}</h1></div>
+<Kv cells={{ cells }} />
+{% for label, value in (("Data", event.data), ("Changes", event.changes), ("Context", event.context)) %}
+{% if value %}
+<Section title={{ label }} />
+<pre>{{ value | json_pretty }}</pre>
+{% endif %}
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,4 @@
+{#def nav #}
+{# `nav` is a dict built in render.py: start/end/total/page/total_pages plus the
+   first/prev/next/last URLs (None when that link should not appear). #}
+<div class="pager"><span>Showing {{ nav.start | num }}-{{ nav.end | num }} of {{ nav.total | num }}</span><div class="pg-nav">{% if nav.first %}<a href="{{ nav.first }}">First</a>{% endif %}{% if nav.prev %}<a href="{{ nav.prev }}">← Prev</a>{% endif %}<span class="pg-current">Page {{ nav.page }} of {{ nav.total_pages }}</span>{% if nav.next %}<a href="{{ nav.next }}">Next →</a>{% endif %}{% if nav.last %}<a href="{{ nav.last }}">Last</a>{% endif %}</div></div>

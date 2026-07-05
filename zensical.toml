@@ -1,0 +1,105 @@
+# Zensical configuration — https://zensical.org
+# (Zensical is the Material for MkDocs team's successor to MkDocs.)
+
+[project]
+site_name = "firm"
+site_description = "Pure-Python ports of the Rails Solid stack — database-backed background jobs, caching, and pub/sub, no Redis required."
+site_author = "firm contributors"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    { "Installation" = "installation.md" },
+    { "Cookbook" = "cookbook.md" },
+  ] },
+  { "Queue" = [
+    { "Overview" = "queue/overview.md" },
+    { "Getting started" = "queue/getting-started.md" },
+    { "Defining jobs" = "queue/jobs.md" },
+    { "Concurrency controls" = "queue/concurrency.md" },
+    { "Recurring tasks" = "queue/recurring.md" },
+    { "Retries & failures" = "queue/retries-and-failures.md" },
+    { "Queues & retention" = "queue/queues.md" },
+    { "Workers & the supervisor" = "queue/workers-and-supervisor.md" },
+    { "Configuration" = "queue/configuration.md" },
+    { "CLI" = "queue/cli.md" },
+    { "Internals" = "queue/internals.md" },
+  ] },
+  { "Cache" = [
+    { "Overview" = "cache/overview.md" },
+    { "Getting started" = "cache/getting-started.md" },
+    { "Operations" = "cache/operations.md" },
+    { "Eviction & expiry" = "cache/eviction.md" },
+    { "Encryption & coders" = "cache/encryption-and-coders.md" },
+    { "Configuration" = "cache/configuration.md" },
+    { "CLI" = "cache/cli.md" },
+    { "Internals" = "cache/internals.md" },
+  ] },
+  { "Channel" = [
+    { "Overview" = "channel/overview.md" },
+    { "Getting started" = "channel/getting-started.md" },
+    { "Configuration" = "channel/configuration.md" },
+    { "CLI" = "channel/cli.md" },
+    { "Internals" = "channel/internals.md" },
+  ] },
+  { "Audit" = [
+    { "Overview" = "audit/overview.md" },
+    { "Getting started" = "audit/getting-started.md" },
+    { "Retention & querying" = "audit/retention-and-querying.md" },
+    { "Configuration" = "audit/configuration.md" },
+    { "CLI" = "audit/cli.md" },
+    { "Internals" = "audit/internals.md" },
+  ] },
+  { "Guides" = [
+    { "Framework integration" = "contrib.md" },
+    { "Dashboard (UI)" = "ui.md" },
+    { "Database backends" = "database-backends.md" },
+  ] },
+  { "Reference" = [
+    { "API cheatsheet" = "api.md" },
+    { "Comparison to Rails" = "comparison-to-rails.md" },
+    { "Testing & contributing" = "testing-and-contributing.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "content.code.annotate",
+  "navigation.tabs",
+  "navigation.tabs.sticky",
+  "navigation.sections",
+  "navigation.expand",
+  "navigation.indexes",
+  "navigation.footer",
+  "navigation.top",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+scheme = "default"
+primary = "deep orange"
+accent = "deep orange"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+scheme = "slate"
+primary = "deep orange"
+accent = "deep orange"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.def_list]
+[project.markdown_extensions.tables]
+[project.markdown_extensions.toc]
+permalink = true
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.superfences]
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+[project.markdown_extensions.pymdownx.inlinehilite]

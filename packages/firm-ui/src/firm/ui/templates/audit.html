@@ -1,0 +1,38 @@
+{% extends "layout.html" %}
+{% macro field(name, label) %}<label>{{ label }}<input type="text" name="{{ name }}" value="{{ filters.get(name, "") }}"></label>{% endmacro %}
+{% block content %}
+<h1>Audit</h1>
+<div class="cards">
+{% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
+</div>
+<form method="get" action="/audit" class="filters">
+{{ field("action", "Action") }}
+{{ field("subject", "Subject (Type:id)") }}
+{{ field("actor", "Actor (Type:id)") }}
+{{ field("correlation_id", "Correlation ID") }}
+<input type="hidden" name="sort" value="{{ sort }}">
+<input type="hidden" name="dir" value="{{ dir }}">
+<button type="submit" class="primary">{{ icons.filter }}Filter</button>
+<a class="btn" href="/audit">{{ icons.x }}Reset</a>
+</form>
+<Section title="Events"><PageSize current={{ per_page }} options={{ pagesize }} /></Section>
+{% if rows %}
+<div class="tw"><table><tr>
+{% for col in columns %}<SortTh label={{ col.label }} url={{ col.url }} active={{ col.active }} arrow={{ col.arrow }} />{% endfor %}<th>Data</th>
+</tr>
+{% for r in rows %}
+{% set payload = r.data | json_preview %}
+<tr><td class="mono"><a href="/audit/{{ r.id }}">#{{ r.id }}</a></td>
+<td class="secondary"><When value={{ r.created_at }} /></td>
+<td class="mono"><a href="{{ audit_href({'action': r.action}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.action }}</a></td>
+<td class="mono">{% if r.subject_display %}<a href="{{ audit_href({'subject': r.subject_filter}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.subject_display }}</a>{% else %}<Dash />{% endif %}</td>
+<td class="mono">{% if r.actor_display %}<a href="{{ audit_href({'actor': r.actor_filter}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.actor_display }}</a>{% else %}<Dash />{% endif %}</td>
+<td class="mono secondary">{% if r.correlation_id %}<a href="{{ audit_href({'correlation_id': r.correlation_id}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.correlation_id }}</a>{% endif %}</td>
+<td class="mono secondary" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ payload }}">{{ payload }}</td></tr>
+{% endfor %}
+</table></div>
+<Pagination nav={{ pagination }} />
+{% else %}
+<Empty text="No audit events match." />
+{% endif %}
+{% endblock %}

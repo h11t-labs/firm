@@ -1,0 +1,3 @@
+{#def pct, width="" #}
+{# `pct` arrives already clamped to 0–100 by render.py; this component only draws it. #}
+<span class="bar"{% if width %} style="width:{{ width }}"{% endif %}><i style="width:{{ pct }}%"></i></span>

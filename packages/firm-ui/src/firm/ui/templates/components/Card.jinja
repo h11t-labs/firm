@@ -1,0 +1,7 @@
+{#def label, number, state=None, href=None, failed=False #}
+{% set cls = "card failed" if failed else "card" %}
+{% if href %}
+<a class="{{ cls }}" href="{{ href }}"><div class="l">{% if state %}<Dot state={{ state }} />{% endif %}{{ label }}</div><div class="n">{{ number }}</div></a>
+{% else %}
+<div class="{{ cls }}"><div class="l">{% if state %}<Dot state={{ state }} />{% endif %}{{ label }}</div><div class="n">{{ number }}</div></div>
+{% endif %}

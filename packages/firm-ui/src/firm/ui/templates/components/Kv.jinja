@@ -1,0 +1,3 @@
+{#def cells #}
+{# `cells` is a list of (label, value) pairs; value may be pre-rendered markup. #}
+<div class="kv">{% for label, value in cells %}<div><div class="k">{{ label }}</div><div class="v">{{ value }}</div></div>{% endfor %}</div>

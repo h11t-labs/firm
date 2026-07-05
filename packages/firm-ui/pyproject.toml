@@ -1,0 +1,40 @@
+[project]
+name = "firm-ui"
+version = "0.1.0"
+description = "Optional web dashboard for firm — watch queues, cache, channels, and the audit log. Standard-library server; Jinja2 for templates."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "firm contributors" }]
+keywords = ["dashboard", "ui", "queue", "cache", "channel", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+dependencies = [
+    "firm-core~=0.1.0",
+    "firm-queue~=0.1.0",
+    "firm-cache~=0.1.0",
+    "firm-channel~=0.1.0",
+    "firm-audit~=0.1.0",
+    "jinja2>=3.1.6",
+    "jinjax>=0.65",
+]
+
+[project.scripts]
+firm-ui = "firm.ui.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/h11t-labs/firm"
+Repository = "https://github.com/h11t-labs/firm"
+Issues = "https://github.com/h11t-labs/firm/issues"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "firm.ui"
+namespace = true

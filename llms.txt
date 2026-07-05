@@ -1,0 +1,58 @@
+# firm
+
+> Pure-Python ports of the Rails "Solid" stack: database-backed background jobs (queue), caching (cache), and publish/subscribe (channel) — plus an original append-only audit log (audit) — no Redis or extra broker. Runs on SQLite, PostgreSQL, and MySQL/MariaDB via SQLAlchemy with per-dialect locking. Plus an optional web dashboard and Flask/FastAPI integration.
+
+firm has three ported modules — queue, cache, channel — plus `audit`, an original append-only
+audit log; install only what you need (`pip install "firm[queue]"`, `[cache]`, `[channel]`,
+`[audit]`). Jobs are plain functions decorated with `@bq.job`; the cache is a `Cache` object;
+pub/sub is a `Channel` object; the audit log is an `AuditLog` object. The database is the single
+source of truth. Start with the Cookbook and the API cheatsheet, which together cover the whole
+surface with copy-pasteable examples. (Paths below are repo-relative; replace with the published
+docs URLs once the site is hosted.)
+
+## Start here
+
+- [Cookbook](docs/cookbook.md): copy-pasteable examples for each module and for combinations (queue+cache, queue+channel, cache+channel, all three, Flask, FastAPI, production)
+- [API cheatsheet](docs/api.md): every public function/class with signatures, in one flat page
+- [Overview](docs/index.md): what firm is and how the modules relate
+- [Installation](docs/installation.md): the extras (queue/cache/channel/audit/flask/fastapi/postgres/mysql/encryption/msgpack)
+
+## Queue (background jobs)
+
+- [Overview](docs/queue/overview.md) · [Getting started](docs/queue/getting-started.md) · [Defining jobs](docs/queue/jobs.md) · [Concurrency controls](docs/queue/concurrency.md) · [Recurring tasks](docs/queue/recurring.md) · [Retries & failures](docs/queue/retries-and-failures.md) · [Queues & retention](docs/queue/queues.md) · [Workers & the supervisor](docs/queue/workers-and-supervisor.md) · [Configuration](docs/queue/configuration.md) · [CLI](docs/queue/cli.md) · [Internals](docs/queue/internals.md)
+
+## Cache
+
+- [Overview](docs/cache/overview.md) · [Getting started](docs/cache/getting-started.md) · [Operations](docs/cache/operations.md) · [Eviction & expiry](docs/cache/eviction.md) · [Encryption & coders](docs/cache/encryption-and-coders.md) · [Configuration](docs/cache/configuration.md) · [CLI](docs/cache/cli.md) · [Internals](docs/cache/internals.md)
+
+## Channel (pub/sub)
+
+- [Overview](docs/channel/overview.md) · [Getting started](docs/channel/getting-started.md) · [Configuration](docs/channel/configuration.md) · [CLI](docs/channel/cli.md) · [Internals](docs/channel/internals.md)
+
+## Audit (append-only event log)
+
+Not a Solid port — an original firm module. Record who did what, to what, in the same database
+(and optionally the same transaction) as the change. Subject/actor references are flexible: a
+domain object, a `("Type", id)` tuple, a bare `"label"` role string, or a `Ref(type, id, name)` —
+type and id are each optional.
+
+- [Overview](docs/audit/overview.md) · [Getting started](docs/audit/getting-started.md) · [Retention & querying](docs/audit/retention-and-querying.md) · [Configuration](docs/audit/configuration.md) · [CLI](docs/audit/cli.md) · [Internals](docs/audit/internals.md)
+
+## Integration & operations
+
+- [Framework integration (Flask & FastAPI)](docs/contrib.md)
+- [Dashboard (UI)](docs/ui.md)
+- [Database backends (drivers, locking, migrations)](docs/database-backends.md)
+
+## Runnable examples
+
+- [examples/quickstart.py](examples/quickstart.py): queue + cache + channel in one script
+- [examples/combined_worker.py](examples/combined_worker.py): a job that reads/writes the cache and broadcasts on a channel
+- [examples/fastapi_app.py](examples/fastapi_app.py): a FastAPI app · [examples/flask_app.py](examples/flask_app.py): a Flask app
+- [examples/audit_logging.py](examples/audit_logging.py): same-transaction audit events, label/`Ref` actors, and querying history
+
+## Optional
+
+- [Comparison to Rails](docs/comparison-to-rails.md): how firm relates to solid_queue/solid_cache/solid_cable and where it diverges
+- [Testing & contributing](docs/testing-and-contributing.md)
+- [Roadmap](IMPROVEMENTS.md)

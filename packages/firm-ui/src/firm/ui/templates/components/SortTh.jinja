@@ -1,0 +1,3 @@
+{#def label, url, active=False, arrow="" #}
+{# A sortable table header. render.py decides `active`, the toggled `url`, and the `arrow`. #}
+<th><a{% if active %} class="active"{% endif %} href="{{ url }}">{{ label }}{% if active %}<span class="dir">{{ arrow }}</span>{% endif %}</a></th>

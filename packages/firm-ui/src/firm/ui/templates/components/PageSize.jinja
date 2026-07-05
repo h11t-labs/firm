@@ -1,0 +1,3 @@
+{#def current, options #}
+{# `options` is a list of {n, url, active}; render.py builds the per-choice URLs. #}
+<details class="dropdown"><summary>Show {{ current }}{{ icons.chevron }}</summary><div class="dropdown-menu">{% for opt in options %}<a class="dropdown-opt{{ " active" if opt.active else "" }}" href="{{ opt.url }}">{{ opt.n }}{% if opt.active %}{{ icons.check }}{% endif %}</a>{% endfor %}</div></details>

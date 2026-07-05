@@ -1,0 +1,31 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Channels</h1>
+<div class="cards">
+{% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
+</div>
+{% set trim %}<form class="inline" method="post" action="/channels/trim"{{ confirm("Delete buffered messages older than 1 day?") }}><button>{{ icons.scissors }}Trim &gt; 1 day</button></form>{% endset %}
+{% if top %}
+<Section title="Busiest channels"><div style="display:flex;align-items:center;gap:.7rem"><PageSize current={{ top_per_page }} options={{ top_pagesize }} />{{ trim }}</div></Section>
+<div class="barlist">
+{% for t in top %}
+<div class="row"><span class="name mono" title="{{ t.channel }}">{{ t.channel }}</span><span class="track"><i style="width:{{ t.bar_pct }}%"></i></span><span class="tnum" style="width:3rem;text-align:right">{{ t.count | num }}</span><span class="muted" style="width:4rem;text-align:right;font-size:.78rem">{{ t.last | reltime }}</span></div>
+{% endfor %}
+</div>
+<Pagination nav={{ top_pagination }} />
+{% else %}
+<Section title="Busiest channels">{{ trim }}</Section>
+<Empty text="No channels." />
+{% endif %}
+<Section title="Recent messages"><PageSize current={{ per_page }} options={{ msg_pagesize }} /></Section>
+{% if messages %}
+<div class="feed">
+{% for m in messages %}
+<div class="row"><span class="chip mono">{{ m.channel }}</span><span class="pl mono" title="{{ m.payload }}">{{ m.payload }}</span><span class="muted" style="font-size:.78rem">{{ m.created_at | reltime }}</span></div>
+{% endfor %}
+</div>
+<Pagination nav={{ msg_pagination }} />
+{% else %}
+<Empty text="No buffered messages." />
+{% endif %}
+{% endblock %}

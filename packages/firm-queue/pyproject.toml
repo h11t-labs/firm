@@ -1,0 +1,45 @@
+[project]
+name = "firm-queue"
+version = "0.1.0"
+description = "Database-backed background jobs (a pure-Python port of Rails' Solid Queue). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "firm contributors" }]
+keywords = ["jobs", "queue", "background", "tasks", "sqlite", "postgresql", "mysql", "solid_queue"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "firm-core~=0.1.0",
+    "croniter>=2.0",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+flask = ["flask>=3.0"]                 # firm.contrib.flask integration
+fastapi = ["fastapi>=0.110"]           # firm.contrib.fastapi integration
+postgres = ["firm-core[postgres]"]     # PostgreSQL driver (via firm-core)
+mysql = ["firm-core[mysql]"]           # MySQL / MariaDB driver (via firm-core)
+
+[project.scripts]
+firm-queue = "firm.queue.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/h11t-labs/firm"
+Repository = "https://github.com/h11t-labs/firm"
+Issues = "https://github.com/h11t-labs/firm/issues"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+# firm-queue ships two namespace sub-packages: firm.queue and firm.contrib
+# (contrib only depends on queue, so it lives here rather than in its own dist).
+[tool.uv.build-backend]
+namespace = true
+module-name = ["firm.queue", "firm.contrib"]

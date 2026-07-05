@@ -1,0 +1,87 @@
+# Full CI: lint + types, the test suite on SQLite across supported Pythons, and the same
+# suite against live PostgreSQL and MySQL (the conftests pick up FIRM_TEST_*_URL and run
+# every database-touching test against each backend).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Check lockfile is current
+        run: uv lock --check
+      - name: Sync workspace
+        run: uv sync --locked
+      - name: ruff check
+        run: uv run ruff check packages tests scripts examples
+      - name: ruff format
+        run: uv run ruff format --check packages tests scripts examples
+      - name: ty
+        run: uv run ty check packages
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Sync workspace
+        run: uv sync --locked
+      - name: Run tests (SQLite)
+        run: uv run pytest
+
+  test-live-backends:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: firm
+          POSTGRES_PASSWORD: firm
+          POSTGRES_DB: firm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U firm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_USER: firm
+          MYSQL_PASSWORD: firm
+          MYSQL_DATABASE: firm
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FIRM_TEST_PG_URL: postgresql://firm:firm@127.0.0.1:5432/firm
+      FIRM_TEST_MYSQL_URL: mysql://firm:firm@127.0.0.1:3306/firm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync workspace
+        run: uv sync --locked
+      - name: Run tests (SQLite + PostgreSQL + MySQL)
+        run: uv run pytest

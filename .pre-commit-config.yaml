@@ -1,0 +1,45 @@
+# Install once:  uv run pre-commit install
+# Run on everything:  uv run pre-commit run --all-files
+#
+# ruff / ty run through `uv run` so they use the exact versions pinned in this project's dev
+# dependencies (no drift between the hook and CI).
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: check-added-large-files
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      - id: ty
+        name: ty type check (packages)
+        entry: uv run ty check packages
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+
+      - id: llms-full
+        name: regenerate llms.txt + llms-full.txt
+        entry: uv run python scripts/gen_llms_full.py
+        language: system
+        pass_filenames: false
+        files: ^(docs/.*\.md|zensical\.toml|scripts/gen_llms_full\.py)$

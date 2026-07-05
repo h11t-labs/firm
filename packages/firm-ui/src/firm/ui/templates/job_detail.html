@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+{% block content %}
+<a class="crumb" href="{{ jobs_href(job.state, queue) }}">{{ icons.back }}{{ job.state }} jobs</a>
+<div class="pagehead">
+<h1>Job #{{ job.id }}</h1>
+<span class="badge"><Dot state={{ job.state }} />{{ job.state }}</span>
+{%- if job.state == "failed" %}
+<div class="pagehead-actions">
+<form class="inline" method="post" action="/job/{{ job.id }}/retry"><button>{{ icons.retry }}Retry</button></form>
+<form class="inline" method="post" action="/job/{{ job.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>
+</div>
+{%- endif %}
+</div>
+<Kv cells={{ cells }} />
+{% if job.arguments %}
+<Section title="Arguments" />
+<pre>{{ job.arguments }}</pre>
+{% endif %}
+{% if job.error %}
+<div class="sec"><h2 style="color:var(--danger)">Error</h2></div>
+<pre class="err">{{ job.error }}</pre>
+{% endif %}
+{% endblock %}

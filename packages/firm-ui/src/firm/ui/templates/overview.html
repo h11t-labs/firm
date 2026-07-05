@@ -1,0 +1,40 @@
+{% extends "layout.html" %}
+{% block content %}
+<h1>Overview</h1>
+<div class="cards">
+{% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
+</div>
+<Section title="Queues" />
+{% if queue_rows %}
+<div class="tw"><table><tr><th>Queue</th><th>Ready</th><th>Latency</th><th></th></tr>
+{% for q in queue_rows %}
+<tr><td><a href="{{ jobs_href("ready", q.name) }}">{{ q.name }}</a>{% if q.paused %} <span class="tag warn">{{ icons.pause }}paused</span>{% endif %}</td>
+<td><div style="display:flex;align-items:center;gap:.6rem"><span style="flex:1"><Bar pct={{ q.bar_pct }} /></span><span class="secondary tnum" style="min-width:3rem;text-align:right">{{ q.size | num }}</span></div></td>
+<td><Latency cls={{ q.latency_tag.cls }} text={{ q.latency_tag.text }} /></td>
+<td style="text-align:right"><form class="inline" method="post" action="/queue/{{ q.name | urlquote }}/{{ "resume" if q.paused else "pause" }}"><button>{{ icons.play if q.paused else icons.pause }}{{ "Resume" if q.paused else "Pause" }}</button></form></td></tr>
+{% endfor %}
+</table></div>
+{% else %}
+<Empty text="No queues with ready jobs." />
+{% endif %}
+<Section title="Processes" />
+{% if processes %}
+<div class="tw"><table><tr><th>Process</th><th>Host</th><th>Heartbeat</th></tr>
+{% for p in processes %}
+<tr><td>{{ p.kind | string | capitalize }} <span class="secondary">{{ p.name }}</span></td>
+<td class="mono secondary">{{ p.hostname }} · {{ p.pid }}</td>
+<td><span class="dot" style="background:{{ "var(--st-finished)" if p.alive else "var(--text-3)" }};display:inline-block;vertical-align:middle;margin-right:.5rem"></span>{{ p.last_heartbeat_at | reltime }}{% if not p.alive %} <span class="chip">stale</span>{% endif %}</td></tr>
+{% endfor %}
+</table></div>
+{% else %}
+<Empty text="No running processes registered." />
+{% endif %}
+{% if recurring %}
+<Section title="Recurring" />
+<div class="tw"><table><tr><th>Key</th><th>Schedule</th><th>Target</th><th>Queue</th></tr>
+{% for r in recurring %}
+<tr><td>{{ r.key }}</td><td><ScheduleBadge expr={{ r.schedule }} desc={{ r.schedule_desc }} /></td><td class="mono">{{ r.class_name or r.command }}</td><td><span class="chip">{{ r.queue_name }}</span></td></tr>
+{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

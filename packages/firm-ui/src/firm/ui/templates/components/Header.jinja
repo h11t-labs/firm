@@ -1,0 +1,4 @@
+{#def tabs, active_part, request_path, refresh=None, refresh_label="", refresh_choices=None #}
+{# `tabs` is a list of {label, href, active} built in render.py from the enabled parts.
+   The refresh control only appears when `refresh` is not None (detail pages omit it). #}
+<header class="top"><a class="brand" href="/"><span class="mark" aria-hidden="true">🪨</span>firm</a>{% if tabs %}<nav class="tabs">{% for tab in tabs %}<a class="{{ "active" if tab.active else "" }}" href="{{ tab.href }}">{{ tab.label }}</a>{% endfor %}</nav>{% endif %}{% if refresh is not none %}<RefreshControl active_part={{ active_part }} request_path={{ request_path }} refresh={{ refresh }} label={{ refresh_label }} choices={{ refresh_choices }} />{% endif %}</header>
