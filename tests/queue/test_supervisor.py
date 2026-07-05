@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from datetime import timedelta
@@ -45,6 +46,42 @@ def _wait_until(predicate: Callable[[], bool], timeout: float = 10.0) -> bool:
             return True
         time.sleep(0.02)
     return False
+
+
+_CLAIM_GATE = threading.Event()
+_CLAIM_STARTED = threading.Event()
+
+
+@bq.job()
+def gated_job() -> None:
+    _CLAIM_STARTED.set()
+    _CLAIM_GATE.wait(10)
+
+
+def test_thread_supervisor_claims_carry_its_process_id(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """Claims must reference the supervisor's heartbeated process row — a NULL process_id
+    claim is invisible to recover_orphaned_claims forever (the Q-F1 regression)."""
+    _CLAIM_GATE.clear()
+    _CLAIM_STARTED.clear()
+    gated_job.enqueue()
+    config = SupervisorConfig(workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[])
+
+    try:
+        with ThreadSupervisor(runtime, config) as supervisor:
+            assert _CLAIM_STARTED.wait(10)
+            with engine.connect() as conn:
+                claimed_process_id = conn.execute(
+                    select(schema.claimed_executions.c.process_id)
+                ).scalar_one()
+            assert claimed_process_id == supervisor.process_id
+            _CLAIM_GATE.set()
+            assert _wait_until(lambda: _finished_jobs(engine) == 1)
+    finally:
+        _CLAIM_GATE.set()
+
+    assert count(schema.claimed_executions) == 0
 
 
 def test_thread_supervisor_runs_immediate_and_scheduled(

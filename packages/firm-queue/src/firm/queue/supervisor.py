@@ -136,7 +136,10 @@ class ThreadSupervisor:
         )
         HOOKS.fire("supervisor_start")
         for child in self.config.child_configs():
-            loops = _build_loops(self.runtime, child, self.config.recurring, None)
+            # Claims carry the supervisor's own (heartbeated) process row: if this process
+            # dies, the row goes stale, gets pruned, and the claims are recovered. A NULL
+            # process_id would make them invisible to recover_orphaned_claims forever.
+            loops = _build_loops(self.runtime, child, self.config.recurring, self.process_id)
             for loop in loops:
                 loop.start()
                 self._loops.append(loop)
