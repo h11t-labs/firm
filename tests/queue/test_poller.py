@@ -44,3 +44,25 @@ def test_poll_error_is_routed_not_fatal() -> None:
     time.sleep(0.1)
     poller.stop()
     assert any(isinstance(e, ValueError) for e in errors)
+
+
+def test_base_exception_escape_is_surfaced_then_fatal() -> None:
+    """A non-Exception escape from poll() (SystemExit, interpreter teardown) is not a
+    per-cycle error: it must reach on_error and then end the thread, not loop silently."""
+    errors: list[BaseException] = []
+    stopped = threading.Event()
+
+    class _Exiting(InterruptiblePoller):
+        def __init__(self) -> None:
+            super().__init__(0.01, name="exiting", on_error=errors.append)
+
+        def poll(self) -> int:
+            raise SystemExit(2)
+
+        def on_stop(self) -> None:
+            stopped.set()
+
+    poller = _Exiting()
+    poller.start()
+    assert stopped.wait(2.0), "poll thread should have died through on_stop"
+    assert any(isinstance(e, SystemExit) for e in errors)
