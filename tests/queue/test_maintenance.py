@@ -179,3 +179,35 @@ def test_discard_refuses_job_being_claimed_concurrently(
     assert outcome["discarded"] is False
     assert count(schema.jobs) == 1
     assert count(schema.claimed_executions) == 1
+
+
+def test_expired_blocked_jobs_are_released_by_maintenance(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """QL-2: blocked_executions.expires_at was written but never read — the failsafe
+    promised in semaphore.py did not exist. Maintenance now releases expired blocked rows."""
+    from datetime import timedelta as _td
+
+    from sqlalchemy import insert as sa_insert
+
+    from firm.queue.dispatcher import run_maintenance
+
+    with engine.begin() as conn:
+        job_id = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="J", priority=0, concurrency_key="wedged"
+            )
+        ).inserted_primary_key[0]
+        conn.execute(
+            sa_insert(schema.blocked_executions).values(
+                job_id=job_id,
+                queue_name="default",
+                priority=0,
+                concurrency_key="wedged",
+                expires_at=now_utc() - _td(seconds=1),
+            )
+        )
+
+    assert run_maintenance(runtime) == 1
+    assert count(schema.blocked_executions) == 0
+    assert count(schema.ready_executions) == 1

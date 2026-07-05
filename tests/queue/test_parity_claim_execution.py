@@ -119,12 +119,9 @@ def test_fail_with_existing_failed_execution_updates_not_inserts(
     runtime: Runtime, engine: Engine, count: Callable[..., int]
 ) -> None:
     # A job that already has a failed_executions row, failed again, must update the
-    # existing row rather than insert a duplicate: the count stays 1.
-    #
-    # NOTE: firm's _finalize_failure does a bare INSERT into failed_executions,
-    # which has a UNIQUE(job_id) index -- so failing an already-failed job raises an
-    # IntegrityError instead of updating in place. This assertion documents the
-    # upstream contract and stays RED until firm upserts (real bug, left failing).
+    # existing row rather than insert a duplicate: the count stays 1. _finalize_failure
+    # updates the existing row in place when one exists (the at-least-once duplicate-run
+    # case), so the UNIQUE(job_id) index is never violated.
     parity_always_fails.enqueue()
     run_ready(runtime)
     assert count(schema.failed_executions) == 1

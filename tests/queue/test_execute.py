@@ -172,3 +172,88 @@ def test_vanished_job_row_drops_claim_without_raising(
 
     assert execute_claimed(runtime, job_id) is False
     assert count(schema.claimed_executions) == 0
+
+
+def test_unknown_job_with_concurrency_key_forfeits_its_slot(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """QL-6: an UnknownJob whose claim held a semaphore slot used to strand the key until
+    semaphore expiry (~minutes); the slot is now handed to the next blocked job."""
+    from sqlalchemy import insert as sa_insert
+
+    from firm._core.clock import now_utc
+    from firm._core.database import immediate_transaction
+    from firm.queue import semaphore
+    from firm.queue.claim import claim_ready
+    from firm.queue.results import execute_claimed
+
+    key = "ghost-key"
+    with immediate_transaction(engine) as conn:
+        assert semaphore.acquire(conn, key, limit=1, duration_s=300) is True
+
+    with engine.begin() as conn:
+        unknown_id = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="nope.Ghost", priority=0, concurrency_key=key
+            )
+        ).inserted_primary_key[0]
+        conn.execute(
+            sa_insert(schema.ready_executions).values(
+                job_id=unknown_id, queue_name="default", priority=0
+            )
+        )
+        blocked_id = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="nope.Waiting", priority=0, concurrency_key=key
+            )
+        ).inserted_primary_key[0]
+        conn.execute(
+            sa_insert(schema.blocked_executions).values(
+                job_id=blocked_id,
+                queue_name="default",
+                priority=0,
+                concurrency_key=key,
+                expires_at=now_utc(),
+            )
+        )
+
+    assert claim_ready(engine, runtime.dialect, ["*"], 5, None) == [unknown_id]
+    assert execute_claimed(runtime, unknown_id) is False  # UnknownJob -> failed
+
+    # The slot went to the blocked sibling instead of stranding the key.
+    assert count(schema.blocked_executions) == 0
+    with engine.connect() as conn:
+        ready_job = conn.execute(select(schema.ready_executions.c.job_id)).scalar_one()
+    assert ready_job == blocked_id
+
+
+def test_worker_surfaces_every_infra_failure_in_a_batch(runtime: Runtime, monkeypatch) -> None:
+    """QL-4: the sequential future.result() loop aborted on the first infrastructure
+    exception, dropping the siblings' errors unretrieved."""
+    import time
+
+    from firm.queue import worker as worker_module
+    from firm.queue.hooks import HOOKS
+    from firm.queue.worker import Worker
+
+    record_job.enqueue(1)
+    record_job.enqueue(2)
+
+    def _broken_execute(runtime_, job_id, process_id=None):
+        raise RuntimeError(f"infra-{job_id}")
+
+    monkeypatch.setattr(worker_module, "execute_claimed", _broken_execute)
+    errors: list[BaseException] = []
+    HOOKS.register_error(errors.append)
+    worker = Worker(runtime, threads=2, poll_interval=0.02)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and len(errors) < 2:
+            time.sleep(0.02)
+    finally:
+        worker.stop()
+        HOOKS.clear()
+
+    infra = sorted(str(e) for e in errors if str(e).startswith("infra-"))
+    assert len(infra) == 2, f"expected both failures surfaced, got {errors!r}"

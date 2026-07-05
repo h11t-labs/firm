@@ -59,10 +59,11 @@ class InterruptiblePoller:
                     did = 0
                     self._on_error(exc)
                 except BaseException as exc:
-                    # Not a per-cycle error (SystemExit, interpreter teardown): surface it,
-                    # then let the thread die loudly through on_stop instead of vanishing.
+                    # Not a per-cycle error (SystemExit, interpreter teardown): surface it
+                    # once via on_error, then end this poller for good — re-raising would
+                    # only duplicate the report through the thread excepthook.
                     self._on_error(exc)
-                    raise
+                    return
                 wait = self._interval if did else self._idle_interval
                 if self._wake.wait(timeout=wait):
                     self._wake.clear()

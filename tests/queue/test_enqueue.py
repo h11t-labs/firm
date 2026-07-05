@@ -46,3 +46,24 @@ def test_scheduled_at_is_filled_for_immediate(runtime: Runtime, engine: Engine) 
     with engine.connect() as conn:
         scheduled_at = conn.execute(select(schema.jobs.c.scheduled_at)).scalar()
     assert scheduled_at is not None
+
+
+def test_enqueue_at_accepts_timezone_aware_datetimes(runtime, count) -> None:
+    """QL-1: docs say naive UTC, but the idiomatic datetime.now(UTC) + timedelta must
+    schedule correctly instead of raising TypeError on aware-vs-naive comparison."""
+    from datetime import UTC, datetime, timedelta
+
+    import firm.queue as bq
+    from firm.queue import schema
+
+    @bq.job()
+    def aware_job() -> None:
+        pass
+
+    aware_job.enqueue_at(datetime.now(UTC) + timedelta(hours=1))
+    assert count(schema.scheduled_executions) == 1
+    assert count(schema.ready_executions) == 0
+
+    # An aware time in the past behaves like any past time: ready immediately.
+    aware_job.enqueue_at(datetime.now(UTC) - timedelta(hours=1))
+    assert count(schema.ready_executions) == 1
