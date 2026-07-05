@@ -117,3 +117,39 @@ def test_worker_keeps_processing_after_base_exception_job(
         assert _SINK == [7]
     finally:
         worker.stop()
+
+
+def test_zombie_worker_does_not_finalize_reclaimed_job(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """After prune -> recover -> reclaim, a zombie worker (stale heartbeat, still alive)
+    finishing its stale copy must not delete the new owner's claim row: if it did and the new
+    worker then died mid-run, no recovery pass would ever find the job again (Q-F8)."""
+    from firm._core import process as process_registry
+    from firm._core.process import ProcessInfo
+    from firm.queue.claim import claim_ready
+    from firm.queue.recovery import recover_orphaned_claims
+    from firm.queue.results import execute_claimed
+
+    _SINK.clear()
+    record_job.enqueue(1)
+    zombie = process_registry.register(engine, ProcessInfo(kind="Worker", name="zombie", pid=1))
+    owner = process_registry.register(engine, ProcessInfo(kind="Worker", name="fresh", pid=2))
+
+    [job_id] = claim_ready(engine, runtime.dialect, ["*"], 5, zombie)
+    # The zombie's heartbeat goes stale: it is pruned and its claim recovered + reclaimed.
+    process_registry.deregister(engine, zombie)
+    assert recover_orphaned_claims(runtime) == 1
+    assert claim_ready(engine, runtime.dialect, ["*"], 5, owner) == [job_id]
+
+    # The zombie finishes its stale copy: the new owner's claim must survive untouched.
+    assert execute_claimed(runtime, job_id, process_id=zombie) is False
+    assert count(schema.claimed_executions) == 1
+    with engine.connect() as conn:
+        assert conn.execute(select(schema.jobs.c.finished_at)).scalar() is None
+
+    # The real owner finalizes normally.
+    assert execute_claimed(runtime, job_id, process_id=owner) is True
+    assert count(schema.claimed_executions) == 0
+    with engine.connect() as conn:
+        assert conn.execute(select(schema.jobs.c.finished_at)).scalar() is not None

@@ -28,7 +28,7 @@ def run_ready(
     """Claim up to ``limit`` ready jobs and run them inline; return how many were processed."""
     claimed = claim_ready(runtime.engine, runtime.dialect, list(queues), limit, process_id)
     for job_id in claimed:
-        execute_claimed(runtime, job_id)
+        execute_claimed(runtime, job_id, process_id)
     return len(claimed)
 
 
@@ -68,7 +68,10 @@ class Worker(InterruptiblePoller):
         )
         if not claimed:
             return 0
-        futures = [self._pool.submit(execute_claimed, self.runtime, job_id) for job_id in claimed]
+        futures = [
+            self._pool.submit(execute_claimed, self.runtime, job_id, self.process_id)
+            for job_id in claimed
+        ]
         for future in futures:
             future.result()
         return len(claimed)
