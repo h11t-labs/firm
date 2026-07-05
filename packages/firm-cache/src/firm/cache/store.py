@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -19,9 +19,13 @@ from . import schema
 from .entries import delete_entry, ensure_entry, read_entry, read_entry_locked, write_entry
 from .expiry import Expiry, ExpiryLoop
 from .keys import key_hash, normalize_key
-from .serialization import Coder, PickleCoder, build_encrypted_coder
+from .serialization import Coder, JSONCoder, build_encrypted_coder
 
 _entries = schema.entries
+
+# Sentinel for "row exists but cannot be decoded" (rotated encryption key, coder change,
+# corrupt bytes). Reads treat it as a miss instead of poisoning every access to the key.
+_UNDECODABLE = object()
 
 TWO_WEEKS_SECONDS = 14 * 24 * 3600.0
 DEFAULT_MAX_SIZE = 256 * 1024 * 1024
@@ -34,7 +38,7 @@ class Cache:
         *,
         engine: Engine | None = None,
         coder: Coder | None = None,
-        encrypt_key: str | bytes | None = None,
+        encrypt_key: str | bytes | Sequence[str | bytes] | None = None,
         max_age: float | None = TWO_WEEKS_SECONDS,
         max_size: int | None = DEFAULT_MAX_SIZE,
         max_entries: int | None = None,
@@ -55,7 +59,9 @@ class Cache:
         else:
             raise ValueError("Cache requires either database_url or engine")
 
-        base: Coder = coder or PickleCoder()
+        # JSON by default: decoding it is safe no matter who wrote the row. PickleCoder
+        # (arbitrary objects, executes code on load) is a deliberate opt-in.
+        base: Coder = coder or JSONCoder()
         self.encrypted = encrypt_key is not None
         self.coder: Coder = (
             build_encrypted_coder(base, encrypt_key) if encrypt_key is not None else base
@@ -87,6 +93,14 @@ class Cache:
             return None
         return now_utc() - timedelta(seconds=self.max_age)
 
+    def _decode(self, data: bytes) -> Any:
+        """Decode stored bytes; an undecodable entry reads as a miss (``_UNDECODABLE``) —
+        a rotated encryption key or a coder change must not raise out of every read."""
+        try:
+            return self.coder.loads(data)
+        except Exception:
+            return _UNDECODABLE
+
     def _multi_read_stmt(self, hashes: list[int]):
         stmt = select(_entries.c.key, _entries.c.value).where(_entries.c.key_hash.in_(hashes))
         min_created = self._min_created_at()
@@ -97,7 +111,10 @@ class Cache:
     def get(self, key: str | bytes) -> Any | None:
         with transaction(self.engine) as conn:
             data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
-        return None if data is None else self.coder.loads(data)
+        if data is None:
+            return None
+        decoded = self._decode(data)
+        return None if decoded is _UNDECODABLE else decoded
 
     def set(self, key: str | bytes, value: Any, *, unless_exist: bool = False) -> bool:
         """Store ``value`` under ``key``. With ``unless_exist=True`` write only when the key is
@@ -120,7 +137,9 @@ class Cache:
         with transaction(self.engine) as conn:
             data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
         if data is not None:
-            return self.coder.loads(data)
+            decoded = self._decode(data)
+            if decoded is not _UNDECODABLE:
+                return decoded
         computed = default() if callable(default) else default
         self.set(key, computed)
         return computed
@@ -155,7 +174,9 @@ class Cache:
         for key in key_list:
             data = by_key.get(kb_map[key])
             if data is not None:
-                result[key] = self.coder.loads(data)
+                decoded = self._decode(data)
+                if decoded is not _UNDECODABLE:
+                    result[key] = decoded
         return result
 
     def set_multi(self, mapping: Mapping[str | bytes, Any]) -> None:
@@ -180,8 +201,9 @@ class Cache:
         to_write: dict[bytes, bytes] = {}
         for key in key_list:
             data = by_kb.get(kb_map[key])
-            if data is not None:
-                result[key] = self.coder.loads(data)
+            decoded = self._decode(data) if data is not None else _UNDECODABLE
+            if decoded is not _UNDECODABLE:
+                result[key] = decoded
             else:
                 computed = default(key)
                 result[key] = computed
@@ -202,7 +224,11 @@ class Cache:
         with immediate_transaction(self.engine) as conn:
             ensure_entry(conn, kb, zero, self.encrypted)
             data = read_entry_locked(conn, kb, min_created_at=self._min_created_at())
-            current = int(self.coder.loads(data)) if data is not None else 0
+            current = 0
+            if data is not None:
+                decoded = self._decode(data)
+                if decoded is not _UNDECODABLE:
+                    current = int(decoded)
             new_value = current + by
             write_entry(conn, kb, self.coder.dumps(new_value), self.encrypted)
         return new_value
