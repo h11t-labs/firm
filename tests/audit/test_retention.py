@@ -86,3 +86,29 @@ def test_retention_loop_runs_a_pass(db_url: str) -> None:
             loop.stop()
     finally:
         audit.close()
+
+
+def test_background_retention_failure_reaches_on_error(db_url, monkeypatch) -> None:
+    """X-1: RetentionLoop failures now route to AuditLog(on_error=...)."""
+    import time
+
+    from firm.audit import AuditLog
+
+    seen: list[BaseException] = []
+    audit = AuditLog(
+        database_url=db_url,
+        max_age=1.0,
+        background_retention=True,
+        retention_interval=0.01,
+        on_error=seen.append,
+    )
+    try:
+        monkeypatch.setattr(
+            audit.retention, "run_once", lambda: (_ for _ in ()).throw(RuntimeError("prune-fail"))
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not seen:
+            time.sleep(0.01)
+        assert seen and "prune-fail" in str(seen[0])
+    finally:
+        audit.close()

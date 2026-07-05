@@ -2544,6 +2544,7 @@ Cache(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `auto_expire` | `True` | Disable to evict only via `expiry.run_once()` / the background loop. |
 | `background_expiry` / `expiry_interval` | `False` / `60.0` | Opt-in timer-based eviction. |
+| `on_error` | traceback to stderr | Callback for background-eviction failures (`Exception` -> your handler). |
 
 Call `cache.close()` (or use the `with` form) to stop the background loop and dispose the engine.
 
@@ -2828,6 +2829,7 @@ Channel(
 | `polling_interval` | `0.1` | Lower = lower delivery latency, more queries; `0.1s` balances the two. |
 | `message_retention` | `86400.0` | Age cut-off for trimming (seconds). |
 | `autotrim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
+| `on_error` | traceback to stderr | Callback for listener/trim failures (subscriber-callback errors stay isolated). |
 | `trim_batch_size` | `100` | Trim batch + write-trigger rate (~`2/N`). |
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 
@@ -3277,6 +3279,7 @@ AuditLog(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
+| `on_error` | traceback to stderr | Callback for background-pruning failures. |
 
 Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
 

@@ -122,3 +122,23 @@ def test_estimate_survives_id_holes_without_collapsing(db_url) -> None:
         assert estimate < 2 * true_total, f"estimate collapsed to worst case: {estimate}"
     finally:
         cache.close()
+
+
+def test_background_eviction_failure_reaches_on_error(db_url, monkeypatch) -> None:
+    """X-1: eviction errors were swallowed by contextlib.suppress — a cache that silently
+    stops evicting is a full-disk incident. They now route to Cache(on_error=...)."""
+    import time
+
+    seen: list[BaseException] = []
+    cache = Cache(database_url=db_url, auto_expire=True, on_error=seen.append)
+    try:
+        monkeypatch.setattr(
+            cache.expiry, "run_once", lambda: (_ for _ in ()).throw(RuntimeError("evict-fail"))
+        )
+        cache.expiry.maybe_trigger(10_000)  # expected runs >> 1, so at least one submits
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not seen:
+            time.sleep(0.01)
+        assert seen and "evict-fail" in str(seen[0])
+    finally:
+        cache.close()

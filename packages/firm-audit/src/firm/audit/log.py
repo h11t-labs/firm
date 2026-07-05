@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Connection, Engine
 
 from .._core.database import create_engine_for, dispose_engine, transaction
+from .._core.poller import default_on_error
 from . import events, schema
 from .events import Reference
 from .retention import Retention, RetentionLoop
@@ -52,6 +54,7 @@ class AuditLog:
         max_age: float | None = None,
         background_retention: bool = False,
         retention_interval: float = 3600.0,
+        on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         if engine is not None:
             self.engine = engine
@@ -67,9 +70,13 @@ class AuditLog:
         if create_schema:
             schema.create_all(self.engine)
 
+        # Background pruning failures are routed here (default: traceback to stderr).
+        self.on_error = on_error if on_error is not None else default_on_error
         self.retention = Retention(self)
         self._loop = (
-            RetentionLoop(self.retention, retention_interval) if background_retention else None
+            RetentionLoop(self.retention, retention_interval, on_error=self.on_error)
+            if background_retention
+            else None
         )
         if self._loop is not None:
             self._loop.start()

@@ -145,7 +145,10 @@ class ThreadSupervisor:
                 self._loops.append(loop)
             HOOKS.fire(f"{_kind_of(child)}_start")
         heartbeat = HeartbeatPoller(
-            self.runtime.engine, self.process_id, self.config.heartbeat_interval
+            self.runtime.engine,
+            self.process_id,
+            self.config.heartbeat_interval,
+            on_error=HOOKS.fire_error,
         )
         heartbeat.start()
         self._loops.append(heartbeat)
@@ -197,7 +200,9 @@ def _run_child(
         ),
     )
     loops = _build_loops(runtime, child, supervisor_config.recurring, process_id)
-    heartbeat = HeartbeatPoller(runtime.engine, process_id, supervisor_config.heartbeat_interval)
+    heartbeat = HeartbeatPoller(
+        runtime.engine, process_id, supervisor_config.heartbeat_interval, on_error=HOOKS.fire_error
+    )
     for loop in loops:
         loop.start()
     heartbeat.start()
@@ -246,7 +251,10 @@ class ForkSupervisor:
         # appear dead in the registry for the rest of its life. Started after forking so
         # no child inherits the heartbeat thread.
         self._heartbeat = HeartbeatPoller(
-            self.runtime.engine, self.process_id, self.config.heartbeat_interval
+            self.runtime.engine,
+            self.process_id,
+            self.config.heartbeat_interval,
+            on_error=HOOKS.fire_error,
         )
         self._heartbeat.start()
         self._supervise()

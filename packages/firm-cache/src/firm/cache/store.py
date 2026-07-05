@@ -15,6 +15,7 @@ from .._core.database import (
     immediate_transaction,
     transaction,
 )
+from .._core.poller import default_on_error
 from . import schema
 from .entries import delete_entry, ensure_entry, read_entry, read_entry_locked, write_entry
 from .expiry import Expiry, ExpiryLoop
@@ -49,6 +50,7 @@ class Cache:
         auto_expire: bool = True,
         background_expiry: bool = False,
         expiry_interval: float = 60.0,
+        on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         if engine is not None:
             self.engine = engine
@@ -78,6 +80,9 @@ class Cache:
         if create_schema:
             schema.create_all(self.engine)
 
+        # Background eviction failures are routed here (default: traceback to stderr) — a
+        # cache that silently stops evicting is a full-disk incident waiting to happen.
+        self.on_error = on_error if on_error is not None else default_on_error
         self.expiry = Expiry(self)
         self._loop = ExpiryLoop(self.expiry, expiry_interval) if background_expiry else None
         if self._loop is not None:

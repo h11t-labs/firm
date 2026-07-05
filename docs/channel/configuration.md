@@ -20,6 +20,7 @@ Channel(
 | `polling_interval` | `0.1` | Lower = lower delivery latency, more queries; `0.1s` balances the two. |
 | `message_retention` | `86400.0` | Age cut-off for trimming (seconds). |
 | `autotrim` | `True` | Disable to trim only via `channel.trim()` / the CLI. |
+| `on_error` | traceback to stderr | Callback for listener/trim failures (subscriber-callback errors stay isolated). |
 | `trim_batch_size` | `100` | Trim batch + write-trigger rate (~`2/N`). |
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 

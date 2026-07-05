@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 
+from .._core.poller import default_on_error
+
 Hook = Callable[[], None]
 ErrorHook = Callable[[BaseException], None]
 
@@ -36,6 +38,12 @@ class LifecycleHooks:
                 self.fire_error(exc)
 
     def fire_error(self, exc: BaseException) -> None:
+        if not self._error_hooks:
+            # Nobody listening: fall back to stderr rather than dropping the error — a
+            # heartbeat or worker failure with zero diagnostics is how duplicate execution
+            # gets "impossible to debug".
+            default_on_error(exc)
+            return
         for fn in self._error_hooks:
             with contextlib.suppress(Exception):  # error hooks are best-effort
                 fn(exc)

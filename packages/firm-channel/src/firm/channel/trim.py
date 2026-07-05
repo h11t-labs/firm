@@ -7,7 +7,6 @@ stays bounded without a dedicated sweeper. A trim deletes up to ``trim_batch_siz
 
 from __future__ import annotations
 
-import contextlib
 import random
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
@@ -40,8 +39,10 @@ class Trimmer:
             self._pool.submit(self._safe_run)
 
     def _safe_run(self) -> None:
-        with contextlib.suppress(Exception):
+        try:
             self.run_once()
+        except Exception as exc:
+            self.channel.on_error(exc)
 
     def run_once(self) -> int:
         """Delete one batch of messages older than ``message_retention``. Returns how many."""

@@ -130,3 +130,22 @@ def test_channel_hash_collision_dispatches_by_exact_channel(
     channel.broadcast("A", b"for-A")
     assert wait_for(lambda: received == [b"for-A"])
     assert b"for-B" not in received
+
+
+def test_listener_errors_reach_on_error(db_url, wait_for) -> None:
+    """X-1: listener poll failures were dropped by the poller default; they now route to
+    Channel(on_error=...)."""
+    from unittest import mock
+
+    seen: list[BaseException] = []
+    ps = Channel(database_url=db_url, polling_interval=0.01, autotrim=False, on_error=seen.append)
+    try:
+        ps.subscribe("room", lambda payload: None)
+        with mock.patch(
+            "firm.channel.channel.messages.fetch_since",
+            side_effect=RuntimeError("listener-fail"),
+        ):
+            ps.broadcast("room", b"x")
+            assert wait_for(lambda: any("listener-fail" in str(e) for e in seen))
+    finally:
+        ps.close()

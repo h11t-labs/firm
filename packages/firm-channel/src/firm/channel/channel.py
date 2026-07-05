@@ -24,7 +24,7 @@ from sqlalchemy import Engine
 from .._core.clock import now_utc
 from .._core.database import create_engine_for, dispose_engine, transaction
 from .._core.dialects import get_dialect
-from .._core.poller import InterruptiblePoller
+from .._core.poller import InterruptiblePoller, default_on_error
 from . import messages, schema
 from .keys import channel_hash, normalize_channel
 from .trim import Trimmer
@@ -49,6 +49,7 @@ class Channel:
         trim_batch_size: int = DEFAULT_TRIM_BATCH_SIZE,
         create_schema: bool = True,
         commit_grace: float = DEFAULT_COMMIT_GRACE_SECONDS,
+        on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         if engine is not None:
             self.engine = engine
@@ -65,6 +66,9 @@ class Channel:
         self.autotrim = autotrim
         self.trim_batch_size = trim_batch_size
         self.commit_grace = commit_grace
+        # Listener/trim failures are routed here (default: traceback to stderr). Subscriber
+        # callback errors stay suppressed by design — one bad subscriber can't break the rest.
+        self.on_error = on_error if on_error is not None else default_on_error
 
         if create_schema:
             schema.create_all(self.engine)
@@ -202,7 +206,7 @@ class Listener(InterruptiblePoller):
     """Background thread that polls for new messages and dispatches them to subscribers."""
 
     def __init__(self, channel: Channel, interval: float) -> None:
-        super().__init__(interval, name="channel-listener")
+        super().__init__(interval, name="channel-listener", on_error=channel.on_error)
         self.channel = channel
 
     def poll(self) -> int:
