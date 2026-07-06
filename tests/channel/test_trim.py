@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+from collections.abc import Callable
 from datetime import timedelta
 
 from sqlalchemy import insert, select
@@ -50,10 +50,15 @@ def test_trim_noop_when_all_recent(channel: Channel) -> None:
     assert channel.trim() == 0
 
 
-def test_auto_trim_triggers_trim_on_broadcast(db_url: str) -> None:
+def test_auto_trim_triggers_trim_on_broadcast(db_url: str, wait_for: Callable) -> None:
     # trim_batch_size=2 -> expected trims per write = (1/2) * TRIM_MULTIPLIER(2) = 1.0, so exactly
     # one trim is submitted per broadcast with no randomness — making the auto_trim path testable.
     ps = Channel(database_url=db_url, auto_trim=True, trim_batch_size=2)
+
+    def payloads() -> list[bytes]:
+        with ps.engine.connect() as conn:
+            return [bytes(p) for p in conn.execute(select(_messages.c.payload)).scalars()]
+
     try:
         with ps.engine.begin() as conn:
             conn.execute(
@@ -65,15 +70,8 @@ def test_auto_trim_triggers_trim_on_broadcast(db_url: str) -> None:
                 )
             )
         ps.broadcast("c", b"new")  # auto_trim submits one async trim onto the background pool
-        deadline = time.monotonic() + 2.0
-        payloads: list[bytes] = []
-        while time.monotonic() < deadline:
-            with ps.engine.connect() as conn:
-                payloads = [bytes(p) for p in conn.execute(select(_messages.c.payload)).scalars()]
-            if b"old" not in payloads:
-                break
-            time.sleep(0.02)
-        assert b"old" not in payloads  # the aged-out row was trimmed by the auto_trim run
-        assert b"new" in payloads  # the fresh broadcast survived
+        # Poll the background trim to completion instead of sleeping a fixed duration.
+        assert wait_for(lambda: b"old" not in payloads())  # the aged-out row was trimmed
+        assert b"new" in payloads()  # the fresh broadcast survived
     finally:
         ps.close()

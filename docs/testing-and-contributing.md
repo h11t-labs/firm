@@ -34,12 +34,13 @@ uv sync    # venv + all workspace packages (editable) + all dev tools/drivers
 ## The gate
 
 ```bash
-uv run pytest                                  # tests
-uv run ruff check && uv run ruff format --check # lint + format
-uv run ty check packages                       # types
+uv run pytest                                    # tests
+uv run ruff check && uv run ruff format --check  # lint + format
+uv run ty check packages scripts examples        # types
+uv run python scripts/check_parity.py            # upstream test-parity inventory
 ```
 
-All three must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
+All must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
 with `ruff`.
 
 ## Running against Postgres and MySQL
@@ -67,6 +68,29 @@ Notes:
   SQL backend, so it's exercised once.
 - **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
   render correctly for Postgres/MySQL with no live database.
+
+## Upstream test parity
+
+firm is a port of the Rails Solid stack, so the **TEST-PORTING contract** is: firm's suite is a
+*superset* of the Solid gems' tests (`solid_queue` / `solid_cache` / `solid_cable`), minus
+divergences that are documented in [comparison-to-rails.md](comparison-to-rails.md). A missing
+upstream test is how a regression slips in, so the policy is enforced mechanically rather than by
+convention.
+
+- **Parity tests** live in `tests/<module>/test_parity*.py` (and, once a gap is closed, in the
+  module's regular test file). Each cites the upstream Ruby test it mirrors in a comment, e.g.
+  `# upstream: cache_store_behavior.rb::test_fetch_multi`.
+- **`tests/parity_inventory.toml`** is the machine-readable record: every upstream `*.rb` file firm
+  tracks, mapped to the firm test(s) that port it (`ported_by`) or marked as a deliberate gap
+  (`diverged = true` + a `reason`).
+- **`scripts/check_parity.py`** (in the gate, CI, and pre-commit) keeps the two in sync: it fails if
+  a test cites an upstream file the inventory doesn't list (drift), if a `ported_by` file is missing
+  or no longer cites its upstream (rot), if a `ported` upstream is cited by no test (dead entry), or
+  if a divergence has no reason.
+
+When you port a new upstream test, add its `*.rb` to the inventory (or extend an existing entry's
+`ported_by`); when you re-sync against a newer Solid release, bump the `[meta]` versions and add any
+newly-discovered upstream files as `ported_by` or `diverged`.
 
 ## Conventions
 
