@@ -73,6 +73,7 @@ header.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: 
 .dropdown summary:hover, .dropdown[open] summary { color: var(--text-2); }
 .dropdown summary svg { width: 12px; height: 12px; }
 /* Theme toggle: a bare icon button that cycles system -> light -> dark on each click. */
+.theme-toggle { display: flex; align-items: center; }
 .theme-toggle button { border: none; background: none; padding: 2px; color: var(--text-3);
                        transition: color .15s ease; }
 .theme-toggle button:hover { background: none; color: var(--text); }

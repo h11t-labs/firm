@@ -2,4 +2,4 @@
 {# A single cycling toggle: clicking the icon advances system -> light -> dark -> system. No JS —
    it's a one-button POST to /settings/theme carrying the next mode; the server stores the choice
    and sets data-theme on <html>, which the CSS reads. #}
-<form class="theme-toggle inline" method="post" action="/settings/theme"><input type="hidden" name="theme" value="{{ toggle.next_value }}"><input type="hidden" name="return" value="{{ request_path }}"><button type="submit" title="Theme: {{ toggle.label }} — switch to {{ toggle.next_label }}">{{ icons[toggle.icon] }}</button></form>
+<form class="theme-toggle" method="post" action="/settings/theme"><input type="hidden" name="theme" value="{{ toggle.next_value }}"><input type="hidden" name="return" value="{{ request_path }}"><button type="submit" title="Theme: {{ toggle.label }} — switch to {{ toggle.next_label }}">{{ icons[toggle.icon] }}</button></form>
