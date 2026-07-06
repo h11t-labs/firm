@@ -89,7 +89,7 @@ Single steps (no long-lived process):
 from firm.queue.worker import run_ready
 from firm.queue.dispatcher import dispatch_once, run_maintenance
 
-run_ready(rt, queues=("*",), limit=100)   # -> int  (claim + run one batch)
+run_ready(rt, queues=("*",), limit=10)    # -> int  (claim + run one batch of up to `limit`)
 dispatch_once(rt)                          # -> int  (promote due scheduled jobs)
 run_maintenance(rt)                         # -> int  (release blocked jobs with capacity)
 ```

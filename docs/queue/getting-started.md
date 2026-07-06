@@ -70,7 +70,7 @@ round-trip; anything else raises **at enqueue time** (see [Defining jobs](jobs.m
 from firm.queue.worker import run_ready
 
 send_welcome.enqueue(42)
-processed = run_ready(current_runtime())   # claim + run all ready jobs inline
+processed = run_ready(current_runtime())   # claim + run up to `limit` (default 10) ready jobs inline
 ```
 
 ### The real thing — a worker process

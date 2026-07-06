@@ -34,7 +34,9 @@ It points at existing databases — it never creates or migrates a schema.
   arguments, the full traceback, and **retry** / **discard** (plus retry-all). Auto-refreshes.
 - **Cache** — entry count, estimated total size, recent entries, and a **Clear all** action.
 - **Channels** — buffered-message count, distinct channels, the busiest channels, recent messages,
-  and a **Trim** action (deletes messages older than the 1-day default retention).
+  and a **Trim** action (deletes messages older than the retention; 1 day by default — pass
+  `--channel-trim-retention SECONDS` to match your app's `Channel(message_retention=...)` so a
+  click never deletes messages the app still keeps).
 - **Audit** — total event count, a search/feed over recorded events filterable by subject, actor,
   action, and correlation id, and a detail page per event with the full (pretty-printed)
   `data`/`changes`/`context` payloads. Read-only — there's no delete action in the dashboard;
@@ -71,6 +73,11 @@ firm-ui --hash-password                       # prompts, prints a "pbkdf2_sha256
 FIRM_UI_PASSWORD_HASH='pbkdf2_sha256$…' \
   firm-ui --database-url sqlite:///app.db --basic-auth-user admin
 ```
+
+`--hash-password` prompts for a password and prints a self-describing
+`pbkdf2_sha256$<rounds>$<salt-b64>$<hash-b64>` string (PBKDF2-HMAC-SHA256, 200k rounds, random
+salt — the same format `firm.ui.hash_password()` produces). Store that string in
+`FIRM_UI_PASSWORD_HASH`; verification is constant-time.
 
 The browser shows its native sign-in dialog; no login page or cookies are involved.
 

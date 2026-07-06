@@ -115,6 +115,14 @@ FIRM_QUEUE_DATABASE_URL=postgresql://localhost/myapp \
 # cache
 FIRM_CACHE_DATABASE_URL=postgresql://localhost/myapp \
   alembic -c alembic.cache.ini upgrade head
+
+# channel
+FIRM_CHANNEL_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.channel.ini upgrade head
+
+# audit
+FIRM_AUDIT_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.audit.ini upgrade head
 ```
 
 Each package keeps its own Alembic version table (`firm_<module>_alembic_version`), so all four

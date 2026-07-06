@@ -116,8 +116,8 @@ pip install "firm[audit]"      # just the audit log
 | `cache` | `firm-cache` (click) | the cache store + the `firm-cache` CLI |
 | `channel` | `firm-channel` (click) | pub/sub + the `firm-channel` CLI |
 | `audit` | `firm-audit` (click) | the audit log + the `firm-audit` CLI |
-| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) |
-| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) |
+| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
+| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
 | `postgres` | `psycopg` | running on PostgreSQL |
 | `mysql` | `pymysql` | running on MySQL / MariaDB |
 | `encryption` | `cryptography` | cache at-rest encryption (Fernet) |
@@ -1153,7 +1153,7 @@ Good fit for a `RecurringTask` wrapping a `@bq.job` that calls `clear_finished`.
 
 ### The firm-ui dashboard
 
-A small read/act web dashboard. It binds to `127.0.0.1` and exposes tracebacks plus destructive actions (retry / discard / pause / clear) — put it behind a reverse proxy + auth before exposing it. Tabs appear only for the parts (queue / cache / channel) whose tables exist.
+A small read/act web dashboard. It binds to `127.0.0.1` and exposes tracebacks plus destructive actions (retry / discard / pause / clear) — put it behind a reverse proxy + auth before exposing it. Tabs appear only for the parts (queue / cache / channel / audit) whose tables exist.
 
 ```bash
 # One shared database for all parts
@@ -1398,7 +1398,7 @@ round-trip; anything else raises **at enqueue time** (see [Defining jobs](jobs.m
 from firm.queue.worker import run_ready
 
 send_welcome.enqueue(42)
-processed = run_ready(current_runtime())   # claim + run all ready jobs inline
+processed = run_ready(current_runtime())   # claim + run up to `limit` (default 10) ready jobs inline
 ```
 
 ### The real thing — a worker process
@@ -3584,7 +3584,9 @@ It points at existing databases — it never creates or migrates a schema.
   arguments, the full traceback, and **retry** / **discard** (plus retry-all). Auto-refreshes.
 - **Cache** — entry count, estimated total size, recent entries, and a **Clear all** action.
 - **Channels** — buffered-message count, distinct channels, the busiest channels, recent messages,
-  and a **Trim** action (deletes messages older than the 1-day default retention).
+  and a **Trim** action (deletes messages older than the retention; 1 day by default — pass
+  `--channel-trim-retention SECONDS` to match your app's `Channel(message_retention=...)` so a
+  click never deletes messages the app still keeps).
 - **Audit** — total event count, a search/feed over recorded events filterable by subject, actor,
   action, and correlation id, and a detail page per event with the full (pretty-printed)
   `data`/`changes`/`context` payloads. Read-only — there's no delete action in the dashboard;
@@ -3621,6 +3623,11 @@ firm-ui --hash-password                       # prompts, prints a "pbkdf2_sha256
 FIRM_UI_PASSWORD_HASH='pbkdf2_sha256$…' \
   firm-ui --database-url sqlite:///app.db --basic-auth-user admin
 ```
+
+`--hash-password` prompts for a password and prints a self-describing
+`pbkdf2_sha256$<rounds>$<salt-b64>$<hash-b64>` string (PBKDF2-HMAC-SHA256, 200k rounds, random
+salt — the same format `firm.ui.hash_password()` produces). Store that string in
+`FIRM_UI_PASSWORD_HASH`; verification is constant-time.
 
 The browser shows its native sign-in dialog; no login page or cookies are involved.
 
@@ -3792,6 +3799,14 @@ FIRM_QUEUE_DATABASE_URL=postgresql://localhost/myapp \
 # cache
 FIRM_CACHE_DATABASE_URL=postgresql://localhost/myapp \
   alembic -c alembic.cache.ini upgrade head
+
+# channel
+FIRM_CHANNEL_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.channel.ini upgrade head
+
+# audit
+FIRM_AUDIT_DATABASE_URL=postgresql://localhost/myapp \
+  alembic -c alembic.audit.ini upgrade head
 ```
 
 Each package keeps its own Alembic version table (`firm_<module>_alembic_version`), so all four
@@ -3906,7 +3921,7 @@ Single steps (no long-lived process):
 from firm.queue.worker import run_ready
 from firm.queue.dispatcher import dispatch_once, run_maintenance
 
-run_ready(rt, queues=("*",), limit=100)   # -> int  (claim + run one batch)
+run_ready(rt, queues=("*",), limit=10)    # -> int  (claim + run one batch of up to `limit`)
 dispatch_once(rt)                          # -> int  (promote due scheduled jobs)
 run_maintenance(rt)                         # -> int  (release blocked jobs with capacity)
 ```
