@@ -1,5 +1,5 @@
-{#def current, choices, request_path #}
-{# `current` ({label, icon}) and `choices` ({value, label, icon, active}) are precomputed in
-   render.py; each choice posts to /settings/theme and redirects back. No client JS — the server
-   stores the choice in a cookie and sets data-theme on <html>, which the CSS reads. #}
-<details class="dropdown theme"><summary title="Theme: {{ current.label }}">{{ icons[current.icon] }}{{ icons.chevron }}</summary><div class="dropdown-menu">{% for opt in choices %}<form class="inline" method="post" action="/settings/theme"><input type="hidden" name="theme" value="{{ opt.value }}"><input type="hidden" name="return" value="{{ request_path }}"><button class="dropdown-opt{{ " active" if opt.active else "" }}" type="submit">{{ opt.label }}{% if opt.active %}{{ icons.check }}{% endif %}</button></form>{% endfor %}</div></details>
+{#def toggle, request_path #}
+{# A single cycling toggle: clicking the icon advances system -> light -> dark -> system. No JS —
+   it's a one-button POST to /settings/theme carrying the next mode; the server stores the choice
+   and sets data-theme on <html>, which the CSS reads. #}
+<form class="theme-toggle inline" method="post" action="/settings/theme"><input type="hidden" name="theme" value="{{ toggle.next_value }}"><input type="hidden" name="return" value="{{ request_path }}"><button type="submit" title="Theme: {{ toggle.label }} — switch to {{ toggle.next_label }}">{{ icons[toggle.icon] }}</button></form>

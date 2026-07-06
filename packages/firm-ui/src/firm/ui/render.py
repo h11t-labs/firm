@@ -353,20 +353,15 @@ def _refresh_choices(refresh: int) -> list[dict[str, Any]]:
     ]
 
 
-def _theme_choices(theme: str) -> list[dict[str, Any]]:
-    return [
-        {"value": value, "label": label, "icon": icon, "active": value == theme}
-        for value, label, icon in THEME_OPTIONS
-    ]
-
-
-def _theme_summary(theme: str) -> dict[str, str]:
-    """Icon/label for the closed theme control — the active choice, falling back to system if the
-    cookie-provided value is unrecognised."""
-    for value, label, icon in THEME_OPTIONS:
-        if value == theme:
-            return {"label": label, "icon": icon}
-    return {"label": "System", "icon": "monitor"}
+def _theme_toggle(theme: str) -> dict[str, str]:
+    """The single cycling toggle's data: the current mode's icon/label, plus the next mode in the
+    system -> light -> dark -> system cycle that one click advances to. Falls back to system when
+    the cookie-provided value is unrecognised."""
+    values = [value for value, _, _ in THEME_OPTIONS]
+    idx = values.index(theme) if theme in values else 0
+    _, label, icon = THEME_OPTIONS[idx]
+    next_value, next_label, _ = THEME_OPTIONS[(idx + 1) % len(THEME_OPTIONS)]
+    return {"icon": icon, "label": label, "next_value": next_value, "next_label": next_label}
 
 
 # Detail-page key/value cells hold small pre-rendered fragments; rendering the relevant component
@@ -406,8 +401,7 @@ def _render(template_name: str, **context: Any) -> str:
     refresh = ctx["refresh"]
     ctx["refresh_label"] = _refresh_label(refresh) if refresh is not None else ""
     ctx["refresh_choices"] = _refresh_choices(refresh) if refresh is not None else []
-    ctx["theme_choices"] = _theme_choices(ctx["theme"])
-    ctx["theme_summary"] = _theme_summary(ctx["theme"])
+    ctx["theme_toggle"] = _theme_toggle(ctx["theme"])
     ctx["statenav_items"] = (
         _statenav_items(ctx["substate"], ctx["substate_counts"], ctx["queue"])
         if ctx["substate"] is not None
