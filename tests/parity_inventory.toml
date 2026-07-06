@@ -59,13 +59,16 @@ ported_by = ["tests/queue/test_parity_config_cli_scaling.py"]
 
 [[queue]]
 upstream = "dispatcher_test.rb"
-ported_by = ["tests/queue/test_parity_config_cli_scaling.py"]
+ported_by = [
+  "tests/queue/test_parity_config_cli_scaling.py",
+  "tests/queue/test_supervisor.py",
+]
 
 [[queue]]
 upstream = "worker_test.rb"
 ported_by = [
   "tests/queue/test_parity_config_cli_scaling.py",
-  "tests/queue/test_parity_supervisor_recurring.py",
+  "tests/queue/test_process.py",
 ]
 
 [[queue]]
@@ -78,7 +81,10 @@ ported_by = ["tests/queue/test_parity_supervisor_recurring.py"]
 
 [[queue]]
 upstream = "recurring_task_test.rb"
-ported_by = ["tests/queue/test_parity_supervisor_recurring.py"]
+ported_by = [
+  "tests/queue/test_parity_supervisor_recurring.py",
+  "tests/queue/test_scheduler.py",
+]
 
 [[queue]]
 upstream = "recurring_tasks_test.rb"

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import Engine, insert, select, update
 
 from firm._core import process as pr
@@ -25,6 +27,36 @@ def test_register_heartbeat_deregister(engine: Engine, count: Callable[..., int]
     assert heartbeat_at is not None
     pr.deregister(engine, pid)
     assert count(schema.processes) == 0
+
+
+def test_heartbeat_raises_when_process_row_missing(
+    engine: Engine, count: Callable[..., int]
+) -> None:
+    """Upstream: worker_test.rb::"terminate on heartbeat when unregistered". A process pruned
+    from the registry while still alive learns of it on its next heartbeat — the zero-row update
+    raises ProcessExitError instead of silently no-op'ing, so the worker can self-terminate."""
+    pid = pr.register(engine, pr.ProcessInfo(kind="Worker", name="w-unreg", pid=7))
+    pr.deregister(engine, pid)
+    assert count(schema.processes) == 0
+
+    with pytest.raises(pr.ProcessExitError):
+        pr.heartbeat(engine, pid)
+
+
+def test_heartbeat_poller_self_terminates_on_eviction(engine: Engine) -> None:
+    """The HeartbeatPoller stops itself and fires ``on_evicted`` once its row is gone, so the
+    owning worker/child shuts down rather than running on after being declared dead."""
+    pid = pr.register(engine, pr.ProcessInfo(kind="Worker", name="w-evict", pid=8))
+    pr.deregister(engine, pid)  # row gone: the first heartbeat will see zero rows
+
+    evicted = threading.Event()
+    poller = pr.HeartbeatPoller(engine, pid, 0.01, on_evicted=evicted.set)
+    poller.start()
+    try:
+        assert evicted.wait(2.0), "on_evicted should fire when the row is missing"
+        assert poller.stopping, "poller should stop itself on eviction"
+    finally:
+        poller.stop()
 
 
 def test_prune_dead_returns_stale_processes(engine: Engine, count: Callable[..., int]) -> None:

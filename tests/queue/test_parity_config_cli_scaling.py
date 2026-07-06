@@ -13,9 +13,7 @@ dataclasses (``SupervisorConfig`` / ``WorkerConfig`` / ``DispatcherConfig``) plu
 group in ``firm.queue.cli``. Each test below adapts the upstream intent to those shapes,
 asserting on the resulting config objects or on the supervisor class the CLI selects.
 
-Some upstream knobs have no firm equivalent yet (config validation, a maintenance on/off
-toggle, a mode env var). Those are marked ``xfail(strict=False)`` so the gap is visible
-without going red.
+(The concurrency-maintenance toggle lives in test_supervisor.py alongside ``_build_loops``.)
 """
 
 from __future__ import annotations
@@ -184,17 +182,11 @@ def test_mode_option_selects_fork_explicitly(
     assert patched_supervisors.selected == "fork"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="firm's `start` command has no env var for mode (only --mode); solid_queue "
-    "reads SOLID_QUEUE_MODE / a configurable env var, so this override does not exist.",
-)
 def test_mode_env_var_override(
     patched_supervisors: type[_FakeSupervisor], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Port of cli_test.rb env-var variant: setting the mode env var should make the CLI
-    pick the thread supervisor even without ``--mode``. firm exposes no such env var, so
-    this xfails (the env var is ignored and the default fork supervisor runs)."""
+    """Port of cli_test.rb env-var variant: setting ``FIRM_QUEUE_MODE`` makes the CLI pick the
+    thread supervisor even without ``--mode`` (an explicit ``--mode`` still wins over it)."""
     monkeypatch.setenv("FIRM_QUEUE_MODE", "thread")
     result = CliRunner().invoke(cli.main, ["start", "--database-url", "sqlite://"])
     assert result.exit_code == 0, result.output
@@ -248,24 +240,6 @@ def test_two_dispatch_passes_do_not_double_promote(
     assert second == 0
     assert count(schema.ready_executions) == 4
     assert count(schema.scheduled_executions) == 0
-
-
-@pytest.mark.xfail(
-    strict=False,
-    reason="firm's SupervisorConfig/DispatcherConfig have no flag to disable concurrency "
-    "maintenance: the supervisor always builds a MaintenanceLoop alongside every "
-    "DispatcherLoop (gap vs solid_queue Dispatcher's optional concurrency maintenance).",
-)
-def test_concurrency_maintenance_is_optional() -> None:
-    """Port of dispatcher_test.rb::"concurrency maintenance is optional": maintenance can
-    be turned off via config. firm has no such toggle, so we assert one exists; the missing
-    attribute makes this xfail and documents the gap."""
-    config = DispatcherConfig()
-    assert getattr(config, "concurrency_maintenance", True) is False or hasattr(
-        config, "concurrency_maintenance"
-    ), "DispatcherConfig should expose a concurrency-maintenance toggle"
-    # Force the gap explicit: there is currently no such attribute.
-    assert hasattr(config, "concurrency_maintenance")
 
 
 # ---------------------------------------------------------------------------

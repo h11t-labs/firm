@@ -46,6 +46,10 @@ class DispatcherConfig:
     batch_size: int = 500
     poll_interval: float = 1.0
     maintenance_interval: float = 600.0
+    # Whether this dispatcher also runs the concurrency-maintenance sweep (expire dead
+    # semaphores, promote blocked jobs). Turn off if you don't use concurrency limits, or run
+    # maintenance out-of-band via ``firm-queue maintenance`` instead of per-dispatcher.
+    concurrency_maintenance: bool = True
 
 
 @dataclass
@@ -105,14 +109,18 @@ def _build_loops(
             )
         ]
     if isinstance(config, DispatcherConfig):
-        return [
+        loops: list[InterruptiblePoller] = [
             DispatcherLoop(
                 runtime, batch_size=config.batch_size, poll_interval=config.poll_interval
-            ),
-            MaintenanceLoop(
-                runtime, interval=config.maintenance_interval, batch_size=config.batch_size
-            ),
+            )
         ]
+        if config.concurrency_maintenance:
+            loops.append(
+                MaintenanceLoop(
+                    runtime, interval=config.maintenance_interval, batch_size=config.batch_size
+                )
+            )
+        return loops
     return [SchedulerLoop(Scheduler(runtime, recurring), poll_interval=config.poll_interval)]
 
 
@@ -205,7 +213,13 @@ def _run_child(
     )
     loops = _build_loops(runtime, child, supervisor_config.recurring, process_id)
     heartbeat = HeartbeatPoller(
-        runtime.engine, process_id, supervisor_config.heartbeat_interval, on_error=HOOKS.fire_error
+        runtime.engine,
+        process_id,
+        supervisor_config.heartbeat_interval,
+        on_error=HOOKS.fire_error,
+        # If this child's row is pruned while it's still alive, self-terminate: another process
+        # is already recovering its claims, so draining now avoids double-processing.
+        on_evicted=stop.set,
     )
     for loop in loops:
         loop.start()

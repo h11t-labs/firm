@@ -178,3 +178,23 @@ def test_scheduler_config_is_reachable_through_supervisor_config() -> None:
         scheduler=SchedulerConfig(poll_interval=9.0),
     )
     assert config.child_configs()[-1].poll_interval == 9.0
+
+
+def test_dispatcher_builds_a_maintenance_loop_by_default(runtime: Runtime) -> None:
+    from firm.queue.dispatcher import DispatcherLoop, MaintenanceLoop
+    from firm.queue.supervisor import _build_loops
+
+    loops = _build_loops(runtime, DispatcherConfig(), [], None)
+    assert any(isinstance(loop, DispatcherLoop) for loop in loops)
+    assert any(isinstance(loop, MaintenanceLoop) for loop in loops)
+
+
+def test_concurrency_maintenance_can_be_disabled(runtime: Runtime) -> None:
+    """Upstream: dispatcher_test.rb::"concurrency maintenance is optional". With the toggle off
+    the dispatcher runs alone — no MaintenanceLoop is built."""
+    from firm.queue.dispatcher import DispatcherLoop, MaintenanceLoop
+    from firm.queue.supervisor import _build_loops
+
+    loops = _build_loops(runtime, DispatcherConfig(concurrency_maintenance=False), [], None)
+    assert any(isinstance(loop, DispatcherLoop) for loop in loops)
+    assert not any(isinstance(loop, MaintenanceLoop) for loop in loops)

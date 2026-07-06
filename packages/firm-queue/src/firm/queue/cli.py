@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import threading
 import time
 
 from .._core import process as process_registry
@@ -75,7 +76,14 @@ def main() -> None:
 @_import_option
 @click.option("--queues", default="*", show_default=True, help="Comma-separated queue patterns.")
 @click.option("--threads", default=3, type=int, show_default=True)
-@click.option("--mode", type=click.Choice(["fork", "thread"]), default="fork", show_default=True)
+@click.option(
+    "--mode",
+    type=click.Choice(["fork", "thread"]),
+    default="fork",
+    show_default=True,
+    envvar="FIRM_QUEUE_MODE",
+    help="Supervisor mode; falls back to the FIRM_QUEUE_MODE env var, then 'fork'.",
+)
 def start(
     database_url: str | None, imports: tuple[str, ...], queues: str, threads: int, mode: str
 ) -> None:
@@ -107,13 +115,19 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
     worker = Worker(
         runtime, queues=tuple(queues.split(",")), threads=threads, process_id=process_id
     )
+    # If our process row is pruned while we're still alive, self-terminate instead of running on.
+    evicted = threading.Event()
     heartbeat = HeartbeatPoller(
-        runtime.engine, process_id, _HEARTBEAT_INTERVAL, on_error=HOOKS.fire_error
+        runtime.engine,
+        process_id,
+        _HEARTBEAT_INTERVAL,
+        on_error=HOOKS.fire_error,
+        on_evicted=evicted.set,
     )
     worker.start()
     heartbeat.start()
     try:
-        while True:
+        while not evicted.is_set():
             time.sleep(1)
     except KeyboardInterrupt:
         pass

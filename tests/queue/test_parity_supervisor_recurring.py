@@ -60,6 +60,7 @@ def test_valid_and_invalid_schedules(runtime: Runtime, count: Callable[..., int]
     task tries to compute its period (croniter raises ``CroniterBadCronError`` <: ``ValueError``).
     """
     valid = Scheduler(runtime, [_cleanup_task()])
+    valid.sync_tasks()
     assert valid.tick(at=datetime(2026, 6, 28, 12, 3, 0)) == 1
     assert count(schema.ready_executions) == 1
 
@@ -81,6 +82,7 @@ def test_recurring_task_custom_queue_and_priority(
     """
     task = RecurringTask(key="report", schedule="*/5 * * * *", job=parity_custom_queue_job)
     scheduler = Scheduler(runtime, [task])
+    scheduler.sync_tasks()
 
     assert scheduler.tick(at=datetime(2026, 6, 28, 12, 3, 0)) == 1
 
@@ -94,27 +96,6 @@ def test_recurring_task_custom_queue_and_priority(
     assert job_row.priority == 8
     assert ready_row.queue_name == "reports"
     assert ready_row.priority == 8
-
-
-@pytest.mark.xfail(
-    strict=False,
-    reason="firm has no ordering invariant: Scheduler enqueues recurring runs without "
-    "requiring the recurring_tasks row to exist first (sync_tasks is optional/advisory).",
-)
-def test_enqueue_requires_recorded_task_first(runtime: Runtime, count: Callable[..., int]) -> None:
-    """Upstream: recurring_task_test.rb::"error when enqueuing the job before the task has
-    been recorded".
-
-    solid_queue refuses to enqueue a recurring run until the recurring_task row exists. firm's
-    Scheduler.tick() enqueues regardless (it never reads recurring_tasks), so this guard is
-    absent — assert the (missing) invariant so the gap stays visible.
-    """
-    scheduler = Scheduler(runtime, [_cleanup_task()])
-    # No sync_tasks() first => recurring_tasks is empty.
-    assert count(schema.recurring_tasks) == 0
-    scheduler.tick(at=datetime(2026, 6, 28, 12, 3, 0))
-    # Upstream expectation: nothing enqueued because the task was never recorded.
-    assert count(schema.ready_executions) == 0
 
 
 def test_sync_persists_and_deletes_configured_tasks(
@@ -177,34 +158,6 @@ def test_hostname_with_special_characters_round_trips(
     assert row.metadata == odd_metadata
     assert row.name == "worker-special"
     assert row.pid == 4242
-
-
-# --------------------------------------------------------------------------------------------- #
-# Worker heartbeat / unregister (worker_test.rb)
-# --------------------------------------------------------------------------------------------- #
-
-
-@pytest.mark.xfail(
-    strict=False,
-    reason="firm's HeartbeatPoller.heartbeat() issues a plain UPDATE; when the process row is "
-    "gone it affects 0 rows and does NOT raise/self-terminate (no ProcessExitError in firm).",
-)
-def test_terminate_on_heartbeat_when_unregistered(
-    engine: Engine, count: Callable[..., int]
-) -> None:
-    """Upstream: worker_test.rb::"terminate on heartbeat when unregistered".
-
-    A worker whose process row was deleted should notice on its next heartbeat and self-terminate.
-    Driven as the minimal unit: register, delete the row, then heartbeat the now-missing id and
-    expect it to signal termination. firm's heartbeat silently no-ops, so this xfails.
-    """
-    pid = pr.register(engine, pr.ProcessInfo(kind="Worker", name="w-unreg", pid=7))
-    pr.deregister(engine, pid)
-    assert count(schema.processes) == 0
-
-    # Upstream expectation: heartbeating a missing process row raises (worker stops itself).
-    with pytest.raises(Exception):  # noqa: B017
-        pr.heartbeat(engine, pid)
 
 
 # --------------------------------------------------------------------------------------------- #

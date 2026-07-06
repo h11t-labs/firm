@@ -20,6 +20,13 @@ from .poller import InterruptiblePoller
 from .schema import processes as _processes
 
 
+class ProcessExitError(Exception):
+    """Raised by :func:`heartbeat` when the process's own registry row is gone — it was pruned
+    as dead while still alive (a long stall outran ``alive_threshold``). The owning worker/child
+    should self-terminate: another process may already be recovering its claims, so continuing to
+    run risks processing the same job twice."""
+
+
 @dataclass
 class ProcessInfo:
     kind: str
@@ -53,11 +60,21 @@ def register(engine: Engine, info: ProcessInfo) -> int:
 
 
 def heartbeat(engine: Engine, process_id: int) -> None:
+    """Refresh this process's ``last_heartbeat_at``.
+
+    Raises :class:`ProcessExitError` if the row is gone — the timestamp always changes, so a
+    zero-row update means the registration was pruned, not merely unchanged. That is the signal
+    the process has been declared dead and must stop.
+    """
     with engine.begin() as conn:
-        conn.execute(
+        result = conn.execute(
             update(_processes)
             .where(_processes.c.id == process_id)
             .values(last_heartbeat_at=now_utc())
+        )
+    if result.rowcount == 0:
+        raise ProcessExitError(
+            f"process {process_id} is no longer registered (pruned as dead); self-terminating"
         )
 
 
@@ -104,7 +121,12 @@ def generate_name(kind: str) -> str:
 
 
 class HeartbeatPoller(InterruptiblePoller):
-    """Refreshes a process's ``last_heartbeat_at`` on a timer."""
+    """Refreshes a process's ``last_heartbeat_at`` on a timer.
+
+    If the row has been pruned (``heartbeat`` raises :class:`ProcessExitError`), the poller stops
+    itself and fires ``on_evicted`` so the owning process can self-terminate — a worker that has
+    been declared dead must stop claiming work another process is already recovering.
+    """
 
     def __init__(
         self,
@@ -112,11 +134,20 @@ class HeartbeatPoller(InterruptiblePoller):
         process_id: int,
         interval: float,
         on_error: Callable[[BaseException], None] | None = None,
+        on_evicted: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(interval, name="heartbeat", on_error=on_error)
         self.engine = engine
         self.process_id = process_id
+        self._on_evicted = on_evicted
 
     def poll(self) -> int:
-        heartbeat(self.engine, self.process_id)
+        try:
+            heartbeat(self.engine, self.process_id)
+        except ProcessExitError:
+            # End this poller (set the stop flag directly — we're on its own thread, so a
+            # self-join via stop() would deadlock) and signal the process to shut down.
+            self._stop.set()
+            if self._on_evicted is not None:
+                self._on_evicted()
         return 0

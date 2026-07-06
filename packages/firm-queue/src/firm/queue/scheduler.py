@@ -3,7 +3,9 @@
 A :class:`RecurringTask` pairs a cron ``schedule`` with a job. On each :meth:`Scheduler.tick`
 we compute the current period's fire time and enqueue the job exactly once for that
 ``(task_key, run_at)`` — the unique index on ``recurring_executions`` makes the dedupe safe even
-with several schedulers running.
+with several schedulers running. A run is only enqueued once its task is recorded in
+``recurring_tasks`` via :meth:`Scheduler.sync_tasks` (the :class:`SchedulerLoop` runs it on
+start), so ``tick`` on a scheduler that has not synced enqueues nothing.
 
 Schedule syntax is standard 5-field cron (via ``croniter``); natural-language (Fugit-style)
 forms are not supported.
@@ -96,6 +98,12 @@ class Scheduler:
     def _record_and_enqueue(self, task: RecurringTask, run_at: datetime) -> bool:
         rt = self.runtime
         with rt.engine.connect() as conn:
+            recorded = conn.execute(select(_tasks.c.id).where(_tasks.c.key == task.key)).first()
+            if recorded is None:
+                # Ordering invariant: a recurring run is only enqueued once its task is recorded
+                # in ``recurring_tasks`` (via ``sync_tasks``, which the SchedulerLoop runs on
+                # start). Enqueuing before that would create a run with no owning task row.
+                return False
             already = conn.execute(
                 select(_rec.c.id).where(_rec.c.task_key == task.key, _rec.c.run_at == run_at)
             ).first()
