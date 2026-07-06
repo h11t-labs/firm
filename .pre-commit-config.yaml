@@ -31,8 +31,8 @@ repos:
         require_serial: true
 
       - id: ty
-        name: ty type check (packages)
-        entry: uv run ty check packages
+        name: ty type check (packages + scripts + examples)
+        entry: uv run ty check packages scripts examples
         language: system
         types_or: [python, pyi]
         pass_filenames: false
