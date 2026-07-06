@@ -72,6 +72,12 @@ header.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: 
 .dropdown summary::-webkit-details-marker { display: none; }
 .dropdown summary:hover, .dropdown[open] summary { color: var(--text-2); }
 .dropdown summary svg { width: 12px; height: 12px; }
+/* Theme control: a larger mode icon; its chevron fades in on hover/focus/open. */
+.dropdown.theme summary svg:first-child { width: 16px; height: 16px; }
+.dropdown.theme summary svg:last-child { opacity: 0; transition: opacity .15s ease; }
+.dropdown.theme:hover summary svg:last-child,
+.dropdown.theme:focus-within summary svg:last-child,
+.dropdown.theme[open] summary svg:last-child { opacity: 1; }
 .dropdown-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; min-width: 100px;
                  display: flex; flex-direction: column; gap: 1px; padding: 4px;
                  border-radius: var(--radius-lg); background: var(--surface-2); border: 1px solid var(--border); }
