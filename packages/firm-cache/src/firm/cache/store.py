@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, TypeVar
 
 from sqlalchemy import Engine, delete, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from .._core.clock import now_utc
 from .._core.database import (
@@ -27,6 +28,8 @@ _entries = schema.entries
 # Sentinel for "row exists but cannot be decoded" (rotated encryption key, coder change,
 # corrupt bytes). Reads treat it as a miss instead of poisoning every access to the key.
 _UNDECODABLE = object()
+
+_T = TypeVar("_T")
 
 TWO_WEEKS_SECONDS = 14 * 24 * 3600.0
 DEFAULT_MAX_SIZE = 256 * 1024 * 1024
@@ -113,9 +116,27 @@ class Cache:
             stmt = stmt.where(_entries.c.created_at >= min_created)
         return stmt
 
+    def _read(self, fn: Callable[[Any], _T], miss: _T) -> _T:
+        """Run a read query; a database failure degrades to ``miss`` instead of raising.
+
+        Rails' cache is failure-safe: a dead cache DB turns reads into misses so the app keeps
+        serving (slower), rather than 500-ing every request. firm mirrors that for *reads* only —
+        writes still raise, since a write that silently no-ops is a worse surprise than an error.
+        The failure is routed to ``on_error`` (not swallowed): a cache that has quietly stopped
+        answering must stay observable.
+        """
+        try:
+            with transaction(self.engine) as conn:
+                return fn(conn)
+        except SQLAlchemyError as exc:
+            self.on_error(exc)
+            return miss
+
     def get(self, key: str | bytes) -> Any | None:
-        with transaction(self.engine) as conn:
-            data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
+        data = self._read(
+            lambda conn: read_entry(conn, self._kb(key), min_created_at=self._min_created_at()),
+            None,
+        )
         if data is None:
             return None
         decoded = self._decode(data)
@@ -136,17 +157,28 @@ class Cache:
             self.expiry.maybe_trigger(1)
         return written
 
-    def fetch(self, key: str | bytes, default: Callable[[], Any] | Any) -> Any:
+    def fetch(
+        self,
+        key: str | bytes,
+        default: Callable[[], Any] | Any,
+        *,
+        force: bool = False,
+        skip_nil: bool = False,
+    ) -> Any:
         # Decide hit/miss on row presence, not ``get() is not None`` — a stored ``None`` is a
-        # hit (don't recompute it), exactly as a missing key is a miss.
-        with transaction(self.engine) as conn:
-            data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
-        if data is not None:
-            decoded = self._decode(data)
-            if decoded is not _UNDECODABLE:
-                return decoded
+        # hit (don't recompute it), exactly as a missing key is a miss. ``force`` bypasses the
+        # read and always recomputes (cache-busting).
+        if not force:
+            with transaction(self.engine) as conn:
+                data = read_entry(conn, self._kb(key), min_created_at=self._min_created_at())
+            if data is not None:
+                decoded = self._decode(data)
+                if decoded is not _UNDECODABLE:
+                    return decoded
         computed = default() if callable(default) else default
-        self.set(key, computed)
+        # ``skip_nil`` leaves a computed ``None`` unstored, so the next fetch recomputes it.
+        if not (skip_nil and computed is None):
+            self.set(key, computed)
         return computed
 
     def delete(self, key: str | bytes) -> bool:
@@ -163,18 +195,19 @@ class Cache:
         return deleted
 
     def exist(self, key: str | bytes) -> bool:
-        with transaction(self.engine) as conn:
-            return (
+        return self._read(
+            lambda conn: (
                 read_entry(conn, self._kb(key), min_created_at=self._min_created_at()) is not None
-            )
+            ),
+            False,
+        )
 
     def get_multi(self, keys: Iterable[str | bytes]) -> dict[Any, Any]:
         key_list = list(keys)
         kb_map = {key: self._kb(key) for key in key_list}
         hashes = [key_hash(kb) for kb in kb_map.values()]
         result: dict[Any, Any] = dict.fromkeys(key_list)
-        with transaction(self.engine) as conn:
-            rows = conn.execute(self._multi_read_stmt(hashes)).all()
+        rows = self._read(lambda conn: conn.execute(self._multi_read_stmt(hashes)).all(), [])
         by_key = {bytes(row.key): bytes(row.value) for row in rows}
         for key in key_list:
             data = by_key.get(kb_map[key])
