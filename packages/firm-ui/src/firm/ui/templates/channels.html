@@ -6,10 +6,10 @@
 </div>
 {% set trim %}<form class="inline" method="post" action="/channels/trim"{{ confirm("Delete buffered messages older than 1 day?") }}><button>{{ icons.scissors }}Trim &gt; 1 day</button></form>{% endset %}
 {% if top %}
-<Section title="Busiest channels"><div style="display:flex;align-items:center;gap:.7rem"><PageSize current={{ top_per_page }} options={{ top_pagesize }} />{{ trim }}</div></Section>
+<Section title="Busiest channels"><div class="actions"><PageSize current={{ top_per_page }} options={{ top_pagesize }} />{{ trim }}</div></Section>
 <div class="barlist">
 {% for t in top %}
-<div class="row"><span class="name mono" title="{{ t.channel }}">{{ t.channel }}</span><span class="track"><i style="width:{{ t.bar_pct }}%"></i></span><span class="tnum" style="width:3rem;text-align:right">{{ t.count | num }}</span><span class="muted" style="width:4rem;text-align:right;font-size:.78rem">{{ t.last | reltime }}</span></div>
+<div class="row"><span class="name mono" title="{{ t.channel }}">{{ t.channel }}</span><span class="track"><i style="--fill:{{ t.bar_pct }}%"></i></span><span class="count">{{ t.count | num }}</span><span class="last">{{ t.last | reltime }}</span></div>
 {% endfor %}
 </div>
 <Pagination nav={{ top_pagination }} />
@@ -21,7 +21,7 @@
 {% if messages %}
 <div class="feed">
 {% for m in messages %}
-<div class="row"><span class="chip mono">{{ m.channel }}</span><span class="pl mono" title="{{ m.payload }}">{{ m.payload }}</span><span class="muted" style="font-size:.78rem">{{ m.created_at | reltime }}</span></div>
+<div class="row"><span class="pill mono">{{ m.channel }}</span><span class="pl mono" title="{{ m.payload }}">{{ m.payload }}</span><span class="age">{{ m.created_at | reltime }}</span></div>
 {% endfor %}
 </div>
 <Pagination nav={{ msg_pagination }} />

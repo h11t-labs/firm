@@ -1,2 +1,3 @@
 {#def state #}
-<span class="dot" style="background:{{ state_color(state) }}"></span>
+{# The state name is also the dot's modifier class (`.dot.ready` … in style.css). #}
+<span class="dot {{ state }}"></span>

@@ -4,13 +4,13 @@
 <div class="cards">
 {% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
 </div>
-<Section title="Recent entries"><div style="display:flex;align-items:center;gap:.7rem"><PageSize current={{ per_page }} options={{ pagesize }} /><form class="inline" method="post" action="/cache/clear"{{ confirm("Clear all cache entries? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Clear all</button></form></div></Section>
+<Section title="Recent entries"><div class="actions"><PageSize current={{ per_page }} options={{ pagesize }} /><form class="inline" method="post" action="/cache/clear"{{ confirm("Clear all cache entries? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Clear all</button></form></div></Section>
 {% if entries %}
 <div class="tw"><table><tr><th>Key</th><th>Size</th><th></th><th>Created</th></tr>
 {% for e in entries %}
 <tr><td class="mono">{{ e.key }}</td>
 <td class="mono secondary tnum">{{ e.byte_size | filesize }}</td>
-<td style="width:90px"><Bar pct={{ e.bar_pct }} /></td>
+<td class="cell-bar"><Bar pct={{ e.bar_pct }} /></td>
 <td class="secondary"><When value={{ e.created_at }} /></td></tr>
 {% endfor %}
 </table></div>

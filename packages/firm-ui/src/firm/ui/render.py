@@ -32,17 +32,6 @@ _PART_NAV = {
     "audit": ("Audit", "/audit"),
 }
 
-# A fixed hue per job state, reused across KPI dots, state badges and the sub-nav so a glance maps
-# colour to state. Saturated mid-tones that read on both light and dark surfaces.
-_STATE_VAR = {
-    "ready": "--st-ready",
-    "scheduled": "--st-scheduled",
-    "blocked": "--st-blocked",
-    "claimed": "--st-claimed",
-    "failed": "--st-failed",
-    "finished": "--st-finished",
-}
-
 # Inline SVG icons (stroke = currentColor, so they inherit the surrounding text colour).
 _ICONS = {
     "pause": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>',
@@ -181,11 +170,6 @@ def _bytes(n: int | float) -> str:
     return f"{size:.1f} GiB"
 
 
-def _state_color(state: str | None) -> str:
-    var = _STATE_VAR.get(state or "")
-    return f"var({var})" if var else "var(--text-3)"
-
-
 def _json_preview(value: dict[str, Any] | None) -> str:
     if not value:
         return ""
@@ -256,14 +240,13 @@ _GLOBALS: dict[str, Any] = {
     "icons": {name: Markup(svg) for name, svg in _ICONS.items()},
     "favicon": _FAVICON,
     "confirm": lambda message: Markup(_confirm(message)),
-    "state_color": _state_color,
     "jobs_href": _markup_fn(_jobs_href),
 }
 _ENV.globals.update(_GLOBALS)
 
 # The presentation layer is a set of real components under ``templates/components/*.jinja``
 # (``<Card/>``, ``<Pagination/>``, ...), rendered by JinjaX. The catalog copies this module's
-# Jinja globals/filters at construction, so components can use ``state_color``, ``num``, ``dt``,
+# Jinja globals/filters at construction, so components can use ``num``, ``dt``,
 # ``icons`` etc.; adding the ``JinjaX`` extension to ``_ENV`` lets the page templates invoke
 # components with the ``<Component/>`` tag syntax. Components decide *markup only* -- every value
 # and URL they render is computed here in Python and passed in (see the helpers below).

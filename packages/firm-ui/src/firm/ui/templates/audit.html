@@ -28,7 +28,7 @@
 <td class="mono">{% if r.subject_display %}<a href="{{ audit_href({'subject': r.subject_filter}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.subject_display }}</a>{% else %}<Dash />{% endif %}</td>
 <td class="mono">{% if r.actor_display %}<a href="{{ audit_href({'actor': r.actor_filter}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.actor_display }}</a>{% else %}<Dash />{% endif %}</td>
 <td class="mono secondary">{% if r.correlation_id %}<a href="{{ audit_href({'correlation_id': r.correlation_id}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.correlation_id }}</a>{% endif %}</td>
-<td class="mono secondary" style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ payload }}">{{ payload }}</td></tr>
+<td class="mono secondary truncate cell-data" title="{{ payload }}">{{ payload }}</td></tr>
 {% endfor %}
 </table></div>
 <Pagination nav={{ pagination }} />

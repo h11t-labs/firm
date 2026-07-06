@@ -1,12 +1,12 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="sec" style="margin:1.3rem 0 .3rem">
-<div style="display:flex;align-items:center;gap:.7rem">
-<h1 style="margin:0">{{ state }} jobs</h1>
-<span class="badge"><Dot state={{ state }} />{{ counts.get(state, 0) | num }}</span>
-{%- if queue %}<a class="chip filter-chip" href="{{ jobs_href(state) }}">queue: {{ queue }}{{ icons.x }}</a>{% endif %}
+<div class="listhead">
+<div class="actions">
+<h1>{{ state }} jobs</h1>
+<span class="pill lg"><Dot state={{ state }} />{{ counts.get(state, 0) | num }}</span>
+{%- if queue %}<a class="pill accent" href="{{ jobs_href(state) }}">queue: {{ queue }}{{ icons.x }}</a>{% endif %}
 </div>
-<div style="display:flex;align-items:center;gap:.7rem">
+<div class="actions">
 <PageSize current={{ per_page }} options={{ pagesize }} />
 {%- if state == "failed" and jobs %}
 <form class="inline" method="post" action="/failed/retry-all"{{ confirm("Retry all failed jobs?") }}><button>{{ icons.retry }}Retry all</button></form>
@@ -19,11 +19,11 @@
 {% set attempts = j.attempts or 0 %}
 <tr><td><a href="/job/{{ j.id }}{% if queue %}?queue={{ queue | urlquote }}{% endif %}">#{{ j.id }}</a></td>
 <td class="mono">{{ j.class_name }}</td>
-<td><a class="chip" href="{{ jobs_href(state, j.queue_name) }}">{{ j.queue_name }}</a></td>
+<td><a class="pill" href="{{ jobs_href(state, j.queue_name) }}">{{ j.queue_name }}</a></td>
 <td class="secondary">{{ j.priority }}</td>
-<td>{% if attempts > 1 %}<span style="color:var(--warn)">{{ attempts }}</span>{% else %}{{ attempts }}{% endif %}</td>
+<td>{% if attempts > 1 %}<span class="text-warn">{{ attempts }}</span>{% else %}{{ attempts }}{% endif %}</td>
 <td class="secondary"><When value={{ j.ts }} /></td>
-<td style="text-align:right">{% if state == "failed" %}<form class="inline" method="post" action="/job/{{ j.id }}/retry"><button>{{ icons.retry }}Retry</button></form> <form class="inline" method="post" action="/job/{{ j.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>{% endif %}</td></tr>
+<td class="right">{% if state == "failed" %}<form class="inline" method="post" action="/job/{{ j.id }}/retry"><button>{{ icons.retry }}Retry</button></form> <form class="inline" method="post" action="/job/{{ j.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>{% endif %}</td></tr>
 {% endfor %}
 </table></div>
 <Pagination nav={{ pagination }} />
