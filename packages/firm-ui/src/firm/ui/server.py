@@ -27,7 +27,10 @@ from .context import Dashboard
 # existing behaviour is unchanged until someone opens the control.
 _REFRESH_DEFAULTS = {"queue": 5, "cache": 10, "channel": 10, "audit": 10}
 _REFRESH_VALID = frozenset(secs for secs, _ in render.REFRESH_OPTIONS)
-_REFRESH_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year
+# Colour theme preference: a single cookie (system / light / dark). Unset -> "system", i.e. follow
+# the OS via prefers-color-scheme, so existing behaviour is unchanged until someone picks a theme.
+_THEME_VALID = frozenset(value for value, _, _ in render.THEME_OPTIONS)
+_PREF_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year — refresh + theme preferences persist
 # Dashboard POSTs carry at most a tiny settings form; anything bigger is abuse of the buffer.
 _MAX_BODY_BYTES = 1 << 20
 
@@ -83,11 +86,16 @@ class Handler(BaseHTTPRequestHandler):
         # repr leaked query fragments and paths to anyone who could reach the port.
         traceback.print_exception(exc, file=sys.stderr)
         self._html(
-            render.error_page(dash.parts, "Internal error — details are in the server log."), 500
+            render.error_page(
+                dash.parts,
+                "Internal error — details are in the server log.",
+                theme=self._theme(),
+            ),
+            500,
         )
 
     def _not_found(self) -> None:
-        self._html(render.not_found(self._dash.parts), 404)
+        self._html(render.not_found(self._dash.parts, theme=self._theme()), 404)
 
     def _static_css(self) -> None:
         self.send_response(200)
@@ -126,7 +134,7 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(result, Allow):
             return True
         title = "Forbidden" if result.status == 403 else "Sign in"
-        body = render.auth_page(title, result.message).encode("utf-8")
+        body = render.auth_page(title, result.message, theme=self._theme()).encode("utf-8")
         self.send_response(result.status)
         for name, value in result.headers.items():
             self.send_header(name, value)
@@ -147,6 +155,16 @@ class Handler(BaseHTTPRequestHandler):
             if value in _REFRESH_VALID:
                 return value
         return _REFRESH_DEFAULTS[part]
+
+    def _theme(self) -> str:
+        """The visitor's saved colour theme (system/light/dark) from its cookie, defaulting to
+        ``system`` (follow the OS) when unset or holding an unknown value."""
+        cookies = SimpleCookie()
+        cookies.load(self.headers.get("Cookie", ""))
+        morsel = cookies.get("firm_theme")
+        if morsel is not None and morsel.value in _THEME_VALID:
+            return morsel.value
+        return "system"
 
     @staticmethod
     def _per_page(raw: str | None, default: int) -> int:
@@ -171,10 +189,30 @@ class Handler(BaseHTTPRequestHandler):
         name = f"firm_refresh_{part}"
         cookie[name] = str(seconds)
         cookie[name]["path"] = "/"
-        cookie[name]["max-age"] = _REFRESH_COOKIE_MAX_AGE
+        cookie[name]["max-age"] = _PREF_COOKIE_MAX_AGE
         self.send_response(303)
         self.send_header("Location", return_to)
         self.send_header("Set-Cookie", cookie[name].OutputString())
+        self.end_headers()
+
+    def _set_theme(self, fields: dict[str, list[str]]) -> None:
+        """Handle a theme-control POST: validate, set the cookie, and redirect back. ``return`` is
+        restricted to a same-site relative path (closing off an open redirect via the hidden field),
+        mirroring :meth:`_set_refresh`."""
+        theme = fields.get("theme", [""])[0]
+        return_to = fields.get("return", ["/"])[0]
+        if theme not in _THEME_VALID:
+            self._not_found()
+            return
+        if not return_to.startswith("/") or return_to.startswith("//"):
+            return_to = "/"
+        cookie = SimpleCookie()
+        cookie["firm_theme"] = theme
+        cookie["firm_theme"]["path"] = "/"
+        cookie["firm_theme"]["max-age"] = _PREF_COOKIE_MAX_AGE
+        self.send_response(303)
+        self.send_header("Location", return_to)
+        self.send_header("Set-Cookie", cookie["firm_theme"].OutputString())
         self.end_headers()
 
     # -- routing -------------------------------------------------------------------------------
@@ -247,16 +285,22 @@ class Handler(BaseHTTPRequestHandler):
         length = _to_int(self.headers.get("Content-Length", "0"), 0)
         if length > _MAX_BODY_BYTES:
             self.close_connection = True
-            self._html(render.error_page(dash.parts, "Request body too large."), 413)
+            self._html(
+                render.error_page(dash.parts, "Request body too large.", theme=self._theme()), 413
+            )
             return
-        raw_body = self.rfile.read(length)  # only /settings/refresh reads form fields from this
+        raw_body = self.rfile.read(length)  # the /settings/* handlers read form fields from this
         if not self._origin_ok():
-            body = render.error_page(dash.parts, "Cross-origin POST rejected (CSRF guard).")
+            body = render.error_page(
+                dash.parts, "Cross-origin POST rejected (CSRF guard).", theme=self._theme()
+            )
             self._html(body, 403)
             return
         try:
             if path == "/settings/refresh":
                 self._set_refresh(parse_qs(raw_body.decode("utf-8")))
+            elif path == "/settings/theme":
+                self._set_theme(parse_qs(raw_body.decode("utf-8")))
             elif (m := re.fullmatch(r"/queue/(.+)/pause", path)) and dash.queue is not None:
                 actions.pause(dash.queue, unquote(m.group(1)))
                 self._redirect("/")
@@ -305,7 +349,7 @@ class Handler(BaseHTTPRequestHandler):
         elif dash.audit is not None:
             self._redirect("/audit")
         else:
-            self._html(render.empty_page(dash.parts))
+            self._html(render.empty_page(dash.parts, theme=self._theme()))
 
     def _overview(self) -> None:
         dash = self._dash
@@ -320,6 +364,7 @@ class Handler(BaseHTTPRequestHandler):
                 queries.recurring(conn),
                 refresh=self._refresh_seconds("queue"),
                 request_path=self.path,
+                theme=self._theme(),
             )
         self._html(body)
 
@@ -344,6 +389,7 @@ class Handler(BaseHTTPRequestHandler):
             queue=queue,
             refresh=self._refresh_seconds("queue"),
             request_path=self.path,
+            theme=self._theme(),
         )
         self._html(body)
 
@@ -355,7 +401,11 @@ class Handler(BaseHTTPRequestHandler):
         if job is None:
             self._not_found()
         else:
-            self._html(render.job_page(dash.parts, job, queue=queue))
+            self._html(
+                render.job_page(
+                    dash.parts, job, queue=queue, theme=self._theme(), request_path=self.path
+                )
+            )
 
     def _cache(self, page: int, per_page: str | None) -> None:
         dash = self._dash
@@ -373,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
                 per_page=per_page_n,
                 refresh=self._refresh_seconds("cache"),
                 request_path=self.path,
+                theme=self._theme(),
             )
         self._html(body)
 
@@ -400,6 +451,7 @@ class Handler(BaseHTTPRequestHandler):
                 per_page=per_page_n,
                 refresh=self._refresh_seconds("channel"),
                 request_path=self.path,
+                theme=self._theme(),
             )
         self._html(body)
 
@@ -456,6 +508,7 @@ class Handler(BaseHTTPRequestHandler):
                 dir=dir,
                 refresh=self._refresh_seconds("audit"),
                 request_path=self.path,
+                theme=self._theme(),
             )
         self._html(body)
 
@@ -467,7 +520,11 @@ class Handler(BaseHTTPRequestHandler):
         if event is None:
             self._not_found()
         else:
-            self._html(render.audit_detail_page(dash.parts, event))
+            self._html(
+                render.audit_detail_page(
+                    dash.parts, event, theme=self._theme(), request_path=self.path
+                )
+            )
 
 
 _MAX_ID = 2**63 - 1  # BIGINT PKs; a longer digit run can't be a row id
