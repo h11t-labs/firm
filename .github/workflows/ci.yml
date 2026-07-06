@@ -27,7 +27,19 @@ jobs:
       - name: ruff format
         run: uv run ruff format --check packages tests scripts examples
       - name: ty
-        run: uv run ty check packages
+        run: uv run ty check packages scripts examples
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync workspace
+        run: uv sync --locked
+      - name: Run tests with coverage (SQLite)
+        # SQLite-only, so dialect-specific branches show as uncovered; keep the floor below the
+        # measured total (~90%) with margin rather than chasing 100% on one backend.
+        run: uv run pytest --cov=firm --cov-fail-under=85
 
   test:
     runs-on: ubuntu-latest

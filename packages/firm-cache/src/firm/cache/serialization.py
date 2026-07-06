@@ -31,7 +31,7 @@ class PickleCoder:
         return pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
 
     def loads(self, data: bytes) -> Any:
-        return pickle.loads(data)  # trusted-by-contract; see class docstring
+        return pickle.loads(data)  # noqa: S301 -- opt-in coder; trusted-by-contract, see class docstring
 
 
 class JSONCoder:

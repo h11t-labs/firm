@@ -8,8 +8,8 @@ from __future__ import annotations
 from sqlalchemy import Column, Integer, MetaData, String, Table
 
 import firm.queue as bq
-from firm._core.config import current_runtime
 from firm.audit import AuditLog, Ref, record
+from firm.queue import current_runtime
 from firm.queue import schema as queue_schema
 from firm.queue.worker import run_ready
 
