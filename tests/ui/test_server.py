@@ -156,7 +156,7 @@ def test_overview_recurring_unrecognized_schedule_has_no_tooltip(base_url, seed)
     seed.recurring_task(key="weekdays", schedule="0 9 * * 1-5")
     status, body = _get(base_url + "/")
     assert status == 200
-    assert '<span class="chip mono">0 9 * * 1-5</span>' in body
+    assert '<span class="pill mono">0 9 * * 1-5</span>' in body
 
 
 def test_jobs_page_scoped_to_queue_preserves_filter(base_url, seed) -> None:
@@ -179,7 +179,7 @@ def test_jobs_page_unfiltered_has_no_filter_chip(base_url, seed) -> None:
     seed.ready(queue="mailers")
     status, body = _get(base_url + "/jobs?state=ready")
     assert status == 200
-    assert 'class="chip filter-chip"' not in body  # no active filter -> no chip element rendered
+    assert 'class="pill accent"' not in body  # no active filter -> no filter chip rendered
     # each row's queue chip links back into the filtered view
     assert 'href="/jobs?state=ready&queue=mailers"' in body
 
