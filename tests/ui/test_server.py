@@ -621,6 +621,47 @@ def test_set_refresh_rejects_unsafe_return(base_url) -> None:
     assert headers["Location"] == "/"  # falls back to a safe default, not the attacker's URL
 
 
+def test_overview_shows_theme_control_defaulting_to_system(base_url) -> None:
+    status, body = _get(base_url + "/")
+    assert status == 200
+    assert '<html data-theme="system">' in body  # unset cookie -> follow the OS
+    assert 'action="/settings/theme"' in body
+    assert 'name="theme" value="light"' in body
+
+
+def test_set_theme_updates_cookie_and_html_attribute(base_url) -> None:
+    status, headers = _post_form(base_url + "/settings/theme", {"theme": "dark", "return": "/"})
+    assert status == 303
+    assert headers["Location"] == "/"
+    cookie = headers["Set-Cookie"].split(";")[0]
+    assert cookie == "firm_theme=dark"
+    _, body = _get_with_cookie(base_url + "/", cookie)
+    assert '<html data-theme="dark">' in body
+
+
+def test_set_theme_rejects_invalid_value(base_url) -> None:
+    status, _ = _post_form(base_url + "/settings/theme", {"theme": "neon", "return": "/"})
+    assert status == 404
+
+
+def test_set_theme_rejects_unsafe_return(base_url) -> None:
+    status, headers = _post_form(
+        base_url + "/settings/theme",
+        {"theme": "dark", "return": "https://evil.example/steal"},
+    )
+    assert status == 303
+    assert headers["Location"] == "/"  # falls back to a safe default, not the attacker's URL
+
+
+def test_theme_control_present_on_detail_page(base_url, seed) -> None:
+    # Unlike the refresh control, the theme toggle also appears on detail pages.
+    job_id = seed.failed(error="boom")
+    status, body = _get(f"{base_url}/job/{job_id}")
+    assert status == 200
+    assert 'action="/settings/theme"' in body
+    assert 'action="/settings/refresh"' not in body
+
+
 def test_cross_origin_post_is_rejected(base_url, seed) -> None:
     seed.cache_entry(key=b"keep-me")
     request = Request(

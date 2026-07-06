@@ -45,11 +45,23 @@ _ICONS = {
     "chevron": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
     "check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
     "filter": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16l-6 7.5V19l-4 2v-8.5L4 5z"/></svg>',
+    "sun": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    "moon": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+    "monitor": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
 }
 
 # The auto-refresh interval choices, in display order; 0 means off. Shared by the header control
 # (render.py) and the cookie-value allowlist the server checks against (server.py).
 REFRESH_OPTIONS = [(0, "off"), (5, "5s"), (10, "10s"), (30, "30s"), (60, "1m"), (300, "5m")]
+
+# The colour-theme choices (value, label, icon), in display order. ``system`` follows the OS via
+# ``prefers-color-scheme``; ``light``/``dark`` force it. Shared by the header control (render.py)
+# and the cookie-value allowlist the server checks against (server.py).
+THEME_OPTIONS = [
+    ("system", "System", "monitor"),
+    ("light", "Light", "sun"),
+    ("dark", "Dark", "moon"),
+]
 
 # A tiny self-contained firm favicon (data URI) so the page makes no external request — the same
 # rock mark used in the header brand.
@@ -341,6 +353,17 @@ def _refresh_choices(refresh: int) -> list[dict[str, Any]]:
     ]
 
 
+def _theme_toggle(theme: str) -> dict[str, str]:
+    """The single cycling toggle's data: the current mode's icon/label, plus the next mode in the
+    system -> light -> dark -> system cycle that one click advances to. Falls back to system when
+    the cookie-provided value is unrecognised."""
+    values = [value for value, _, _ in THEME_OPTIONS]
+    idx = values.index(theme) if theme in values else 0
+    _, label, icon = THEME_OPTIONS[idx]
+    next_value, next_label, _ = THEME_OPTIONS[(idx + 1) % len(THEME_OPTIONS)]
+    return {"icon": icon, "label": label, "next_value": next_value, "next_label": next_label}
+
+
 # Detail-page key/value cells hold small pre-rendered fragments; rendering the relevant component
 # straight from Python keeps a single source of truth (the ``.jinja`` file) for that markup.
 # ``Catalog.render`` is typed as returning ``str``, so re-wrap as ``Markup`` (idempotent) to keep
@@ -365,6 +388,7 @@ _LAYOUT_DEFAULTS = {
     "queue": None,
     "refresh": None,
     "request_path": None,
+    "theme": "system",
 }
 
 
@@ -377,6 +401,7 @@ def _render(template_name: str, **context: Any) -> str:
     refresh = ctx["refresh"]
     ctx["refresh_label"] = _refresh_label(refresh) if refresh is not None else ""
     ctx["refresh_choices"] = _refresh_choices(refresh) if refresh is not None else []
+    ctx["theme_toggle"] = _theme_toggle(ctx["theme"])
     ctx["statenav_items"] = (
         _statenav_items(ctx["substate"], ctx["substate_counts"], ctx["queue"])
         if ctx["substate"] is not None
@@ -397,6 +422,7 @@ def overview_page(
     *,
     refresh: int = 5,
     request_path: str = "/",
+    theme: str = "system",
 ) -> str:
     cards = [
         _card(
@@ -422,6 +448,7 @@ def overview_page(
         active_part="queue",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
         cards=cards,
         counts=counts,
         queue_rows=queue_rows,
@@ -441,6 +468,7 @@ def jobs_page(
     queue: str | None = None,
     refresh: int = 5,
     request_path: str = "/jobs",
+    theme: str = "system",
 ) -> str:
     total = counts.get(state, 0)
     return _render(
@@ -453,6 +481,7 @@ def jobs_page(
         queue=queue,
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
         state=state,
         jobs=jobs,
         counts=counts,
@@ -467,7 +496,14 @@ def jobs_page(
     )
 
 
-def job_page(parts: list[str], job: dict[str, Any], *, queue: str | None = None) -> str:
+def job_page(
+    parts: list[str],
+    job: dict[str, Any],
+    *,
+    queue: str | None = None,
+    theme: str = "system",
+    request_path: str = "",
+) -> str:
     cells = [
         ("class", _mono(job["class_name"])),
         ("queue", job["queue_name"]),
@@ -488,6 +524,8 @@ def job_page(parts: list[str], job: dict[str, Any], *, queue: str | None = None)
         queue=queue,
         job=job,
         cells=cells,
+        theme=theme,
+        request_path=request_path,
     )
 
 
@@ -515,6 +553,7 @@ def cache_page(
     per_page: int = CACHE_DEFAULT_PER_PAGE,
     refresh: int = 10,
     request_path: str = "/cache",
+    theme: str = "system",
 ) -> str:
     cards = [
         _card("entries", _num(stats["entries"])),
@@ -534,6 +573,7 @@ def cache_page(
         active_part="cache",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
         cards=cards,
         entries=entries,
         per_page=per_page,
@@ -585,6 +625,7 @@ def channel_page(
     per_page: int = CHANNEL_MSG_DEFAULT_PER_PAGE,
     refresh: int = 10,
     request_path: str = "/channels",
+    theme: str = "system",
 ) -> str:
     cards = [
         _card("messages", _num(stats["messages"])),
@@ -601,6 +642,7 @@ def channel_page(
         active_part="channel",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
         cards=cards,
         top=top,
         messages=messages,
@@ -724,6 +766,7 @@ def audit_page(
     dir: str = AUDIT_DEFAULT_DIR,
     refresh: int = 10,
     request_path: str = "/audit",
+    theme: str = "system",
 ) -> str:
     cards = [
         _card("events", _num(stats["events"])),
@@ -742,6 +785,7 @@ def audit_page(
         active_part="audit",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
         cards=cards,
         rows=rows,
         filters=filters,
@@ -761,7 +805,9 @@ def audit_page(
     )
 
 
-def audit_detail_page(parts: list[str], event: dict[str, Any]) -> str:
+def audit_detail_page(
+    parts: list[str], event: dict[str, Any], *, theme: str = "system", request_path: str = ""
+) -> str:
     subject = _ref_display(event["subject_type"], event["subject_id"], event["subject_label"])
     actor = _ref_display(event["actor_type"], event["actor_id"], event["actor_label"])
     cells = [
@@ -778,24 +824,28 @@ def audit_detail_page(parts: list[str], event: dict[str, Any]) -> str:
         active_part="audit",
         event=event,
         cells=cells,
+        theme=theme,
+        request_path=request_path,
     )
 
 
 # -- misc --------------------------------------------------------------------------------------
 
 
-def empty_page(parts: list[str]) -> str:
-    return _render("empty.html", title="firm", parts=parts, active_part="")
+def empty_page(parts: list[str], *, theme: str = "system") -> str:
+    return _render("empty.html", title="firm", parts=parts, active_part="", theme=theme)
 
 
-def not_found(parts: list[str]) -> str:
-    return _render("not_found.html", title="Not found", parts=parts, active_part="")
+def not_found(parts: list[str], *, theme: str = "system") -> str:
+    return _render("not_found.html", title="Not found", parts=parts, active_part="", theme=theme)
 
 
-def auth_page(title: str, message: str) -> str:
+def auth_page(title: str, message: str, *, theme: str = "system") -> str:
     # No parts/tabs: this renders before authentication, so it must not reveal the configured parts.
-    return _render("auth.html", title=title, parts=[], active_part="", message=message)
+    return _render("auth.html", title=title, parts=[], active_part="", message=message, theme=theme)
 
 
-def error_page(parts: list[str], message: str) -> str:
-    return _render("error.html", title="Error", parts=parts, active_part="", message=message)
+def error_page(parts: list[str], message: str, *, theme: str = "system") -> str:
+    return _render(
+        "error.html", title="Error", parts=parts, active_part="", message=message, theme=theme
+    )

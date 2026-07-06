@@ -1,25 +1,31 @@
 /* ============================================================================
    firm-ui design tokens
    The single source of truth for colour, radius, and type. Rules below reference
-   these — change a value here, not in the rule. Dark mode re-points the same
-   names (see the media query); the per-state hues stay fixed across themes.
+   these — change a value here, not in the rule. Each colour is a light-dark()
+   pair selected by `color-scheme`; the header theme toggle flips that per the
+   :root rules below (system = follow the OS). Per-state hues stay fixed.
    ============================================================================ */
 :root {
+  /* `color-scheme` chooses which half of every light-dark() pair resolves.
+     `light dark` = follow the OS; the [data-theme] rules below force one. */
   color-scheme: light dark;
 
   /* Surfaces: page → raised → sunken, with two border weights. */
-  --bg:#fbfbfc; --surface:#ffffff; --surface-2:#f3f4f6; --surface-3:#e9eaee;
-  --border:#e4e5ea; --border-strong:#d2d4dc;
+  --bg:light-dark(#fbfbfc,#0e0f12); --surface:light-dark(#ffffff,#16171c);
+  --surface-2:light-dark(#f3f4f6,#1d1f25); --surface-3:light-dark(#e9eaee,#262830);
+  --border:light-dark(#e4e5ea,#2a2c34); --border-strong:light-dark(#d2d4dc,#3b3e48);
 
   /* Text: primary → secondary → muted. */
-  --text:#1b1c1f; --text-2:#585b64; --text-3:#6b6e78;
+  --text:light-dark(#1b1c1f,#e7e8ec); --text-2:light-dark(#585b64,#a6a9b4); --text-3:light-dark(#6b6e78,#8b8e99);
 
   /* Accent + status tones; each fill is paired with a tinted background. */
-  --accent:#2563eb; --accent-bg:#eef3ff; --on-accent:#ffffff;
-  --ok:#15803d; --ok-bg:#e9f8ef; --warn:#b45309; --warn-bg:#fbf1e0; --danger:#dc2626; --danger-bg:#fdecec;
+  --accent:light-dark(#2563eb,#60a5fa); --accent-bg:light-dark(#eef3ff,#172340); --on-accent:light-dark(#ffffff,#08213d);
+  --ok:light-dark(#15803d,#4ade80); --ok-bg:light-dark(#e9f8ef,#11241b);
+  --warn:light-dark(#b45309,#fbbf24); --warn-bg:light-dark(#fbf1e0,#2a2009);
+  --danger:light-dark(#dc2626,#f87171); --danger-bg:light-dark(#fdecec,#2b1416);
 
   /* One hue per job state, reused across KPI dots, state badges and the sub-nav
-     so a glance maps colour to state. Deliberately not re-themed in dark mode. */
+     so a glance maps colour to state. Deliberately identical in both themes. */
   --st-ready:#3b82f6; --st-scheduled:#f59e0b; --st-blocked:#9aa0ab;
   --st-claimed:#8b5cf6; --st-failed:#ef4444; --st-finished:#10b981;
 
@@ -33,15 +39,11 @@
   --fs-lg:.95rem;   /* 15px — section headings (h2) */
   --fs-xl:1.5rem;   /* 24px — page titles (h1) and headline numbers */
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:#0e0f12; --surface:#16171c; --surface-2:#1d1f25; --surface-3:#262830;
-    --border:#2a2c34; --border-strong:#3b3e48;
-    --text:#e7e8ec; --text-2:#a6a9b4; --text-3:#8b8e99;
-    --accent:#60a5fa; --accent-bg:#172340; --on-accent:#08213d;
-    --ok:#4ade80; --ok-bg:#11241b; --warn:#fbbf24; --warn-bg:#2a2009; --danger:#f87171; --danger-bg:#2b1416;
-  }
-}
+/* The header toggle writes data-theme onto <html>; `system` (or no attribute)
+   keeps the OS-following default above. Overriding color-scheme re-resolves
+   every light-dark() token — no second copy of the palette. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"]  { color-scheme: dark; }
 
 /* -- base -------------------------------------------------------------------- */
 * { box-sizing: border-box; }
@@ -70,6 +72,12 @@ header.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: 
 .dropdown summary::-webkit-details-marker { display: none; }
 .dropdown summary:hover, .dropdown[open] summary { color: var(--text-2); }
 .dropdown summary svg { width: 12px; height: 12px; }
+/* Theme toggle: a bare icon button that cycles system -> light -> dark on each click. */
+.theme-toggle { display: flex; align-items: center; }
+.theme-toggle button { border: none; background: none; padding: 2px; color: var(--text-3);
+                       transition: color .15s ease; }
+.theme-toggle button:hover { background: none; color: var(--text); }
+.theme-toggle button svg { width: 16px; height: 16px; }
 .dropdown-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 20; min-width: 100px;
                  display: flex; flex-direction: column; gap: 1px; padding: 4px;
                  border-radius: var(--radius-lg); background: var(--surface-2); border: 1px solid var(--border); }
@@ -79,7 +87,7 @@ header.top { position: sticky; top: 0; z-index: 10; display: flex; align-items: 
 .dropdown-opt:hover { background: var(--surface-3); text-decoration: none; }
 .dropdown-opt.active { background: var(--accent-bg); color: var(--accent); }
 .dropdown-opt svg { width: 12px; height: 12px; }
-.refresh { margin-left: auto; }
+.chrome { margin-left: auto; display: flex; align-items: center; gap: 1rem; }
 .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--st-finished); flex: none;
          display: inline-block; vertical-align: middle; }
 .pulse.off { background: var(--text-3); }
