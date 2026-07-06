@@ -55,6 +55,11 @@ MySQL/MariaDB — these are hardening, performance, features, and polish.
   key→shard routing would enable it. `store.py`, `entries.py`.
 - **(S) `expiry_method="job"` for the cache.** Run cache eviction as a `firm-queue` job instead
   of a background thread — a nice cross-package integration once both are installed. `expiry.py`.
+- **(M) Per-entry cache TTL (`expires_in` / `expires_at`).** firm's cache expiry is currently
+  **global only** (`max_age` + `max_size` FIFO trim); ActiveSupport lets each `set`/`fetch` carry its
+  own TTL. Implement Rails-style by packing the expiry into the stored entry (the value envelope) and
+  filtering it out on read — no schema change. Until then, per-entry TTL is a documented divergence
+  (see `docs/comparison-to-rails.md`). `store.py`, `entries.py`, `serialization.py`.
 - **(M) Richer retry semantics.** Per-exception `retry_on` / `discard_on` (retry `TimeoutError` 5×,
   discard `ValueError`), like Active Job. Today retries are uniform. `job.py`, `results.py`.
 - **(M) Job middleware / callbacks.** `before/after/around` hooks per job (or globally) and a

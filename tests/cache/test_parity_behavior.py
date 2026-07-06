@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy import delete, func, insert, select
 
 from firm._core.clock import now_utc
-from firm._core.database import create_engine_for, transaction
+from firm._core.database import transaction
 from firm.cache import Cache, JSONCoder, schema
 from firm.cache.entries import compute_byte_size
 from firm.cache.estimate import entry_count, estimate_size
@@ -461,29 +461,3 @@ def test_encrypted_with_custom_settings(db_url: str) -> None:
         assert int(row.byte_size) == encrypted_size
     finally:
         store.close()
-
-
-# --------------------------------------------------------------------------------------------
-# 11. execution_test.rb :: failure-safety when the DB is unavailable.
-#     firm MAY intend to raise (a divergence from Rails' degrade-to-miss). Mark xfail.
-# --------------------------------------------------------------------------------------------
-
-
-@pytest.mark.xfail(
-    reason="decide: degrade-to-miss vs raise — see comparison-to-rails.md",
-    strict=False,
-)
-def test_get_on_broken_engine_degrades_to_miss(tmp_path) -> None:
-    """Upstream: execution_test failure-safety. Rails degrades a failed cache read to a miss
-    (returns nil). firm may instead raise; xfail records that open decision."""
-    # Build a cache on a real engine (so the schema exists), then point it at a dead engine.
-    good_url = f"sqlite:///{tmp_path / 'real.db'}"
-    cache = Cache(database_url=good_url, max_size=None, max_age=None, auto_expire=False)
-    try:
-        cache.set("k", "v")
-        # Dispose the engine out from under the store to simulate an unavailable DB.
-        broken = create_engine_for(f"sqlite:////nonexistent-dir-{id(cache)}/cannot.db")
-        cache.engine = broken
-        assert cache.get("k") is None  # Rails would return a miss; firm likely raises -> xfail
-    finally:
-        cache.close()

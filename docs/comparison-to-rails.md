@@ -27,6 +27,8 @@ reinterpretation. Where it differs, it's deliberate and documented.
 | Pub/sub trimming    | inline `TrimJob` per broadcast          | async probabilistic trim on a background thread (+ manual `trim()` / CLI)          |
 | Pub/sub delivery    | Action Cable adapter                    | a standalone `Channel` with `broadcast`/`subscribe`/`unsubscribe` (no Action Cable) |
 | Cache value coder   | Marshal (arbitrary Ruby objects)        | **JSON by default** (safer against a writable cache table); `PickleCoder` is one import away |
+| Cache entry expiry  | per-entry `expires_in` / `expires_at`   | **global expiry only** — `max_age` + `max_size` FIFO trim; no per-entry TTL (planned, see `IMPROVEMENTS.md`) |
+| Cache failure safety | a dead cache DB degrades **reads and writes** | **reads** degrade to a miss (routed to `on_error`); **writes still raise** — a silently dropped write is a worse surprise than an error |
 
 The at-least-once recovery choice means **jobs should be idempotent** — see
 [Retries & failures](queue/retries-and-failures.md).
