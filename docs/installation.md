@@ -24,8 +24,8 @@ pip install "firm[audit]"      # just the audit log
 | `cache` | `firm-cache` (click) | the cache store + the `firm-cache` CLI |
 | `channel` | `firm-channel` (click) | pub/sub + the `firm-channel` CLI |
 | `audit` | `firm-audit` (click) | the audit log + the `firm-audit` CLI |
-| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) |
-| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) |
+| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
+| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
 | `postgres` | `psycopg` | running on PostgreSQL |
 | `mysql` | `pymysql` | running on MySQL / MariaDB |
 | `encryption` | `cryptography` | cache at-rest encryption (Fernet) |

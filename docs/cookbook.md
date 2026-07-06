@@ -967,7 +967,7 @@ Good fit for a `RecurringTask` wrapping a `@bq.job` that calls `clear_finished`.
 
 ### The firm-ui dashboard
 
-A small read/act web dashboard. It binds to `127.0.0.1` and exposes tracebacks plus destructive actions (retry / discard / pause / clear) — put it behind a reverse proxy + auth before exposing it. Tabs appear only for the parts (queue / cache / channel) whose tables exist.
+A small read/act web dashboard. It binds to `127.0.0.1` and exposes tracebacks plus destructive actions (retry / discard / pause / clear) — put it behind a reverse proxy + auth before exposing it. Tabs appear only for the parts (queue / cache / channel / audit) whose tables exist.
 
 ```bash
 # One shared database for all parts
