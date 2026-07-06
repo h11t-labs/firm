@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 
 from firm.channel import Channel
@@ -51,9 +50,11 @@ def test_unsubscribe_removes_registered_callback(channel: Channel, wait_for: Cal
     assert not wait_for(lambda: received != [], timeout=0.3)
 
 
-def test_messages_before_subscribe_are_not_delivered(channel: Channel, wait_for: Callable) -> None:
+def test_messages_before_subscribe_are_not_delivered(
+    channel: Channel, wait_for: Callable, stored: Callable
+) -> None:
     channel.broadcast("e", b"old")
-    time.sleep(0.05)
+    assert wait_for(lambda: stored() == 1)  # "old" durably committed before we subscribe
     received: list[bytes] = []
     channel.subscribe("e", received.append)
     channel.broadcast("e", b"new")
@@ -70,12 +71,12 @@ def test_ordered_delivery(channel: Channel, wait_for: Callable) -> None:
 
 
 def test_backlog_on_quiet_channel_not_replayed_to_later_subscriber(
-    channel: Channel, wait_for: Callable
+    channel: Channel, wait_for: Callable, stored: Callable
 ) -> None:
     # The listener is running (subscribed to "a"), but "b" has no subscriber yet.
     channel.subscribe("a", [].append)
     channel.broadcast("b", b"old-on-b")
-    time.sleep(0.05)  # let the row commit and a poll cycle go by
+    assert wait_for(lambda: stored() == 1)  # "old-on-b" committed before we subscribe to "b"
     # Subscribing to "b" now must NOT replay the message broadcast before the subscription.
     received: list[bytes] = []
     channel.subscribe("b", received.append)
@@ -84,7 +85,9 @@ def test_backlog_on_quiet_channel_not_replayed_to_later_subscriber(
     assert b"old-on-b" not in received
 
 
-def test_resubscribe_does_not_replay_gap_messages(channel: Channel, wait_for: Callable) -> None:
+def test_resubscribe_does_not_replay_gap_messages(
+    channel: Channel, wait_for: Callable, stored: Callable
+) -> None:
     received: list[bytes] = []
     callback = received.append
     channel.subscribe("z", callback)
@@ -92,7 +95,7 @@ def test_resubscribe_does_not_replay_gap_messages(channel: Channel, wait_for: Ca
     assert wait_for(lambda: received == [b"m1"])
     channel.unsubscribe("z", callback)
     channel.broadcast("z", b"gap")  # broadcast while "z" has no subscriber
-    time.sleep(0.05)
+    assert wait_for(lambda: stored() == 2)  # "gap" (2nd message) committed before resubscribe
     received.clear()
     channel.subscribe("z", callback)
     channel.broadcast("z", b"m2")

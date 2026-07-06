@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 
 from sqlalchemy import select, update
@@ -140,5 +141,77 @@ def test_background_eviction_failure_reaches_on_error(db_url, monkeypatch) -> No
         while time.monotonic() < deadline and not seen:
             time.sleep(0.01)
         assert seen and "evict-fail" in str(seen[0])
+    finally:
+        cache.close()
+
+
+def test_concurrent_writes_and_eviction_stay_consistent(db_url: str) -> None:
+    """TL-1: writers inserting while an evictor deletes over-limit rows must not corrupt the store
+    or wedge — the insert-vs-delete race around FIFO eviction. PG/MySQL run the threads genuinely
+    concurrently; SQLite is single-writer, so lock contention is expected and retried here exactly
+    as a real multi-threaded SQLite app must. Any *non-lock* error is a genuine failure."""
+    import threading
+    import time
+
+    from sqlalchemy.exc import OperationalError
+
+    def _retry_on_lock(op: Callable[[], object]) -> None:
+        # A deferred write that loses the single-writer race returns "database is locked"
+        # immediately (SQLite skips the busy handler to avoid deadlock), so retries are cheap.
+        for _ in range(500):
+            try:
+                op()
+                return
+            except OperationalError as exc:
+                if "lock" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                time.sleep(0.005)
+        raise AssertionError("still lock-contended after 500 retries — likely a real wedge")
+
+    cache = Cache(
+        database_url=db_url,
+        max_entries=20,
+        max_size=None,
+        max_age=None,
+        expiry_batch_size=10,
+        auto_expire=False,
+    )
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def writer(worker: int) -> None:
+        try:
+            for i in range(100):
+                _retry_on_lock(lambda i=i, worker=worker: cache.set(f"w{worker}-{i}", i))
+        except Exception as exc:  # record so the assertion can report the actual failure
+            errors.append(exc)
+
+    def evictor() -> None:
+        try:
+            while not stop.is_set():
+                _retry_on_lock(cache.expiry.run_once)
+        except Exception as exc:
+            errors.append(exc)
+
+    try:
+        writers = [threading.Thread(target=writer, args=(w,)) for w in range(3)]
+        evictor_thread = threading.Thread(target=evictor)
+        evictor_thread.start()
+        for t in writers:
+            t.start()
+        for t in writers:
+            t.join()
+        stop.set()
+        evictor_thread.join()
+        # Writes have stopped; settle to the configured limit.
+        while cache.expiry.run_once() > 0:
+            pass
+
+        assert not errors, f"concurrent write/evict raised: {errors[:3]}"
+        with transaction(cache.engine) as conn:
+            assert entry_count(conn) <= 20
+        # The store is still fully usable after the storm.
+        cache.set("after", 1)
+        assert cache.get("after") == 1
     finally:
         cache.close()
