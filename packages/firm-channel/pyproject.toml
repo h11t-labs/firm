@@ -1,7 +1,7 @@
 [project]
 name = "firm-channel"
 version = "0.1.0"
-description = "🪨 Database-backed publish/subscribe (a pure-Python port of Rails' Solid Cable). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
+description = "Database-backed publish/subscribe (a pure-Python port of Rails' Solid Cable). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

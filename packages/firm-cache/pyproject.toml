@@ -1,7 +1,7 @@
 [project]
 name = "firm-cache"
 version = "0.1.0"
-description = "🪨 Database-backed cache store (a pure-Python port of Rails' Solid Cache). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
+description = "Database-backed cache store (a pure-Python port of Rails' Solid Cache). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
