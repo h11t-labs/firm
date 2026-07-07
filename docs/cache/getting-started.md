@@ -3,10 +3,10 @@
 ## Install
 
 ```bash
-pip install "firm[cache]"              # or: uv add "firm[cache]"
-pip install "firm[cache,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[cache,mysql]"        # PyMySQL, for MySQL/MariaDB
-pip install "firm[cache,encryption]"   # cryptography, for at-rest encryption
+pip install firm-cache              # or: uv add firm-cache
+pip install "firm-cache[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-cache[mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install "firm-cache[encryption]"   # cryptography, for at-rest encryption
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.

@@ -12,7 +12,7 @@ Runnable scripts. Each creates a local SQLite database (`firm-*.db`) for the dem
 | [flask_app.py](flask_app.py) | a Flask app (`Firm` extension + enqueue + cache) | `uv run flask --app examples.flask_app run` |
 | [secured_dashboard.py](secured_dashboard.py) | the firm-ui dashboard behind Basic auth + a custom Authenticator | `uv run python examples/secured_dashboard.py` |
 
-Install what each needs, e.g. `pip install "firm[queue,fastapi]"` or `pip install "firm[queue,flask]"`.
+Install what each needs, e.g. `pip install "firm-queue[fastapi]"` or `pip install "firm-queue[flask]"`.
 These demos create the schema directly for convenience; production uses the bundled Alembic
 migrations (see [Database backends](../docs/database-backends.md)).
 

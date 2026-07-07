@@ -6,8 +6,8 @@ nothing. You still define jobs the normal way with `@bq.job`.
 
 | Import | Install | What it does |
 |---|---|---|
-| `firm.contrib.fastapi.lifespan` | `firm[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.contrib.flask.Firm` | `firm[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
 | `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
 
 ## FastAPI

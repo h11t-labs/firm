@@ -36,7 +36,7 @@ def _require_flask() -> None:
     except ImportError as exc:  # pragma: no cover - exercised only without the 'flask' extra
         raise ImportError(
             'The firm Flask integration requires "flask". Install the flask extra: '
-            'pip install "firm[flask]"'
+            'pip install "firm-queue[flask]"'
         ) from exc
 
 

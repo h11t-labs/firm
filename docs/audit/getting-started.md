@@ -3,9 +3,9 @@
 ## Install
 
 ```bash
-pip install "firm[audit]"              # or: uv add "firm[audit]"
-pip install "firm[audit,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[audit,mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install firm-audit              # or: uv add firm-audit
+pip install "firm-audit[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-audit[mysql]"        # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.

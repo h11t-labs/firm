@@ -88,6 +88,42 @@ assert firm's behavior and go green.
 - Match the surrounding style — concise docstrings, explicit SQL via SQLAlchemy Core, no clever
   metaprogramming.
 
+## Releasing
+
+Every package under `packages/` is published to PyPI independently (they share the `firm.*`
+namespace but carry their own versions). Publishing is fully automated through
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) using
+[PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/) — there are no PyPI tokens
+to manage. The workflow builds, runs the test suite, `twine check`s, and uploads.
+
+To release **one package** (the common case):
+
+1. Bump `version` in `packages/<name>/pyproject.toml` via a PR. If other packages should pick
+   up the new version, adjust their `~=` pins in the same PR.
+2. Tag the merged commit `<name>-v<version>` and push the tag:
+
+   ```bash
+   git tag firm-queue-v0.2.0 && git push origin firm-queue-v0.2.0
+   ```
+
+   The workflow refuses to publish if the tag version doesn't match the package's
+   `pyproject.toml`.
+
+To release **everything at once** (e.g. a coordinated bump), tag `v<version>`. That builds all
+packages and uploads whatever isn't already on PyPI — previously published files are skipped, so
+the tag is safe even when some packages didn't change.
+
+Versions follow semver-ish pre-1.0 rules: breaking changes bump the minor version. The `firm`
+meta-package's extras pin modules with `~=`, so a meta-package release is only needed when those
+pins change.
+
+> **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
+> [PEP 541](https://peps.python.org/pep-0541/) name-transfer request is pending. Until it's
+> granted, the release workflow excludes the meta-package from `v*` all-package tags (see the
+> `rm dist/firm-[0-9]*` line in `release.yml`), and docs use the per-package install form
+> (`pip install firm-queue`). Once the name is ours: remove that line, publish the meta with a
+> `firm-v<ver>` tag, and the `firm[queue]` extras form starts working.
+
 ## Building the docs
 
 The documentation site is built with [Zensical](https://zensical.org) (configured in

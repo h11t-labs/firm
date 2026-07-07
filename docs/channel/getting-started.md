@@ -3,9 +3,9 @@
 ## Install
 
 ```bash
-pip install "firm[channel]"             # or: uv add "firm[channel]"
-pip install "firm[channel,postgres]"    # psycopg, for PostgreSQL
-pip install "firm[channel,mysql]"       # PyMySQL, for MySQL/MariaDB
+pip install firm-channel             # or: uv add firm-channel
+pip install "firm-channel[postgres]"    # psycopg, for PostgreSQL
+pip install "firm-channel[mysql]"       # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.

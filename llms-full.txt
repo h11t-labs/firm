@@ -92,64 +92,67 @@ SQLite (default), **PostgreSQL**, and **MySQL/MariaDB** are all supported and te
 
 # Installation
 
-`firm` is a single package with four independent modules — `firm.queue` (jobs),
-`firm.cache` (caching), `firm.channel` (publish/subscribe), and `firm.audit` (an append-only
-audit log) — plus a shared internal core. **You install only what you use** via extras, so a
-queue-only service never pulls cache, pub/sub, or audit dependencies, and vice versa.
+firm is four independent modules — `firm.queue` (jobs), `firm.cache` (caching), `firm.channel`
+(publish/subscribe), and `firm.audit` (an append-only audit log) — plus a shared internal core.
+Each module is its own package on PyPI, all sharing the `firm.*` import namespace. **You install
+only what you use**, so a queue-only service never pulls cache, pub/sub, or audit dependencies,
+and vice versa.
 
 ```bash
-pip install "firm[queue]"     # just the job queue
-pip install "firm[cache]"     # just the cache
-pip install "firm[channel]"    # just pub/sub
-pip install "firm[audit]"      # just the audit log
+pip install firm-queue      # just the job queue
+pip install firm-cache      # just the cache
+pip install firm-channel    # just pub/sub
+pip install firm-audit      # just the audit log
+pip install firm-ui         # the web dashboard (pulls all four modules)
 ```
 
-> `firm` is an extras-only meta-package: the bare `pip install firm` (no extras) installs **no
-> modules at all** — always name at least one. Each module is also its own package
-> (`pip install firm-queue` ≡ `pip install "firm[queue]"`) if you prefer direct dependencies.
+> A `firm` meta-package (`pip install "firm[queue]"` and friends) is planned; the PyPI name is
+> pending a [name transfer](https://peps.python.org/pep-0541/). The per-package installs above
+> are the canonical form and will keep working either way.
 
 ## Extras
 
-| Extra | Pulls in | Use it for |
-|---|---|---|
-| `queue` | `firm-queue` (croniter, click) | the background-job queue (scheduler + the `firm-queue` CLI) |
-| `cache` | `firm-cache` (click) | the cache store + the `firm-cache` CLI |
-| `channel` | `firm-channel` (click) | pub/sub + the `firm-channel` CLI |
-| `audit` | `firm-audit` (click) | the audit log + the `firm-audit` CLI |
-| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
-| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
-| `postgres` | `psycopg` | running on PostgreSQL |
-| `mysql` | `pymysql` | running on MySQL / MariaDB |
-| `encryption` | `cryptography` | cache at-rest encryption (Fernet) |
-| `msgpack` | `msgpack` | the cache msgpack value coder |
-| `all` | everything above | the full kitchen sink |
+Database drivers and optional features are extras on the module packages:
 
-Combine freely — extras are additive:
+| Install | Pulls in | Use it for |
+|---|---|---|
+| `firm-queue[postgres]` / `firm-cache[postgres]` / … | `psycopg` | running on PostgreSQL |
+| `firm-queue[mysql]` / `firm-cache[mysql]` / … | `pymysql` | running on MySQL / MariaDB |
+| `firm-queue[flask]` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) |
+| `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) |
+| `firm-cache[encryption]` | `cryptography` | cache at-rest encryption (Fernet) |
+| `firm-cache[msgpack]` | `msgpack` | the cache msgpack value coder |
+
+The driver extras (`postgres`, `mysql`) exist on every module (they resolve to
+`firm-core[postgres]` / `firm-core[mysql]` under the hood), so add them to whichever module you
+install. Combine freely — extras are additive:
 
 ```bash
-pip install "firm[queue,postgres]"          # queue on PostgreSQL
-pip install "firm[cache,encryption]"        # cache with at-rest encryption
-pip install "firm[queue,cache,mysql]"       # both modules on MySQL/MariaDB
-pip install "firm[all]"                     # everything
+pip install "firm-queue[postgres]"            # queue on PostgreSQL
+pip install "firm-cache[encryption]"          # cache with at-rest encryption
+pip install "firm-queue[mysql]" firm-cache    # both modules on MySQL/MariaDB
+pip install firm-ui "firm-queue[flask,fastapi]" "firm-core[postgres,mysql]" "firm-cache[encryption,msgpack]"   # everything
 ```
 
 With `uv`:
 
 ```bash
-uv add "firm[queue,postgres]"
+uv add "firm-queue[postgres]"
 ```
 
 ## What each install gives you
 
-- **`firm[queue]`** → `import firm.queue as bq`, the `@bq.job` decorator, enqueuing, the
+- **`firm-queue`** → `import firm.queue as bq`, the `@bq.job` decorator, enqueuing, the
   worker/dispatcher/scheduler/supervisor, and the `firm-queue` CLI. No cache dependencies.
-- **`firm[cache]`** → `from firm.cache import Cache`, all cache operations, and the
+- **`firm-cache`** → `from firm.cache import Cache`, all cache operations, and the
   `firm-cache` CLI. No queue dependencies (no `croniter`).
-- **`firm[channel]`** → `from firm.channel import Channel`, broadcast/subscribe, the polling
+- **`firm-channel`** → `from firm.channel import Channel`, broadcast/subscribe, the polling
   listener, message trimming, and the `firm-channel` CLI. No queue dependencies (no `croniter`).
-- **`firm[audit]`** → `from firm.audit import AuditLog, record`, append-only event recording,
+- **`firm-audit`** → `from firm.audit import AuditLog, record`, append-only event recording,
   `history()` querying, opt-in retention, and the `firm-audit` CLI. No queue dependencies (no
   `croniter`).
+- **`firm-ui`** → the [web dashboard](ui.md) and its `firm-ui` command; depends on all four
+  modules.
 - **SQLite** needs no driver extra. **PostgreSQL/MySQL** need `postgres`/`mysql`. Bare
   `postgresql://` / `mysql://` URLs are auto-normalized to the shipped drivers — see
   [Database backends](database-backends.md).
@@ -165,10 +168,10 @@ names the extra to add — not a bare `ModuleNotFoundError`:
 
 ```text
 >>> Cache(..., encrypt_key=key)                # without [encryption]
-ImportError: At-rest cache encryption requires "cryptography". Install the encryption extra: pip install "firm[cache,encryption]"
+ImportError: At-rest cache encryption requires "cryptography". Install the encryption extra: pip install "firm-cache[encryption]"
 
 >>> bq.configure(database_url="postgresql://…") # without [postgres]
-ImportError: The postgres driver "psycopg" is not installed. Install the postgres extra: pip install "firm[postgres]"
+ImportError: The postgres driver "psycopg" is not installed. Install the postgres extra: pip install "firm-core[postgres]"
 ```
 
 ## Next steps
@@ -377,7 +380,7 @@ cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 Pass `encrypt_key` to encrypt the serialized bytes with Fernet. This needs the `encryption` extra (`cryptography`). The key is a standard Fernet key (str or bytes).
 
 ```bash
-pip install "firm[cache,encryption]"
+pip install "firm-cache[encryption]"
 ```
 
 ```python
@@ -1331,10 +1334,10 @@ hidden behind a small dialect seam, so the rest of the code is database-agnostic
 ## Install
 
 ```bash
-pip install "firm[queue]"            # or: uv add "firm[queue]"
+pip install firm-queue            # or: uv add firm-queue
 # add a database driver as needed (SQLite needs nothing):
-pip install "firm[queue,postgres]"   # psycopg
-pip install "firm[queue,mysql]"      # PyMySQL
+pip install "firm-queue[postgres]"   # psycopg
+pip install "firm-queue[mysql]"      # PyMySQL
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -2237,10 +2240,10 @@ Read on: **[Getting started](getting-started.md)**.
 ## Install
 
 ```bash
-pip install "firm[cache]"              # or: uv add "firm[cache]"
-pip install "firm[cache,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[cache,mysql]"        # PyMySQL, for MySQL/MariaDB
-pip install "firm[cache,encryption]"   # cryptography, for at-rest encryption
+pip install firm-cache              # or: uv add firm-cache
+pip install "firm-cache[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-cache[mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install "firm-cache[encryption]"   # cryptography, for at-rest encryption
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -2459,7 +2462,7 @@ Cache(database_url=..., coder=PickleCoder())   # arbitrary objects — read the 
 A custom coder is anything with `dumps(value) -> bytes` and `loads(bytes) -> value`:
 
 ```python
-import msgpack   # pip install "firm[cache,msgpack]"
+import msgpack   # pip install "firm-cache[msgpack]"
 
 class MsgpackCoder:
     def dumps(self, value): return msgpack.packb(value, use_bin_type=True)
@@ -2479,7 +2482,7 @@ Cache(database_url=..., coder=MsgpackCoder())
 Wrap any coder with Fernet encryption by passing an `encrypt_key`:
 
 ```python
-from cryptography.fernet import Fernet   # pip install "firm[cache,encryption]"
+from cryptography.fernet import Fernet   # pip install "firm-cache[encryption]"
 
 key = Fernet.generate_key()              # store this securely
 cache = Cache(database_url=..., encrypt_key=key)
@@ -2733,9 +2736,9 @@ Old messages are deleted automatically. Each broadcast has a small (~2%) chance 
 ## Install
 
 ```bash
-pip install "firm[channel]"             # or: uv add "firm[channel]"
-pip install "firm[channel,postgres]"    # psycopg, for PostgreSQL
-pip install "firm[channel,mysql]"       # PyMySQL, for MySQL/MariaDB
+pip install firm-channel             # or: uv add firm-channel
+pip install "firm-channel[postgres]"    # psycopg, for PostgreSQL
+pip install "firm-channel[mysql]"       # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -3056,9 +3059,9 @@ Read on: **[Getting started](getting-started.md)**.
 ## Install
 
 ```bash
-pip install "firm[audit]"              # or: uv add "firm[audit]"
-pip install "firm[audit,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[audit,mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install firm-audit              # or: uv add firm-audit
+pip install "firm-audit[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-audit[mysql]"        # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -3470,8 +3473,8 @@ nothing. You still define jobs the normal way with `@bq.job`.
 
 | Import | Install | What it does |
 |---|---|---|
-| `firm.contrib.fastapi.lifespan` | `firm[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.contrib.flask.Firm` | `firm[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
 | `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
 
 ## FastAPI
@@ -3904,8 +3907,8 @@ Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick wit
 | MySQL / MariaDB | `mysql+pymysql://user:pw@host/db`      | [PyMySQL](https://pymysql.readthedocs.io/) | `…[mysql]`    |
 
 ```bash
-pip install "firm[queue,postgres]"   # queue on PostgreSQL  (or [queue,mysql])
-pip install "firm[cache,postgres]"   # cache on PostgreSQL  (or [cache,mysql])
+pip install "firm-queue[postgres]"   # queue on PostgreSQL  (or [mysql])
+pip install "firm-cache[postgres]"   # cache on PostgreSQL  (or [mysql])
 ```
 
 **Bare URLs are normalized for you:** `postgresql://…` becomes `postgresql+psycopg://…` and
@@ -4406,6 +4409,42 @@ assert firm's behavior and go green.
 - Keep the public API small; internal machinery lives under `_core/`.
 - Match the surrounding style — concise docstrings, explicit SQL via SQLAlchemy Core, no clever
   metaprogramming.
+
+## Releasing
+
+Every package under `packages/` is published to PyPI independently (they share the `firm.*`
+namespace but carry their own versions). Publishing is fully automated through
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) using
+[PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/) — there are no PyPI tokens
+to manage. The workflow builds, runs the test suite, `twine check`s, and uploads.
+
+To release **one package** (the common case):
+
+1. Bump `version` in `packages/<name>/pyproject.toml` via a PR. If other packages should pick
+   up the new version, adjust their `~=` pins in the same PR.
+2. Tag the merged commit `<name>-v<version>` and push the tag:
+
+   ```bash
+   git tag firm-queue-v0.2.0 && git push origin firm-queue-v0.2.0
+   ```
+
+   The workflow refuses to publish if the tag version doesn't match the package's
+   `pyproject.toml`.
+
+To release **everything at once** (e.g. a coordinated bump), tag `v<version>`. That builds all
+packages and uploads whatever isn't already on PyPI — previously published files are skipped, so
+the tag is safe even when some packages didn't change.
+
+Versions follow semver-ish pre-1.0 rules: breaking changes bump the minor version. The `firm`
+meta-package's extras pin modules with `~=`, so a meta-package release is only needed when those
+pins change.
+
+> **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
+> [PEP 541](https://peps.python.org/pep-0541/) name-transfer request is pending. Until it's
+> granted, the release workflow excludes the meta-package from `v*` all-package tags (see the
+> `rm dist/firm-[0-9]*` line in `release.yml`), and docs use the per-package install form
+> (`pip install firm-queue`). Once the name is ours: remove that line, publish the meta with a
+> `firm-v<ver>` tag, and the `firm[queue]` extras form starts working.
 
 ## Building the docs
 

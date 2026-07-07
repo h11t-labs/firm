@@ -3,10 +3,10 @@
 ## Install
 
 ```bash
-pip install "firm[queue]"            # or: uv add "firm[queue]"
+pip install firm-queue            # or: uv add firm-queue
 # add a database driver as needed (SQLite needs nothing):
-pip install "firm[queue,postgres]"   # psycopg
-pip install "firm[queue,mysql]"      # PyMySQL
+pip install "firm-queue[postgres]"   # psycopg
+pip install "firm-queue[mysql]"      # PyMySQL
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
