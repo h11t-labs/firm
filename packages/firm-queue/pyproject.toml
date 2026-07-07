@@ -44,5 +44,6 @@ build-backend = "uv_build"
 # firm-queue ships two namespace sub-packages: firm.queue and firm.contrib
 # (contrib only depends on queue, so it lives here rather than in its own dist).
 [tool.uv.build-backend]
+source-include = ["CHANGELOG.md"]
 namespace = true
 module-name = ["firm.queue", "firm.contrib"]

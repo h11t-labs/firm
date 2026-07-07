@@ -34,11 +34,13 @@ Homepage = "https://github.com/h11t-labs/firm"
 Documentation = "https://h11t-labs.github.io/firm/"
 Repository = "https://github.com/h11t-labs/firm"
 Issues = "https://github.com/h11t-labs/firm/issues"
+Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-cache/CHANGELOG.md"
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
+source-include = ["CHANGELOG.md"]
 module-name = "firm.cache"
 namespace = true
