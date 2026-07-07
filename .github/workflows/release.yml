@@ -1,0 +1,87 @@
+# Publish workspace packages to PyPI via trusted publishing (OIDC — no long-lived tokens).
+#
+# Two tag shapes drive releases (see docs/testing-and-contributing.md § Releasing):
+#   v0.1.0            → build every workspace package; publish whatever isn't on PyPI yet
+#                       (already-published files are skipped, so this is idempotent)
+#   firm-queue-v0.2.0 → build + publish that one package; the tag version must match its
+#                       pyproject.toml or the run fails before anything is uploaded
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*" # all packages
+      - "*-v[0-9]*" # a single package, e.g. firm-cache-v0.1.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.select.outputs.package }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Parse tag
+        id: select
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          if [[ "$TAG" == *-v[0-9]* ]]; then
+            echo "package=${TAG%-v[0-9]*}" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG##*-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "package=" >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check tag version matches pyproject
+        if: steps.select.outputs.package != ''
+        env:
+          PACKAGE: ${{ steps.select.outputs.package }}
+          VERSION: ${{ steps.select.outputs.version }}
+        run: |
+          python3 - <<'EOF'
+          import os, sys, tomllib
+
+          package, version = os.environ["PACKAGE"], os.environ["VERSION"]
+          with open(f"packages/{package}/pyproject.toml", "rb") as f:
+              actual = tomllib.load(f)["project"]["version"]
+          if actual != version:
+              sys.exit(f"tag says {package} {version}, pyproject.toml says {actual}")
+          EOF
+      - name: Run tests
+        run: |
+          uv sync --locked
+          uv run pytest
+      - name: Build
+        env:
+          PACKAGE: ${{ steps.select.outputs.package }}
+        run: |
+          if [[ -n "$PACKAGE" ]]; then
+            uv build --package "$PACKAGE"
+          else
+            uv build --all-packages
+          fi
+      - name: Check metadata renders
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/firm/
+    permissions:
+      id-token: write # OIDC for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: astral-sh/setup-uv@v6
+      - name: Publish to PyPI
+        # --check-url skips files already on PyPI, making all-package tags idempotent.
+        run: uv publish --check-url https://pypi.org/simple/ dist/*
