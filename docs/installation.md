@@ -14,9 +14,11 @@ pip install firm-audit      # just the audit log
 pip install firm-ui         # the web dashboard (pulls all four modules)
 ```
 
-> A `firm` meta-package (`pip install "firm[queue]"` and friends) is planned; the PyPI name is
-> pending a [name transfer](https://peps.python.org/pep-0541/). The per-package installs above
-> are the canonical form and will keep working either way.
+> Prefer a single meta-package? [`firm-stack`](https://pypi.org/project/firm-stack/) installs
+> modules via extras: `pip install "firm-stack[queue]"`, `"firm-stack[all]"`, … It will also be
+> published as plain `firm` (`pip install "firm[queue]"`) once a pending
+> [name transfer](https://github.com/pypi/support/issues/11384) for that PyPI name resolves.
+> The per-package installs above are the canonical form and keep working either way.
 
 ## Extras
 

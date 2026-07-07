@@ -15,6 +15,7 @@ firm-channel = { workspace = true }
 firm-audit = { workspace = true }
 firm-ui = { workspace = true }
 firm = { workspace = true }
+firm-stack = { workspace = true }
 
 [dependency-groups]
 # Everything needed to run the full test suite + tooling against the whole workspace.
