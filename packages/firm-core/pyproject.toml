@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = ["psycopg[binary]>=3.1"]   # PostgreSQL driver
+postgres = ["psycopg[binary]>=3.3.4"]   # PostgreSQL driver
 mysql = ["pymysql>=1.1"]               # MySQL / MariaDB driver
 
 [project.urls]

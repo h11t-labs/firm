@@ -25,16 +25,16 @@ dev = [
     "ruff>=0.14",
     # ty and zensical are pre-1.0 (0.0.x): their output changes between patch releases, so pin
     # exact to keep the pre-commit hook, CI, and every dev on the same version (no silent drift).
-    "ty==0.0.55",
-    "zensical==0.0.46",
-    "croniter>=2.0",
+    "ty==0.0.56",
+    "zensical==0.0.47",
+    "croniter>=6.2.3",
     "click>=8.1",
     "cryptography>=42",
     "msgpack>=1.0",
-    "psycopg[binary]>=3.1",
+    "psycopg[binary]>=3.3.4",
     "pymysql>=1.1",
     "flask>=3.0",
-    "fastapi>=0.110",
+    "fastapi>=0.139.0",
     "httpx>=0.27",
     "pre-commit>=3.7",
 ]
