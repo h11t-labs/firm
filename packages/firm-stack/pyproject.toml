@@ -1,7 +1,7 @@
 [project]
 name = "firm-stack"
 version = "0.1.0"
-description = "Pure-Python ports of the Rails Solid stack: database-backed background jobs (queue), caching (cache), pub/sub (channel), and an append-only audit log. No Redis required. This is a meta-package: pick modules via extras — firm-stack[queue], firm-stack[cache], firm-stack[channel], firm-stack[audit], or firm-stack[all]."
+description = "🪨 Pure-Python ports of the Rails Solid stack: database-backed background jobs (queue), caching (cache), pub/sub (channel), and an append-only audit log. No Redis required. This is a meta-package: pick modules via extras — firm-stack[queue], firm-stack[cache], firm-stack[channel], firm-stack[audit], or firm-stack[all]."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

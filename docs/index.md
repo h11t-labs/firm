@@ -1,4 +1,4 @@
-# firm
+# 🪨 firm
 
 **Pure-Python ports of the Rails 8 "Solid" stack.** Keep background jobs and caching in the SQL
 database you already run — no Redis, no extra broker, no new infrastructure.
