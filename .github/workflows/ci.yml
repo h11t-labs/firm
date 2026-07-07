@@ -16,8 +16,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Check lockfile is current
         run: uv lock --check
       - name: Sync workspace
@@ -32,8 +32,8 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Sync workspace
         run: uv sync --locked
       - name: Run tests with coverage (SQLite)
@@ -48,8 +48,8 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Sync workspace
@@ -91,8 +91,8 @@ jobs:
       FIRM_TEST_PG_URL: postgresql://firm:firm@127.0.0.1:5432/firm
       FIRM_TEST_MYSQL_URL: mysql://firm:firm@127.0.0.1:3306/firm
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - name: Sync workspace
         run: uv sync --locked
       - name: Run tests (SQLite + PostgreSQL + MySQL)
