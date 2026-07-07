@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       package: ${{ steps.select.outputs.package }}
+      version: ${{ steps.select.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -47,6 +48,15 @@ jobs:
           if actual != version:
               sys.exit(f"tag says {package} {version}, pyproject.toml says {actual}")
           EOF
+      - name: Check changelog covers the released version
+        env:
+          PACKAGE: ${{ steps.select.outputs.package }}
+        run: |
+          if [[ -n "$PACKAGE" ]]; then
+            python3 scripts/check_changelog.py "$PACKAGE"
+          else
+            python3 scripts/check_changelog.py --all
+          fi
       - name: Run tests
         run: |
           uv sync --locked
@@ -90,3 +100,42 @@ jobs:
       - name: Publish to PyPI
         # --check-url skips files already on PyPI, making all-package tags idempotent.
         run: uv publish --check-url https://pypi.org/simple/ dist/*
+
+  # Create a GitHub Release for the tag once the PyPI upload succeeded: the changelog section
+  # for the released version as the body, with auto-generated notes (PR titles) appended.
+  github-release:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write release body
+        env:
+          PACKAGE: ${{ needs.build.outputs.package }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [[ -n "$PACKAGE" ]]; then
+            # Extract this version's section from the package changelog (up to the next
+            # version heading), dropping the trailing link-reference lines.
+            awk -v v="$VERSION" '
+              index($0, "## [" v "]") == 1 { on = 1; next }
+              on && /^## /                 { exit }
+              on && !/^\[[^]]+\]: http/    { print }
+            ' "packages/$PACKAGE/CHANGELOG.md" > body.md
+            echo "" >> body.md
+            echo "Full changelog: [packages/$PACKAGE/CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/packages/$PACKAGE/CHANGELOG.md)" >> body.md
+          else
+            echo "Coordinated release of all firm packages. Per-package changelogs:" > body.md
+            echo "" >> body.md
+            for d in packages/*/; do
+              p="$(basename "$d")"
+              echo "- [$p](https://github.com/${{ github.repository }}/blob/main/packages/$p/CHANGELOG.md)" >> body.md
+            done
+          fi
+      - name: Create GitHub Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file body.md --generate-notes

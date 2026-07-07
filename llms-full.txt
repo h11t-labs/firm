@@ -4418,12 +4418,28 @@ Every package under `packages/` is published to PyPI independently (they share t
 namespace but carry their own versions). Publishing is fully automated through
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) using
 [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/) — there are no PyPI tokens
-to manage. The workflow builds, runs the test suite, `twine check`s, and uploads.
+to manage. The workflow checks the changelog, builds, runs the test suite, `twine check`s,
+uploads, and finishes by creating a GitHub Release for the tag (the changelog section as the
+body, with auto-generated notes appended).
+
+### Changelogs
+
+Each package keeps a `packages/<name>/CHANGELOG.md` in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. PRs that make a user-visible
+change add a line under the affected package's `## [Unreleased]` section — a review convention,
+not CI-enforced. At release time it **is** enforced: the workflow runs
+`scripts/check_changelog.py` and refuses to publish a version that has no matching
+`## [<version>]` section. The changelog ships in the sdist, and PyPI links it in each package's
+sidebar via the `Changelog` project URL.
+
+### Releasing one package
 
 To release **one package** (the common case):
 
-1. Bump `version` in `packages/<name>/pyproject.toml` via a PR. If other packages should pick
-   up the new version, adjust their `~=` pins in the same PR.
+1. In one PR: bump `version` in `packages/<name>/pyproject.toml` and retitle the package's
+   `## [Unreleased]` section to `## [<version>] - <YYYY-MM-DD>` (leave a fresh, empty
+   `## [Unreleased]` above it). If other packages should pick up the new version, adjust their
+   `~=` pins in the same PR.
 2. Tag the merged commit `<name>-v<version>` and push the tag:
 
    ```bash
@@ -4431,11 +4447,14 @@ To release **one package** (the common case):
    ```
 
    The workflow refuses to publish if the tag version doesn't match the package's
-   `pyproject.toml`.
+   `pyproject.toml`, or if the changelog has no section for it.
+
+### Releasing everything
 
 To release **everything at once** (e.g. a coordinated bump), tag `v<version>`. That builds all
 packages and uploads whatever isn't already on PyPI — previously published files are skipped, so
-the tag is safe even when some packages didn't change.
+the tag is safe even when some packages didn't change (their changelogs already carry the
+section for their current, released version).
 
 Versions follow semver-ish pre-1.0 rules: breaking changes bump the minor version. The `firm`
 meta-package's extras pin modules with `~=`, so a meta-package release is only needed when those

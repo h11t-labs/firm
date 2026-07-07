@@ -26,6 +26,9 @@ All three must pass — CI runs exactly these, plus the suite against live Postg
   intact (see the [parity rules](docs/testing-and-contributing.md#upstream-test-parity)).
 - Deliberate divergences from Rails' behavior are documented in
   [docs/comparison-to-rails.md](docs/comparison-to-rails.md), not left as failing tests.
+- User-visible changes add a line under `## [Unreleased]` in the affected package's
+  `packages/<name>/CHANGELOG.md` (see
+  [Changelogs](docs/testing-and-contributing.md#changelogs)).
 - Keep PRs focused — one topic per PR merges faster.
 
 ## Bugs & ideas
