@@ -32,9 +32,7 @@ def check(package: str) -> str | None:
         return f"{package}: missing {changelog.relative_to(ROOT)}"
 
     heading = f"## [{version}]"
-    if not any(
-        line.startswith(heading) for line in changelog.read_text().splitlines()
-    ):
+    if not any(line.startswith(heading) for line in changelog.read_text().splitlines()):
         return (
             f"{package} is at {version} but {changelog.relative_to(ROOT)} has no"
             f" `{heading}` section — move the Unreleased entries into"
