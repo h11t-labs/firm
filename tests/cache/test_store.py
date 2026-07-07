@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select
 
-from firm._core.database import create_engine_for
+from firm._core.clock import now_utc
+from firm._core.database import create_engine_for, transaction
 from firm.cache import Cache, JSONCoder, schema
+from firm.cache.entries import compute_byte_size
+from firm.cache.estimate import entry_count
+from firm.cache.keys import key_hash, normalize_key
+
+_entries = schema.entries
 
 
 def test_set_get_roundtrip(cache: Cache) -> None:
@@ -184,3 +190,117 @@ def test_get_on_broken_engine_degrades_to_miss(tmp_path) -> None:
         assert cache.get_multi(["k"]) == {"k": None}
     finally:
         cache.close()
+
+
+def test_key_hash_collision_read_guard(cache: Cache) -> None:
+    """Upstream: entry_test.rb "handles key_hash collisions". Force two distinct keys to share a
+    key_hash; the read must return the row only for the key whose bytes actually match."""
+    k1 = "collide-one"
+    k2 = "collide-two"
+    cache.set(k1, "value-one")
+
+    kb1 = normalize_key(k1)
+    kb2 = normalize_key(k2)
+    shared_hash = key_hash(kb1)
+    assert key_hash(kb2) != shared_hash  # genuinely different natural hashes
+
+    # We cannot have two rows on the unique key_hash index, so replace K1's row with a row that
+    # carries K1's key_hash but K2's key bytes — exactly the collision the read guard defends.
+    with transaction(cache.engine) as conn:
+        conn.execute(delete(_entries).where(_entries.c.key_hash == shared_hash))
+        value_bytes = cache.coder.dumps("value-two")
+        conn.execute(
+            insert(_entries).values(
+                key=kb2,
+                value=value_bytes,
+                key_hash=shared_hash,  # collides with K1's hash on purpose
+                byte_size=compute_byte_size(kb2, value_bytes, False),
+                created_at=now_utc(),
+            )
+        )
+
+    # K1 looks up by shared_hash, finds the row, but the stored key bytes are K2's -> guard
+    # rejects it -> miss.
+    assert cache.get(k1) is None
+    # K2 hashes to a DIFFERENT value than shared_hash, so it never even finds this row -> miss.
+    assert cache.get(k2) is None
+
+
+def test_decrement_missing_key_returns_negative_one(cache: Cache) -> None:
+    """Upstream: cache_increment_decrement_behavior.rb test_decrement. Decrementing an absent key
+    starts from 0 -> returns -1."""
+    assert cache.decrement("nonexistent-counter") == -1
+    assert cache.get("nonexistent-counter") == -1
+
+
+def test_read_and_write_nil_then_fetch_does_not_recompute(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb :: read_and_write_nil + fetch_with_cached_nil.
+    A stored None registers as present: exist() is True and fetch() returns the cached None
+    WITHOUT recomputing (firm decides hit/miss on row presence, not on the value being non-None)."""
+    cache.set("nil-key", None)
+    assert cache.exist("nil-key") is True
+
+    calls: list[int] = []
+
+    def recompute() -> str:
+        calls.append(1)
+        return "recomputed"
+
+    result = cache.fetch("nil-key", recompute)
+    assert calls == [], "fetch recomputed despite a cached None (treated the None as a miss)"
+    assert result is None
+
+
+def test_read_and_write_false(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_should_read_and_write_false. False is a real, stored
+    value distinct from None/missing."""
+    cache.set("false-key", False)
+    assert cache.get("false-key") is False
+    assert cache.exist("false-key") is True
+
+
+def test_get_multi_empty_list_returns_empty(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_read_multi_empty_list."""
+    assert cache.get_multi([]) == {}
+
+
+def test_set_multi_empty_mapping_is_noop(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_write_multi_empty_hash (empty write is a no-op)."""
+    cache.set_multi({})  # must not raise
+    with transaction(cache.engine) as conn:
+        assert entry_count(conn) == 0
+
+
+def test_keys_are_case_sensitive(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_keys_are_case_sensitive."""
+    cache.set("A", 1)
+    cache.set("a", 2)
+    assert cache.get("A") == 1
+    assert cache.get("a") == 2
+
+
+def test_blank_key(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_blank_key. An empty key works."""
+    cache.set("", "blank-value")
+    assert cache.get("") == "blank-value"
+    assert cache.exist("") is True
+
+
+def test_absurd_key_characters(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_absurd_key_characters. Binary / odd-byte keys work."""
+    weird = b"\x00\x01\xfe\xff\n\t key with spaces \xc3\x28"
+    cache.set(weird, "weird-value")
+    assert cache.get(weird) == "weird-value"
+
+
+def test_max_key_size_disabled_short_key_not_truncated(cache: Cache) -> None:
+    """Upstream: cache_store_behavior.rb test_max_key_size_disabled. A key under max_key_bytesize is
+    stored verbatim (not truncated/hashed)."""
+    key = "k" * 100  # well under the default 1024-byte limit
+    cache.set(key, "v")
+    assert cache.get(key) == "v"
+    with transaction(cache.engine) as conn:
+        stored = conn.execute(
+            select(_entries.c.key).where(_entries.c.key_hash == key_hash(normalize_key(key)))
+        ).scalar()
+    assert bytes(stored) == key.encode("utf-8")

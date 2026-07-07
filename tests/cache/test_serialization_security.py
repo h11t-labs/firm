@@ -10,9 +10,14 @@ from __future__ import annotations
 import pickle
 
 import pytest
+from sqlalchemy import select
 
-from firm.cache import Cache, JSONCoder, PickleCoder
-from firm.cache.entries import write_entry
+from firm._core.database import transaction
+from firm.cache import Cache, JSONCoder, PickleCoder, schema
+from firm.cache.entries import compute_byte_size, write_entry
+from firm.cache.keys import key_hash, normalize_key
+
+_entries = schema.entries
 
 
 def test_default_coder_is_json(db_url) -> None:
@@ -70,3 +75,44 @@ def test_wrong_key_reads_as_miss(db_url) -> None:
         cache.set("secret", "s3kr3t")
     with Cache(database_url=db_url, encrypt_key=key_b, auto_expire=False) as cache:
         assert cache.get("secret") is None
+
+
+def test_encrypted_with_custom_settings(db_url: str) -> None:
+    """Upstream: encryption_test.rb "encrypted with custom settings". A JSON coder + Fernet key
+    round-trips, the plaintext is absent from the raw DB bytes, and the encrypted byte_size
+    overhead differs from the unencrypted overhead."""
+    pytest.importorskip("cryptography")
+    from cryptography.fernet import Fernet
+
+    key = Fernet.generate_key()
+    store = Cache(
+        database_url=db_url,
+        coder=JSONCoder(),
+        encrypt_key=key,
+        max_size=None,
+        max_age=None,
+        auto_expire=False,
+    )
+    try:
+        secret = {"password": "super-secret-token"}
+        store.set("creds", secret)
+        assert store.get("creds") == secret
+
+        with transaction(store.engine) as conn:
+            row = conn.execute(
+                select(_entries.c.value, _entries.c.byte_size).where(
+                    _entries.c.key_hash == key_hash(normalize_key("creds"))
+                )
+            ).first()
+        assert row is not None
+        raw = bytes(row.value)
+        assert b"super-secret-token" not in raw
+
+        # The recorded byte_size uses the encryption overhead (170) not the plain overhead (140).
+        kb = normalize_key("creds")
+        encrypted_size = compute_byte_size(kb, raw, encrypted=True)
+        plain_size = compute_byte_size(kb, raw, encrypted=False)
+        assert encrypted_size != plain_size
+        assert int(row.byte_size) == encrypted_size
+    finally:
+        store.close()

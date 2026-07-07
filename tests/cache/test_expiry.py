@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable
 from datetime import timedelta
 
@@ -10,7 +11,9 @@ from sqlalchemy import select, update
 from firm._core.clock import now_utc
 from firm._core.database import transaction
 from firm.cache import Cache, schema
-from firm.cache.estimate import entry_count
+from firm.cache.entries import compute_byte_size
+from firm.cache.estimate import entry_count, estimate_size
+from firm.cache.expiry import EXPIRY_MULTIPLIER
 from firm.cache.keys import key_hash, normalize_key
 
 
@@ -213,5 +216,116 @@ def test_concurrent_writes_and_eviction_stay_consistent(db_url: str) -> None:
         # The store is still fully usable after the storm.
         cache.set("after", 1)
         assert cache.get("after") == 1
+    finally:
+        cache.close()
+
+
+def test_max_size_eviction_keeps_total_bounded(db_url: str) -> None:
+    """Upstream: expiry_test.rb "expires records when the cache is full". Writing past the byte
+    budget evicts oldest (FIFO) entries so the total stays bounded.
+
+    auto_expire is OFF and run_once() is driven in the foreground so the test is deterministic
+    and synchronous (the real probabilistic background trigger is exercised separately, below).
+    firm's eviction is *approximately* FIFO — each run pulls the oldest ``batch*3`` rows as
+    candidates and randomly samples ``batch`` of them — so the load-bearing invariant is that
+    the byte total stays bounded, not that any one specific id is removed."""
+    budget = 2000  # holds ~13 small rows; eviction settles well clear of the newest writes
+    n_writes = 60
+    cache = Cache(
+        database_url=db_url,
+        max_size=budget,
+        max_age=None,
+        max_entries=None,
+        expiry_batch_size=2,
+        size_estimate_samples=10000,
+        auto_expire=False,
+    )
+    try:
+        for i in range(n_writes):
+            cache.set(f"k{i:03d}", "x")
+            cache.expiry.run_once()  # mimic the per-write trigger, deterministically
+
+        # Drain any backlog deterministically.
+        for _ in range(n_writes):
+            if cache.expiry.run_once() == 0:
+                break
+
+        with transaction(cache.engine) as conn:
+            total = estimate_size(conn, samples=10000)
+            count = entry_count(conn)
+        # The total settles within one eviction batch of the budget.
+        per_row = compute_byte_size(normalize_key("k000"), cache.coder.dumps("x"), False)
+        assert total <= budget + cache.expiry_batch_size * per_row
+        # We wrote far more than the budget, so eviction must have happened.
+        assert count < n_writes
+        # The most-recently written key survives (it stays clear of the oldest-rows candidate
+        # window that eviction samples from).
+        assert cache.get(f"k{n_writes - 1:03d}") == "x"
+    finally:
+        cache.close()
+
+
+def test_maybe_trigger_runs_when_random_below_threshold(db_url: str, monkeypatch) -> None:
+    """Upstream: expiry_test.rb "expires when random number is below threshold". Force the RNG
+    below the fractional threshold and assert a run is submitted."""
+    cache = Cache(
+        database_url=db_url,
+        max_size=None,
+        max_age=None,
+        auto_expire=True,
+        expiry_batch_size=100,
+    )
+    try:
+        runs: list[int] = []
+        monkeypatch.setattr(cache.expiry._pool, "submit", lambda fn: runs.append(1))
+        # expected = 1 * (1/100)*2 = 0.02; runs=0, fractional part=0.02. random < 0.02 -> +1 run.
+        monkeypatch.setattr(random, "random", lambda: 0.0)
+        cache.expiry.maybe_trigger(1)
+        assert len(runs) == 1
+    finally:
+        cache.close()
+
+
+def test_maybe_trigger_skips_when_random_above_threshold(db_url: str, monkeypatch) -> None:
+    """Upstream: expiry_test.rb "doesn't expire when above threshold"."""
+    cache = Cache(
+        database_url=db_url,
+        max_size=None,
+        max_age=None,
+        auto_expire=True,
+        expiry_batch_size=100,
+    )
+    try:
+        runs: list[int] = []
+        monkeypatch.setattr(cache.expiry._pool, "submit", lambda fn: runs.append(1))
+        # random >= fractional part (0.02) -> no extra run, and expected<1 so 0 base runs.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        cache.expiry.maybe_trigger(1)
+        assert runs == []
+    finally:
+        cache.close()
+
+
+def test_maybe_trigger_scales_with_write_count(db_url: str, monkeypatch) -> None:
+    """Upstream: expiry_test.rb "triggers multiple expiry tasks when there are many writes". A bulk
+    write count triggers proportionally (writes * 2 / batch_size base runs)."""
+    batch = 100
+    cache = Cache(
+        database_url=db_url,
+        max_size=None,
+        max_age=None,
+        auto_expire=True,
+        expiry_batch_size=batch,
+    )
+    try:
+        runs: list[int] = []
+        monkeypatch.setattr(cache.expiry._pool, "submit", lambda fn: runs.append(1))
+        # No fractional rounding contribution: keep random high so only the integer base counts.
+        monkeypatch.setattr(random, "random", lambda: 0.99)
+        writes = 5000
+        cache.expiry.maybe_trigger(writes)
+        expected_runs = int(writes * (1.0 / batch) * EXPIRY_MULTIPLIER)  # 5000*0.02 = 100
+        assert len(runs) == expected_runs
+        assert expected_runs > 1
     finally:
         cache.close()

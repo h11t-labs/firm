@@ -7,6 +7,7 @@ that is gone — a claim written with ``process_id NULL`` is invisible to recove
 
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 from sqlalchemy import select
 
@@ -70,3 +71,89 @@ def test_work_registers_a_heartbeated_process(db_url, engine, monkeypatch) -> No
     # The process row is deregistered on shutdown.
     with engine.connect() as conn:
         assert conn.execute(select(schema.processes.c.id)).first() is None
+
+
+# --- supervisor mode selection (upstream: cli_test.rb) ----------------------------------------
+
+
+class _FakeSupervisor:
+    """Stand-in so ``start`` records the chosen mode without forking or blocking on its run loop."""
+
+    selected: str | None = None
+
+    def __init__(self, runtime: object, config: object) -> None:
+        self.runtime = runtime
+        self.config = config
+
+    def start(self) -> None:
+        type(self)._record()
+
+    def stop(self) -> None:  # used only by the thread branch
+        pass
+
+    @classmethod
+    def _record(cls) -> None:  # pragma: no cover - overridden per subclass
+        raise NotImplementedError
+
+
+class _FakeForkSupervisor(_FakeSupervisor):
+    @classmethod
+    def _record(cls) -> None:
+        _FakeSupervisor.selected = "fork"
+
+
+class _FakeThreadSupervisor(_FakeSupervisor):
+    @classmethod
+    def _record(cls) -> None:
+        _FakeSupervisor.selected = "thread"
+
+
+@pytest.fixture
+def patched_supervisors(monkeypatch: pytest.MonkeyPatch) -> type[_FakeSupervisor]:
+    """Replace the supervisor classes ``start`` instantiates, and stub the DB ``configure`` so no
+    engine is created. The thread branch's ``while True: time.sleep(1)`` is interrupted at once."""
+    _FakeSupervisor.selected = None
+    monkeypatch.setattr(cli, "ForkSupervisor", _FakeForkSupervisor)
+    monkeypatch.setattr(cli, "ThreadSupervisor", _FakeThreadSupervisor)
+    monkeypatch.setattr(cli, "configure", lambda database_url: object())
+
+    def _interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", _interrupt)
+    return _FakeSupervisor
+
+
+def test_mode_defaults_to_fork(patched_supervisors: type[_FakeSupervisor]) -> None:
+    # upstream: cli_test.rb "mode defaults to fork when there is no env var or option".
+    result = CliRunner().invoke(cli.main, ["start", "--database-url", "sqlite://"])
+    assert result.exit_code == 0, result.output
+    assert patched_supervisors.selected == "fork"
+
+
+def test_mode_option_selects_thread(patched_supervisors: type[_FakeSupervisor]) -> None:
+    # upstream: cli_test.rb mode-override variant: --mode thread selects the thread supervisor.
+    result = CliRunner().invoke(
+        cli.main, ["start", "--database-url", "sqlite://", "--mode", "thread"]
+    )
+    assert result.exit_code == 0, result.output
+    assert patched_supervisors.selected == "thread"
+
+
+def test_mode_option_selects_fork_explicitly(patched_supervisors: type[_FakeSupervisor]) -> None:
+    # The explicit --mode fork form also selects the fork supervisor.
+    result = CliRunner().invoke(
+        cli.main, ["start", "--database-url", "sqlite://", "--mode", "fork"]
+    )
+    assert result.exit_code == 0, result.output
+    assert patched_supervisors.selected == "fork"
+
+
+def test_mode_env_var_override(
+    patched_supervisors: type[_FakeSupervisor], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # upstream: cli_test.rb env-var variant: FIRM_QUEUE_MODE picks the mode without --mode.
+    monkeypatch.setenv("FIRM_QUEUE_MODE", "thread")
+    result = CliRunner().invoke(cli.main, ["start", "--database-url", "sqlite://"])
+    assert result.exit_code == 0, result.output
+    assert patched_supervisors.selected == "thread"

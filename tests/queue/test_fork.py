@@ -151,3 +151,64 @@ def test_fork_supervisor_sigkills_undrained_child_and_recovers_claim(
     assert count(schema.claimed_executions) == 0  # ...but the parent recovered its claim
     assert count(schema.ready_executions) == 1  # re-readied for a future worker
     assert count(schema.processes) == 0  # every child + the supervisor deregistered on exit
+
+
+def _start_supervisor_child(runtime: Runtime, shutdown_timeout: float = 2.0) -> int:
+    """Fork a ForkSupervisor child (mirrors the drain test above); return its pid in the parent."""
+    pid = os.fork()
+    if pid == 0:  # child
+        try:
+            runtime.reset()
+            ForkSupervisor(
+                runtime,
+                SupervisorConfig(
+                    workers=[WorkerConfig(poll_interval=0.02)],
+                    dispatchers=[DispatcherConfig(poll_interval=0.05)],
+                    shutdown_timeout=shutdown_timeout,
+                ),
+            ).start()
+        finally:
+            os._exit(0)
+    return pid
+
+
+def test_fork_supervisor_drains_on_sigint(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: forked_processes_lifecycle_test.rb — SIGINT drains like SIGTERM. ForkSupervisor
+    # maps SIGINT and SIGTERM both to a graceful stop, so an INT drains in-flight work and exits
+    # cleanly with no leftover claims.
+    fork_job.enqueue(1)
+    fork_job.enqueue(2)
+    pid = _start_supervisor_child(runtime)
+
+    drained = _wait_until(lambda: _finished(engine) == 2, timeout=15.0)
+    os.kill(pid, signal.SIGINT)
+    _, status = os.waitpid(pid, 0)
+
+    assert drained
+    assert os.WIFEXITED(status) or os.WIFSIGNALED(status)
+    assert count(schema.claimed_executions) == 0
+
+
+def test_fork_supervisor_double_term_is_idempotent(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: forked_processes_lifecycle_test.rb — sending the term signal twice is idempotent:
+    # a second SIGTERM during shutdown must not corrupt it (still exits cleanly, no claims left).
+    import contextlib
+
+    fork_job.enqueue(1)
+    fork_job.enqueue(2)
+    pid = _start_supervisor_child(runtime)
+
+    drained = _wait_until(lambda: _finished(engine) == 2, timeout=15.0)
+    os.kill(pid, signal.SIGTERM)
+    time.sleep(0.05)  # second term while it is shutting down
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    _, status = os.waitpid(pid, 0)
+
+    assert drained
+    assert os.WIFEXITED(status) or os.WIFSIGNALED(status)
+    assert count(schema.claimed_executions) == 0
