@@ -29,6 +29,39 @@ def test_register_heartbeat_deregister(engine: Engine, count: Callable[..., int]
     assert count(schema.processes) == 0
 
 
+def test_hostname_with_special_characters_round_trips(
+    engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: process_test.rb "hostname's with special characters are properly loaded". A
+    # process registered with an odd hostname and metadata round-trips byte-for-byte.
+    odd_hostname = "hosté-ü.local:8080 (replica #1)"
+    odd_metadata = '{"hostname":"hosté","tags":["a/b","c d"]}'
+    pid = pr.register(
+        engine,
+        pr.ProcessInfo(
+            kind="Worker",
+            name="worker-special",
+            pid=4242,
+            hostname=odd_hostname,
+            metadata=odd_metadata,
+        ),
+    )
+    assert count(schema.processes) == 1
+    with engine.connect() as conn:
+        row = conn.execute(
+            select(
+                schema.processes.c.hostname,
+                schema.processes.c.metadata,
+                schema.processes.c.name,
+                schema.processes.c.pid,
+            ).where(schema.processes.c.id == pid)
+        ).one()
+    assert row.hostname == odd_hostname
+    assert row.metadata == odd_metadata
+    assert row.name == "worker-special"
+    assert row.pid == 4242
+
+
 def test_heartbeat_raises_when_process_row_missing(
     engine: Engine, count: Callable[..., int]
 ) -> None:

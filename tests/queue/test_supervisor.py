@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import Engine, func, select
 
 import firm.queue as bq
@@ -14,10 +15,12 @@ from firm._core.config import Runtime
 from firm.queue import schema
 from firm.queue.supervisor import (
     DispatcherConfig,
+    SchedulerConfig,
     SupervisorConfig,
     ThreadSupervisor,
     WorkerConfig,
 )
+from firm.queue.worker import Worker
 
 _SINK: list[int] = []
 
@@ -198,3 +201,87 @@ def test_concurrency_maintenance_can_be_disabled(runtime: Runtime) -> None:
     loops = _build_loops(runtime, DispatcherConfig(concurrency_maintenance=False), [], None)
     assert any(isinstance(loop, DispatcherLoop) for loop in loops)
     assert not any(isinstance(loop, MaintenanceLoop) for loop in loops)
+
+
+def test_default_configuration_processes_all_queues_and_dispatches() -> None:
+    # upstream: configuration_test.rb "default configuration to process all queues and dispatch".
+    # With no explicit queues a default config yields a worker over every queue ("*") plus a
+    # dispatcher (and no scheduler).
+    config = SupervisorConfig()
+
+    assert len(config.workers) == 1
+    assert config.workers[0].queues == ("*",)
+    assert len(config.dispatchers) == 1
+    assert isinstance(config.dispatchers[0], DispatcherConfig)
+
+    children = config.child_configs()
+    assert any(isinstance(c, WorkerConfig) and c.queues == ("*",) for c in children)
+    assert any(isinstance(c, DispatcherConfig) for c in children)
+    assert not any(isinstance(c, SchedulerConfig) for c in children)
+
+
+def test_invalid_configuration_is_rejected() -> None:
+    # upstream: configuration_test.rb "validate configuration". A config with no workers,
+    # dispatchers, or recurring tasks has nothing to run and is rejected at construction.
+    with pytest.raises(ValueError):
+        SupervisorConfig(workers=[], dispatchers=[])
+
+
+def test_multiple_workers_with_the_same_configuration_are_independent() -> None:
+    # upstream: configuration_test.rb "mulitple workers with the same configuration". Building N
+    # workers from one template yields N independent WorkerConfig objects.
+    template = WorkerConfig(queues=("default",), threads=5)
+    workers = [WorkerConfig(queues=template.queues, threads=template.threads) for _ in range(3)]
+    config = SupervisorConfig(workers=workers)
+
+    assert len(config.workers) == 3
+    for worker in config.workers:
+        assert worker.queues == ("default",)
+        assert worker.threads == 5
+
+    # Independent instances: mutating one must not affect the others.
+    config.workers[0].threads = 1
+    assert [w.threads for w in config.workers] == [1, 5, 5]
+    assert len([c for c in config.child_configs() if isinstance(c, WorkerConfig)]) == 3
+
+
+def test_no_scheduler_without_static_recurring_tasks() -> None:
+    # upstream: configuration_test.rb "no recurring scheduler is set up when there are no static
+    # recurring tasks". With recurring=[] no SchedulerConfig child is created.
+    config = SupervisorConfig()
+    assert config.recurring == []
+    assert not any(isinstance(c, SchedulerConfig) for c in config.child_configs())
+
+
+_PROCESSED: list[int] = []
+
+
+@bq.job()
+def _pool_job(value: int) -> None:
+    _PROCESSED.append(value)
+
+
+def test_worker_processes_more_jobs_than_pool_size(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: worker_test.rb "claim and process more enqueued jobs than the pool size allows to
+    # process at once". Enqueue more jobs than the worker's pool size; all are eventually run.
+    _PROCESSED.clear()
+    pool_size = 2
+    total = pool_size * 3  # comfortably more than one pool-full
+
+    for i in range(total):
+        _pool_job.enqueue(i)
+
+    worker = Worker(runtime, threads=pool_size, poll_interval=0.01)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and len(_PROCESSED) < total:
+            time.sleep(0.02)
+    finally:
+        worker.stop()
+
+    assert sorted(_PROCESSED) == list(range(total))
+    assert count(schema.ready_executions) == 0
+    assert count(schema.claimed_executions) == 0

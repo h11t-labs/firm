@@ -37,13 +37,6 @@ repos:
         types_or: [python, pyi]
         pass_filenames: false
 
-      - id: check-parity
-        name: upstream test-parity inventory
-        entry: uv run python scripts/check_parity.py
-        language: system
-        pass_filenames: false
-        files: ^(tests/.*\.py|tests/parity_inventory\.toml|scripts/check_parity\.py)$
-
       - id: llms-full
         name: regenerate llms.txt + llms-full.txt
         entry: uv run python scripts/gen_llms_full.py

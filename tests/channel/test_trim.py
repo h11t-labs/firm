@@ -9,6 +9,7 @@ from sqlalchemy import insert, select
 
 from firm._core.clock import now_utc
 from firm.channel import Channel, schema
+from firm.channel.channel import DEFAULT_TRIM_BATCH_SIZE
 
 _messages = schema.messages
 
@@ -75,3 +76,14 @@ def test_auto_trim_triggers_trim_on_broadcast(db_url: str, wait_for: Callable) -
         assert b"new" in payloads()  # the fresh broadcast survived
     finally:
         ps.close()
+
+
+def test_default_trim_batch_size_is_100(db_url: str) -> None:
+    # Upstream: solid_cable_test.rb "default trim_batch_size is 100".
+    assert DEFAULT_TRIM_BATCH_SIZE == 100
+    # The Channel constructor default mirrors the module constant.
+    ch = Channel(database_url=db_url)
+    try:
+        assert ch.trim_batch_size == 100
+    finally:
+        ch.close()
