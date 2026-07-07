@@ -1,0 +1,63 @@
+[project]
+name = "firm-stack"
+version = "0.1.0"
+description = "Pure-Python ports of the Rails Solid stack: database-backed background jobs (queue), caching (cache), pub/sub (channel), and an append-only audit log. No Redis required. This is a meta-package: pick modules via extras — firm-stack[queue], firm-stack[cache], firm-stack[channel], firm-stack[audit], or firm-stack[all]."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "firm contributors" }]
+keywords = [
+    "jobs", "queue", "cache", "channel", "audit", "background", "tasks",
+    "sqlite", "postgresql", "mysql", "solid_queue", "solid_cache", "solid_cable",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
+# Extras-only meta-package: `pip install "firm-stack[queue]"` really does install just that
+# module (each module is its own PyPI package; they share the `firm.*` namespace). A bare
+# `pip install firm-stack` installs no modules — pick at least one extra.
+#
+# firm-stack is the interim name for the `firm` meta-package while the PyPI name transfer is
+# pending (PEP 541, https://github.com/pypi/support/issues/11384). Keep this file and
+# packages/firm/pyproject.toml in lockstep: same extras, same pins.
+dependencies = []
+
+[project.optional-dependencies]
+queue = ["firm-queue~=0.1.0"]              # background jobs
+cache = ["firm-cache~=0.1.0"]              # cache store
+channel = ["firm-channel~=0.1.0"]          # pub/sub
+audit = ["firm-audit~=0.1.0"]              # append-only audit log
+ui = ["firm-ui~=0.1.0"]                     # web dashboard (pulls all four modules)
+flask = ["firm-queue[flask]~=0.1.0"]       # Flask integration (contrib)
+fastapi = ["firm-queue[fastapi]~=0.1.0"]  # FastAPI integration (contrib)
+postgres = ["firm-core[postgres]~=0.1.0"] # PostgreSQL driver
+mysql = ["firm-core[mysql]~=0.1.0"]       # MySQL / MariaDB driver
+encryption = ["firm-cache[encryption]~=0.1.0"]  # cache at-rest encryption
+msgpack = ["firm-cache[msgpack]~=0.1.0"]  # cache msgpack coder
+all = [
+    "firm-ui~=0.1.0",
+    "firm-queue[flask,fastapi]~=0.1.0",
+    "firm-core[postgres,mysql]~=0.1.0",
+    "firm-cache[encryption,msgpack]~=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/h11t-labs/firm"
+Documentation = "https://github.com/h11t-labs/firm/tree/main/docs"
+Repository = "https://github.com/h11t-labs/firm"
+Issues = "https://github.com/h11t-labs/firm/issues"
+
+# Metadata-only distribution (no importable module of its own — `import firm` is provided by
+# the namespace sub-packages). hatchling builds a module-less wheel cleanly.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true

@@ -118,11 +118,14 @@ meta-package's extras pin modules with `~=`, so a meta-package release is only n
 pins change.
 
 > **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
-> [PEP 541](https://peps.python.org/pep-0541/) name-transfer request is pending. Until it's
-> granted, the release workflow excludes the meta-package from `v*` all-package tags (see the
-> `rm dist/firm-[0-9]*` line in `release.yml`), and docs use the per-package install form
-> (`pip install firm-queue`). Once the name is ours: remove that line, publish the meta with a
-> `firm-v<ver>` tag, and the `firm[queue]` extras form starts working.
+> [PEP 541 name-transfer request](https://github.com/pypi/support/issues/11384) is pending.
+> Until it's granted, the release workflow excludes the meta-package from `v*` all-package tags
+> (see the `rm dist/firm-[0-9]*` line in `release.yml`), docs use the per-package install form
+> (`pip install firm-queue`), and the extras form is provided by the interim
+> [`firm-stack`](https://pypi.org/project/firm-stack/) meta-package (`packages/firm-stack/` —
+> keep its extras/pins in lockstep with `packages/firm/`). Once the name is ours: remove that
+> `rm` line, publish the meta with a `firm-v<ver>` tag, and the `firm[queue]` extras form starts
+> working; `firm-stack` then stays as a compatible alias.
 
 ## Building the docs
 

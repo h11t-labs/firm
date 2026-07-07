@@ -10,6 +10,7 @@ members = [
     "firm-channel",
     "firm-core",
     "firm-queue",
+    "firm-stack",
     "firm-ui",
 ]
 
@@ -608,6 +609,72 @@ requires-dist = [
     { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0" },
 ]
 provides-extras = ["flask", "fastapi", "postgres", "mysql"]
+
+[[package]]
+name = "firm-stack"
+version = "0.1.0"
+source = { editable = "packages/firm-stack" }
+
+[package.optional-dependencies]
+all = [
+    { name = "firm-cache", extra = ["encryption", "msgpack"] },
+    { name = "firm-core", extra = ["mysql", "postgres"] },
+    { name = "firm-queue", extra = ["fastapi", "flask"] },
+    { name = "firm-ui" },
+]
+audit = [
+    { name = "firm-audit" },
+]
+cache = [
+    { name = "firm-cache" },
+]
+channel = [
+    { name = "firm-channel" },
+]
+encryption = [
+    { name = "firm-cache", extra = ["encryption"] },
+]
+fastapi = [
+    { name = "firm-queue", extra = ["fastapi"] },
+]
+flask = [
+    { name = "firm-queue", extra = ["flask"] },
+]
+msgpack = [
+    { name = "firm-cache", extra = ["msgpack"] },
+]
+mysql = [
+    { name = "firm-core", extra = ["mysql"] },
+]
+postgres = [
+    { name = "firm-core", extra = ["postgres"] },
+]
+queue = [
+    { name = "firm-queue" },
+]
+ui = [
+    { name = "firm-ui" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "firm-audit", marker = "extra == 'audit'", editable = "packages/firm-audit" },
+    { name = "firm-cache", marker = "extra == 'cache'", editable = "packages/firm-cache" },
+    { name = "firm-cache", extras = ["encryption"], marker = "extra == 'encryption'", editable = "packages/firm-cache" },
+    { name = "firm-cache", extras = ["encryption", "msgpack"], marker = "extra == 'all'", editable = "packages/firm-cache" },
+    { name = "firm-cache", extras = ["msgpack"], marker = "extra == 'msgpack'", editable = "packages/firm-cache" },
+    { name = "firm-channel", marker = "extra == 'channel'", editable = "packages/firm-channel" },
+    { name = "firm-core", extras = ["mysql"], marker = "extra == 'mysql'", editable = "packages/firm-core" },
+    { name = "firm-core", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/firm-core" },
+    { name = "firm-core", extras = ["postgres", "mysql"], marker = "extra == 'all'", editable = "packages/firm-core" },
+    { name = "firm-queue", marker = "extra == 'queue'", editable = "packages/firm-queue" },
+    { name = "firm-queue", extras = ["fastapi"], marker = "extra == 'fastapi'", editable = "packages/firm-queue" },
+    { name = "firm-queue", extras = ["flask"], marker = "extra == 'flask'", editable = "packages/firm-queue" },
+    { name = "firm-queue", extras = ["flask", "fastapi"], marker = "extra == 'all'", editable = "packages/firm-queue" },
+    { name = "firm-ui", marker = "extra == 'all'", editable = "packages/firm-ui" },
+    { name = "firm-ui", marker = "extra == 'ui'", editable = "packages/firm-ui" },
+]
+provides-extras = ["queue", "cache", "channel", "audit", "ui", "flask", "fastapi", "postgres", "mysql", "encryption", "msgpack", "all"]
 
 [[package]]
 name = "firm-ui"
