@@ -117,6 +117,13 @@ Versions follow semver-ish pre-1.0 rules: breaking changes bump the minor versio
 meta-package's extras pin modules with `~=`, so a meta-package release is only needed when those
 pins change.
 
+> **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
+> [PEP 541](https://peps.python.org/pep-0541/) name-transfer request is pending. Until it's
+> granted, the release workflow excludes the meta-package from `v*` all-package tags (see the
+> `rm dist/firm-[0-9]*` line in `release.yml`), and docs use the per-package install form
+> (`pip install firm-queue`). Once the name is ours: remove that line, publish the meta with a
+> `firm-v<ver>` tag, and the `firm[queue]` extras form starts working.
+
 ## Building the docs
 
 The documentation site is built with [Zensical](https://zensical.org) (configured in

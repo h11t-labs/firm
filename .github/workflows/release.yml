@@ -59,6 +59,11 @@ jobs:
             uv build --package "$PACKAGE"
           else
             uv build --all-packages
+            # TEMPORARY: the PyPI name "firm" is squatted (registered, no releases) and a
+            # PEP 541 name-transfer request is pending. Publishing the meta-package would 403
+            # and abort the whole upload, so drop it from all-package releases until the name
+            # is ours. Remove these two lines once the transfer is granted.
+            rm -f dist/firm-[0-9]*
           fi
       - name: Check metadata renders
         run: uvx twine check dist/*

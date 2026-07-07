@@ -12,8 +12,8 @@ Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick wit
 | MySQL / MariaDB | `mysql+pymysql://user:pw@host/db`      | [PyMySQL](https://pymysql.readthedocs.io/) | `…[mysql]`    |
 
 ```bash
-pip install "firm[queue,postgres]"   # queue on PostgreSQL  (or [queue,mysql])
-pip install "firm[cache,postgres]"   # cache on PostgreSQL  (or [cache,mysql])
+pip install "firm-queue[postgres]"   # queue on PostgreSQL  (or [mysql])
+pip install "firm-cache[postgres]"   # cache on PostgreSQL  (or [mysql])
 ```
 
 **Bare URLs are normalized for you:** `postgresql://…` becomes `postgresql+psycopg://…` and

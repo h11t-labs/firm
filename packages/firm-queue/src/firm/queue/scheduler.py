@@ -31,7 +31,7 @@ try:
     from croniter import croniter
 except ImportError as exc:  # pragma: no cover - exercised only without the 'queue' extra
     raise ImportError(
-        'Recurring tasks require "croniter". Install the queue extra: pip install "firm[queue]"'
+        'Recurring tasks require "croniter". Reinstall the queue package: pip install firm-queue'
     ) from exc
 from .job import Job
 from .serialization import serialize

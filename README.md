@@ -16,17 +16,17 @@ SQL database, no Redis required.
 > ([solid_queue](https://github.com/rails/solid_queue), [solid_cache](https://github.com/rails/solid_cache),
 > [solid_cable](https://github.com/rails/solid_cable)).
 
-**One package, four independent modules** — install only the one you need:
+**One namespace, four independent modules** — install only the one you need:
 
 | Module | Install | Ports | Highlights |
 |---|---|---|---|
-| **[queue](docs/queue/overview.md)** | `pip install "firm[queue]"` | `solid_queue` — background jobs | concurrency controls, recurring tasks, retries, forked/threaded supervisor, crash recovery |
-| **[cache](docs/cache/overview.md)** | `pip install "firm[cache]"` | `solid_cache` — cache store | FIFO age/size/count eviction, pluggable coders, at-rest encryption |
-| **[channel](docs/channel/overview.md)** | `pip install "firm[channel]"` | `solid_cable` — pub/sub | broadcast/subscribe over your database, polling listener, automatic message trimming |
-| **[audit](docs/audit/overview.md)** | `pip install "firm[audit]"` | *(none — original to firm)* | append-only audit log, opt-in retention, `history()` querying |
+| **[queue](docs/queue/overview.md)** | `pip install firm-queue` | `solid_queue` — background jobs | concurrency controls, recurring tasks, retries, forked/threaded supervisor, crash recovery |
+| **[cache](docs/cache/overview.md)** | `pip install firm-cache` | `solid_cache` — cache store | FIFO age/size/count eviction, pluggable coders, at-rest encryption |
+| **[channel](docs/channel/overview.md)** | `pip install firm-channel` | `solid_cable` — pub/sub | broadcast/subscribe over your database, polling listener, automatic message trimming |
+| **[audit](docs/audit/overview.md)** | `pip install firm-audit` | *(none — original to firm)* | append-only audit log, opt-in retention, `history()` querying |
 
-Add database drivers and features as extras — `firm[queue,postgres]`,
-`firm[cache,encryption]`, … (see **[Installation](docs/installation.md)**). All four modules run
+Add database drivers and features as extras — `firm-queue[postgres]`,
+`firm-cache[encryption]`, … (see **[Installation](docs/installation.md)**). All four modules run
 on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB** — verified live against all three. The top-level
 package imports nothing heavy, so a queue-only process never loads the cache, pub/sub, or audit code.
 

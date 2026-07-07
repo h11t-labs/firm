@@ -7,7 +7,7 @@ existing **SQLite**, **PostgreSQL**, or **MySQL/MariaDB** database.
 Part of [firm](https://github.com/h11t-labs/firm), a port of the Rails 8 Solid stack.
 
 ```bash
-pip install firm-queue            # or: pip install "firm[queue]"
+pip install firm-queue
 pip install "firm-queue[postgres]"  # with the PostgreSQL driver
 ```
 

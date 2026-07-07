@@ -191,7 +191,7 @@ cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 Pass `encrypt_key` to encrypt the serialized bytes with Fernet. This needs the `encryption` extra (`cryptography`). The key is a standard Fernet key (str or bytes).
 
 ```bash
-pip install "firm[cache,encryption]"
+pip install "firm-cache[encryption]"
 ```
 
 ```python

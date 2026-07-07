@@ -7,7 +7,7 @@ your existing **SQLite**, **PostgreSQL**, or **MySQL/MariaDB** database.
 Part of [firm](https://github.com/h11t-labs/firm), a port of the Rails 8 Solid stack.
 
 ```bash
-pip install firm-channel          # or: pip install "firm[channel]"
+pip install firm-channel
 ```
 
 ## Quickstart

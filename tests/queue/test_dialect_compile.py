@@ -84,7 +84,7 @@ def test_missing_driver_gives_actionable_error(monkeypatch) -> None:
     from firm._core.database import _require_driver
 
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    with pytest.raises(ImportError, match=r"firm\[postgres\]"):
+    with pytest.raises(ImportError, match=r"firm-core\[postgres\]"):
         _require_driver("postgresql+psycopg://localhost/x")
-    with pytest.raises(ImportError, match=r"firm\[mysql\]"):
+    with pytest.raises(ImportError, match=r"firm-core\[mysql\]"):
         _require_driver("mysql+pymysql://localhost/x")

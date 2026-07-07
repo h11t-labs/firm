@@ -5,7 +5,7 @@ Optional web dashboard for [firm](https://github.com/h11t-labs/firm) — watch a
 HTTP server with Jinja2 templates; nothing else in firm imports it.
 
 ```bash
-pip install firm-ui               # or: pip install "firm[ui]"
+pip install firm-ui
 ```
 
 ## Run it

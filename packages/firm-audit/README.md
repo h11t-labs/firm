@@ -7,7 +7,7 @@ Part of [firm](https://github.com/h11t-labs/firm), a port of the Rails 8 Solid s
 audit module is original to firm (it has no Rails counterpart).
 
 ```bash
-pip install firm-audit            # or: pip install "firm[audit]"
+pip install firm-audit
 ```
 
 ## Quickstart

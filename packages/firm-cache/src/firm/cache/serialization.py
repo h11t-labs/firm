@@ -66,7 +66,7 @@ def build_encrypted_coder(inner: Coder, key: str | bytes | Sequence[str | bytes]
     except ImportError as exc:
         raise ImportError(
             'At-rest cache encryption requires "cryptography". Install the encryption extra: '
-            'pip install "firm[cache,encryption]"'
+            'pip install "firm-cache[encryption]"'
         ) from exc
 
     if isinstance(key, str | bytes):

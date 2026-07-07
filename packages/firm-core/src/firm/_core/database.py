@@ -46,7 +46,7 @@ def _require_driver(url: str) -> None:
         if url.startswith(prefix) and importlib.util.find_spec(module) is None:
             raise ImportError(
                 f'The {extra} driver "{module}" is not installed. Install the {extra} extra: '
-                f'pip install "firm[{extra}]"'
+                f'pip install "firm-core[{extra}]"'
             )
 
 

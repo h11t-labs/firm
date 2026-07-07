@@ -16,7 +16,7 @@ Cache(database_url=..., coder=PickleCoder())   # arbitrary objects — read the 
 A custom coder is anything with `dumps(value) -> bytes` and `loads(bytes) -> value`:
 
 ```python
-import msgpack   # pip install "firm[cache,msgpack]"
+import msgpack   # pip install "firm-cache[msgpack]"
 
 class MsgpackCoder:
     def dumps(self, value): return msgpack.packb(value, use_bin_type=True)
@@ -36,7 +36,7 @@ Cache(database_url=..., coder=MsgpackCoder())
 Wrap any coder with Fernet encryption by passing an `encrypt_key`:
 
 ```python
-from cryptography.fernet import Fernet   # pip install "firm[cache,encryption]"
+from cryptography.fernet import Fernet   # pip install "firm-cache[encryption]"
 
 key = Fernet.generate_key()              # store this securely
 cache = Cache(database_url=..., encrypt_key=key)
