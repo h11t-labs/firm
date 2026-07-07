@@ -16,7 +16,7 @@ SQL database, no Redis required.
 > ([solid_queue](https://github.com/rails/solid_queue), [solid_cache](https://github.com/rails/solid_cache),
 > [solid_cable](https://github.com/rails/solid_cable)).
 
-**📚 Documentation: [h11t-labs.nl/firm](https://h11t-labs.nl/firm/)**
+**📚 Documentation: [h11t-labs.github.io/firm](https://h11t-labs.github.io/firm/)**
 
 **One namespace, four independent modules** — install only the one you need:
 

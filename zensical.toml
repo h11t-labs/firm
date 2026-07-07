@@ -3,7 +3,7 @@
 
 [project]
 site_name = "firm"
-site_url = "https://h11t-labs.nl/firm/"
+site_url = "https://h11t-labs.github.io/firm/"
 site_description = "Pure-Python ports of the Rails Solid stack — database-backed background jobs, caching, and pub/sub, no Redis required."
 site_author = "firm contributors"
 repo_url = "https://github.com/h11t-labs/firm"
