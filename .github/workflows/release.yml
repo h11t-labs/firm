@@ -102,7 +102,9 @@ jobs:
         run: uv publish --check-url https://pypi.org/simple/ dist/*
 
   # Create a GitHub Release for the tag once the PyPI upload succeeded: the changelog section
-  # for the released version as the body, with auto-generated notes (PR titles) appended.
+  # for the released version is the entire body. No --generate-notes: it has no path filter, so
+  # for a single-package tag it would list every PR merged since whatever release GitHub
+  # considers "previous" — often an unrelated package's tag — not just this package's changes.
   github-release:
     needs: [build, publish]
     runs-on: ubuntu-latest
@@ -138,4 +140,4 @@ jobs:
       - name: Create GitHub Release
         run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag \
-            --title "$GITHUB_REF_NAME" --notes-file body.md --generate-notes
+            --title "$GITHUB_REF_NAME" --notes-file body.md

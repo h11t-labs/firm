@@ -4419,8 +4419,9 @@ namespace but carry their own versions). Publishing is fully automated through
 [`.github/workflows/release.yml`](../.github/workflows/release.yml) using
 [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/) — there are no PyPI tokens
 to manage. The workflow checks the changelog, builds, runs the test suite, `twine check`s,
-uploads, and finishes by creating a GitHub Release for the tag (the changelog section as the
-body, with auto-generated notes appended).
+uploads, and finishes by creating a GitHub Release for the tag — the changelog section for the
+released version is the entire body (no auto-generated PR list: it isn't path-aware and would
+pull in unrelated packages' PRs).
 
 ### Changelogs
 
