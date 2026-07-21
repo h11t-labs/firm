@@ -30,6 +30,14 @@ to delete. Ranges at or below the checkpoint floor are already pruned and out of
 The checkpoint is exported to the anchor like any other seal, so a later ``verify --anchor`` never
 mistakes the pruned-away anchored seal for a tail truncation.
 
+**Retention needs the seal key.** The checkpoint it writes is a seal, so it must be signed by the
+seal key that owns the chain. In a two-key deployment (a distinct ``FIRM_AUDIT_SEAL_KEY``) this
+means pruning runs on a sealer-role host: a host with only the row key would sign the checkpoint
+with the wrong key, so :meth:`run_once` detects that (the chain head was signed by a key other than
+this host's seal key), refuses the whole aligned prune loudly through ``on_error``, sets
+:attr:`last_refused_no_seal_key`, and leaves the table untouched. In single-key mode the seal key
+*is* the row key, so this never fires and pruning is unchanged.
+
 This gives retention a hidden dependency on sealer liveness (design outside voice #6): with a
 stalled sealer, nothing past the last seal is prunable and the table grows despite ``max_age``.
 That is made **loud, not silent** (review D15): :meth:`run_once` records the count of
@@ -78,6 +86,11 @@ class Retention:
         #: against their seal (a sealed row was edited/deleted/inserted). Pruning stops at the first
         #: such range so its evidence is preserved; each refusal also routes through ``on_error``.
         self.last_refused_tampered = 0
+        #: Set when the last :meth:`run_once` refused the *whole* aligned prune because this host
+        #: lacks the seal key that signs the chain (a two-key deployment running retention off a
+        #: non-sealer host). Writing a checkpoint here would sign it with the wrong key; refuse
+        #: loudly instead. Pruning must run on a sealer-role host.
+        self.last_refused_no_seal_key = False
 
     def run_once(self) -> int:
         """Delete rows older than ``max_age`` seconds, in batches; return how many were deleted. A
@@ -89,6 +102,7 @@ class Retention:
         """
         self.last_skipped_unsealed = 0
         self.last_refused_tampered = 0
+        self.last_refused_no_seal_key = False
         max_age = self.audit.max_age
         if max_age is None:
             return 0
@@ -135,6 +149,19 @@ class Retention:
         engine = self.audit.engine
         with engine.connect() as conn:
             seals = conn.execute(select(_seals).order_by(_seals.c.seq)).all()
+
+        # The aligned path WRITES a checkpoint seal, which must be signed by the seal key that owns
+        # this chain. In a two-key deployment, retention on a non-sealer host (row key only) would
+        # sign the checkpoint with the row key — a checkpoint a proper verifier rejects (the row
+        # key is not a seal signer), laundering nothing but also pruning nothing safely. Detect it
+        # by the head seal's signer: if it is not this host's seal key, refuse the whole aligned
+        # prune loudly and leave the table untouched. In single-key mode the head is signed by the
+        # one key (== the seal key), so this never fires. Pruning must run on a sealer-role host.
+        seal_key = self.audit._seal_key
+        if seals and seal_key is not None and seals[-1].key_id != seal_key.id:
+            self._refuse_no_seal_key(seals[-1])
+            return 0
+
         floor = max((s.to_id for s in seals if s.kind == "checkpoint"), default=0)
         max_sealed = max((s.to_id for s in seals), default=0)
         pruned_through = self._highest_prunable_boundary(seals, floor, cutoff)
@@ -171,6 +198,7 @@ class Retention:
         already pruned and out of scope."""
         covering = [s for s in seals if s.kind == "seal" and s.to_id > floor]
         keyring = self.audit.verifier.keyring
+        seal_keyring = self.audit.verifier.seal_keyring
         pruned_through = floor
         with self.audit.engine.connect() as conn:
             for seal in covering:
@@ -181,7 +209,7 @@ class Retention:
                 ).scalar()
                 if newest is not None and newest >= cutoff:
                     break  # a young range: nothing at or beyond it is prunable yet
-                if not range_is_intact(conn, seal, keyring):
+                if not range_is_intact(conn, seal, keyring, seal_keyring):
                     self._refuse_tampered(seal)
                     break  # refuse to prune tampered evidence; stop so the checkpoint can't skip it
                 pruned_through = seal.to_id
@@ -212,6 +240,23 @@ class Retention:
             )
         )
 
+    def _refuse_no_seal_key(self, head) -> None:
+        """Record and loudly surface an aligned prune refused because this host lacks the seal key
+        that signs the chain (a two-key deployment running retention off a non-sealer host). Nothing
+        is deleted; the refusal routes through ``on_error`` mirroring :meth:`_refuse_tampered`."""
+        self.last_refused_no_seal_key = True
+        seal_key = self.audit._seal_key
+        self.audit.on_error(
+            RuntimeError(
+                f"audit retention REFUSED to prune: the seal chain head (seq {head.seq}) was "
+                f"signed by key_id {head.key_id!r}, but this host's seal key is "
+                f"{seal_key.id if seal_key else None!r}. Retention writes a checkpoint seal and so "
+                "needs the seal key (FIRM_AUDIT_SEAL_KEY). In a two-key deployment, run pruning on "
+                "a sealer-role host that has it — signing a checkpoint with the row key would "
+                "produce a seal verify rejects."
+            )
+        )
+
     def _delete_through(self, floor: int, pruned_through: int) -> int:
         engine = self.audit.engine
         dialect = get_dialect(engine)
@@ -230,9 +275,7 @@ class Retention:
             if len(ids) < _BATCH_SIZE:
                 return total
 
-    def _write_checkpoint(
-        self, seals, *, from_id: int, to_id: int
-    ) -> tuple[int, str, datetime]:
+    def _write_checkpoint(self, seals, *, from_id: int, to_id: int) -> tuple[int, str, datetime]:
         """Append the checkpoint seal at the head and prune the covering seals it subsumes.
 
         The checkpoint covers ``(from_id, to_id]`` with no live rows left (``rows_mac`` over the
@@ -242,8 +285,8 @@ class Retention:
         what lets verify accept the missing front. Returns ``(seq, seal_mac, sealed_at)`` so the
         caller can export the new head to the anchor.
         """
-        key = self.audit._key
-        assert key is not None  # guarded by _sealing_active
+        key = self.audit._seal_key
+        assert key is not None  # guarded by _sealing_active (seal key defaults to the row key)
         engine = self.audit.engine
         with get_dialect(engine).begin_claim_tx(engine) as conn:
             head = conn.execute(select(_seals).order_by(_seals.c.seq.desc()).limit(1)).first()

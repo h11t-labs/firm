@@ -12,6 +12,13 @@ pre-1.0 (breaking changes bump the minor version).
   sealed rows (Layer 2, `firm_audit_seals`), and a `verify` pass with a dashboard integrity panel
   backed by `firm_audit_verify_status`. Inert without a configured `FIRM_AUDIT_KEY` — behavior and
   schema semantics are unchanged for a key-less deployment.
+- Optional **two-key split** for tamper-evidence: a separate seal key (`FIRM_AUDIT_SEAL_KEY` /
+  `AuditLog(seal_key=...)`) signs seals and checkpoints while the row key stays on every instance,
+  so an attacker who compromises an app instance can forge at most individual unsealed rows — the
+  seal chain stays out of reach. Opt-in and additive (no schema change): unset, or equal to
+  `mac_key`, is single-key mode and byte-identical to before. When set, sealing and retention's
+  checkpoint-writing become a designated sealer role (a host without the seal key does the existing
+  loud no-op for sealing, and refuses aligned pruning rather than checkpoint with the wrong key).
 
 ### Changed
 

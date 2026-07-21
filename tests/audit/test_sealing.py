@@ -410,7 +410,7 @@ def test_background_sealing_warns_and_starts_the_loop(db_url: str) -> None:
 
 
 def test_background_sealing_without_a_key_warns_loudly(db_url: str) -> None:
-    with pytest.warns(UserWarning, match="no FIRM_AUDIT_KEY"):
+    with pytest.warns(UserWarning, match="no seal key is configured"):
         audit = AuditLog(database_url=db_url, background_sealing=True, seal_interval=0.05)
     audit.close()
 

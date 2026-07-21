@@ -76,9 +76,11 @@ class Sealer:
     def run_once(self) -> int:
         """Seal the backlog of committed, past-grace rows and return how many rows were sealed.
 
-        A no-op (returns 0) when no key is configured — sealing needs the key to sign, and
-        without one there is nothing to protect (design review D13; a startup hint is emitted
-        when sealing is enabled but the key is missing).
+        A no-op (returns 0) when no seal key is configured — sealing needs a key to sign, and
+        without one there is nothing to protect (design review D13; a startup hint is emitted when
+        sealing is enabled but the key is missing). The seal key is the two-key split's signer
+        (:attr:`~firm.audit.log.AuditLog._seal_key`): a distinct ``FIRM_AUDIT_SEAL_KEY`` when
+        configured, otherwise the row key, so single-key deployments are unchanged.
 
         Drains the whole backlog in successive seals of at most ``seal_batch_size`` rows, so a
         sealer that has been down does not build one monster transaction (review 7A). If a
@@ -86,7 +88,7 @@ class Sealer:
         swallowed and the work resumes on the next tick — the loser never crashes and never
         double-seals.
         """
-        key = self.audit._key
+        key = self.audit._seal_key
         if key is None:
             return 0
         batch_size = self.audit.seal_batch_size

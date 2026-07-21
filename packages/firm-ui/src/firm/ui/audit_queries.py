@@ -207,9 +207,7 @@ def verify_status_row(conn: Connection) -> dict[str, Any] | None:
     """The single ``firm_audit_verify_status`` row the verifier upserts, as a plain dict, or
     ``None`` when verify has never run. "Single row" is the writer's contract, not a schema
     constraint, so we order by ``ran_at`` and take the newest — a stale leftover never wins."""
-    row = conn.execute(
-        select(_verify_status).order_by(_verify_status.c.ran_at.desc())
-    ).first()
+    row = conn.execute(select(_verify_status).order_by(_verify_status.c.ran_at.desc())).first()
     if row is None:
         return None
     return {

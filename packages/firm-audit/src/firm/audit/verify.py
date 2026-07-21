@@ -124,9 +124,16 @@ def recompute_row_mac(key: Key, row: Any) -> str:
     )
 
 
-def range_is_intact(conn: Connection, seal: Any, keyring: dict[str, Key]) -> bool:
+def range_is_intact(
+    conn: Connection, seal: Any, keyring: dict[str, Key], seal_keyring: dict[str, Key]
+) -> bool:
     """Re-verify a sealed range end-to-end — the contract behind "retention only prunes what
     verifies" (design "Retention integration").
+
+    ``keyring`` resolves each row's ``row_mac`` (row key); ``seal_keyring`` resolves the seal's
+    ``rows_mac`` (seal key). They differ only in a two-key deployment, where the row key is not a
+    seal signer — so a range whose seal was re-signed with a compromised row key is unverifiable
+    here (its seal ``key_id`` is not in ``seal_keyring``) and therefore never prunable.
 
     Returns ``True`` only when *every* signed row in ``(seal.from_id, seal.to_id]`` still recomputes
     its ``row_mac`` **and** the range's ``rows_mac``/``row_count`` still match the seal. The per-row
@@ -139,7 +146,7 @@ def range_is_intact(conn: Connection, seal: Any, keyring: dict[str, Key]) -> boo
 
     Any mismatch returns ``False`` so retention refuses to prune (and never checkpoints past) the
     range — pruning it would erase the evidence instead of surfacing it."""
-    key = keyring.get(seal.key_id)
+    key = seal_keyring.get(seal.key_id)
     if key is None:
         return False
     pairs: list[tuple[int, str | None]] = []
@@ -259,13 +266,37 @@ class Verifier:
 
     @property
     def keyring(self) -> dict[str, Key]:
-        """All keys verification may check against, indexed by ``key_id``: the writer key plus any
-        rotation keys in ``FIRM_AUDIT_KEYS``. Empty when the feature is off."""
+        """All keys a *row* MAC may be checked against, indexed by ``key_id``: the writer key, the
+        seal key (a two-key deployment configures both, labelled), and any rotation keys in
+        ``FIRM_AUDIT_KEYS``. Empty when the feature is off. In single-key mode the seal key *is* the
+        row key, so this is byte-identical to the pre-split keyring."""
         ring: dict[str, Key] = {}
         if self.audit._key is not None:
             ring[self.audit._key.id] = self.audit._key
+        if self.audit._seal_key is not None:
+            ring[self.audit._seal_key.id] = self.audit._seal_key
         for extra in parse_keyring(os.environ.get("FIRM_AUDIT_KEYS")).values():
             ring[extra.id] = extra
+        return ring
+
+    @property
+    def seal_keyring(self) -> dict[str, Key]:
+        """The keys eligible to have signed a *seal* (``rows_mac`` + ``seal_mac``), indexed by
+        ``key_id``.
+
+        In single-key mode this is the full :attr:`keyring` — byte-identical to before the split, so
+        seals signed by the one key still verify. In a two-key deployment (a distinct
+        ``FIRM_AUDIT_SEAL_KEY``) the **row key is removed**: a compromised app instance holds only
+        the row key, so refusing it as a seal signer here is what keeps the seal chain out of a
+        row-key attacker's reach. An attacker who re-signs a seal with the row key and relabels its
+        ``key_id`` to the row key's therefore lands on an id that is not in this ring — an
+        unverifiable seal, never a laundered OK (see :meth:`_walk_chain`). Old rotation keys in
+        ``FIRM_AUDIT_KEYS`` stay in the ring because they live only on the verifier, not on any
+        instance an attacker could compromise."""
+        ring = dict(self.keyring)
+        if self.audit._seal_key_split:
+            assert self.audit._key is not None  # split implies both keys exist
+            ring.pop(self.audit._key.id, None)
         return ring
 
     # -- rolling state (advisory) --------------------------------------------------------------
@@ -317,15 +348,17 @@ class Verifier:
 
     # -- the verification pass -----------------------------------------------------------------
 
-    def _verify(
-        self, *, anchor_path: str | None, from_seq: int | None, full: bool
-    ) -> VerifyReport:
+    def _verify(self, *, anchor_path: str | None, from_seq: int | None, full: bool) -> VerifyReport:
         keyring = self.keyring
         if not keyring:
             raise VerifyError(
                 "audit verification needs a key — set FIRM_AUDIT_KEY (or FIRM_AUDIT_KEYS for a "
                 "rotation) before running verify."
             )
+        # Seals (rows_mac + seal_mac) are checked against the seal keyring; rows against the full
+        # keyring. The two differ only in a two-key deployment, where the row key is not a seal
+        # signer — see :attr:`seal_keyring`.
+        seal_keyring = self.seal_keyring
 
         now = now_utc()
         counters = _Counters()
@@ -339,7 +372,7 @@ class Verifier:
 
             # Layer 2, part 1: the seal chain itself (dense seq, prev_mac linkage, seal_mac
             # recompute) — cheap, always walked in full so seal tampering never depends on rotation.
-            self._walk_chain(seals, keyring, counters, findings)
+            self._walk_chain(seals, keyring, seal_keyring, counters, findings)
 
             # Anti-replay backstop: the unique index rejects duplicate entry_ids at insert, but if
             # it was dropped, verify still reports them (design "Layer 1", replay).
@@ -347,8 +380,16 @@ class Verifier:
 
             # Layer 2, part 2 + Layer 1: recompute rows for the ranges selected this run.
             self._verify_ranges(
-                conn, seals, floor, boundary, keyring, counters, findings,
-                from_seq=from_seq, full=full,
+                conn,
+                seals,
+                floor,
+                boundary,
+                keyring,
+                seal_keyring,
+                counters,
+                findings,
+                from_seq=from_seq,
+                full=full,
             )
             # Layer 1 for the unsealed tail (always) — plus its size/age for liveness reporting.
             tail_count, tail_oldest = self._verify_tail(
@@ -411,6 +452,7 @@ class Verifier:
         self,
         seals: Sequence[Any],
         keyring: dict[str, Key],
+        seal_keyring: dict[str, Key],
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
@@ -439,26 +481,42 @@ class Verifier:
                 counters.tampered += 1
 
         for seal in seals:
-            key = keyring.get(seal.key_id)
+            key = seal_keyring.get(seal.key_id)
             if key is None:
+                if seal.key_id in keyring:
+                    # Known as a row key but not eligible to sign seals: either a two-key verifier
+                    # is missing its seal key, or an attacker re-signed the seal with the row key
+                    # (which they hold) and relabeled ``key_id`` to match. Both are unverifiable —
+                    # never a laundered OK — and both are fixed the same way, so say so precisely.
+                    raise VerifyError(
+                        f"seal seq {seal.seq} is signed by key_id {seal.key_id!r}, which is a "
+                        "configured row key but not a seal key — seal key missing from keyring, is "
+                        "this a two-key deployment? Add the seal key (FIRM_AUDIT_SEAL_KEY)."
+                    )
                 raise VerifyError(
                     f"seal seq {seal.seq} was signed by unknown key_id {seal.key_id!r} — "
-                    "add its secret to FIRM_AUDIT_KEYS."
+                    "add its secret to FIRM_AUDIT_KEYS (or FIRM_AUDIT_SEAL_KEY)."
                 )
-            if not hmac.compare_digest(integrity.seal_mac(
-                key,
-                seq=seal.seq,
-                kind=seal.kind,
-                from_id=seal.from_id,
-                to_id=seal.to_id,
-                row_count=seal.row_count,
-                rows_mac=seal.rows_mac,
-                prev_mac=seal.prev_mac,
-                sealed_at=seal.sealed_at,
-            ), seal.seal_mac):
+            if not hmac.compare_digest(
+                integrity.seal_mac(
+                    key,
+                    seq=seal.seq,
+                    kind=seal.kind,
+                    from_id=seal.from_id,
+                    to_id=seal.to_id,
+                    row_count=seal.row_count,
+                    rows_mac=seal.rows_mac,
+                    prev_mac=seal.prev_mac,
+                    sealed_at=seal.sealed_at,
+                ),
+                seal.seal_mac,
+            ):
                 findings.append(
-                    Finding("tampered", f"seal seq {seal.seq} has an invalid seal_mac (edited)",
-                            f"seal {seal.seq}")
+                    Finding(
+                        "tampered",
+                        f"seal seq {seal.seq} has an invalid seal_mac (edited)",
+                        f"seal {seal.seq}",
+                    )
                 )
                 counters.tampered += 1
 
@@ -466,24 +524,34 @@ class Verifier:
             if seal.seq == 1:
                 if seal.prev_mac != _GENESIS:
                     findings.append(
-                        Finding("tampered", "the genesis seal (seq 1) is not chained to 'genesis'",
-                                "seal 1")
+                        Finding(
+                            "tampered",
+                            "the genesis seal (seq 1) is not chained to 'genesis'",
+                            "seal 1",
+                        )
                     )
                     counters.tampered += 1
             elif predecessor is not None:
                 if not hmac.compare_digest(seal.prev_mac, predecessor.seal_mac):
                     findings.append(
-                        Finding("tampered", f"seal seq {seal.seq} prev_mac does not link to seq "
-                                f"{predecessor.seq} (reordered or edited)", f"seal {seal.seq}")
+                        Finding(
+                            "tampered",
+                            f"seal seq {seal.seq} prev_mac does not link to seq "
+                            f"{predecessor.seq} (reordered or edited)",
+                            f"seal {seal.seq}",
+                        )
                     )
                     counters.tampered += 1
             elif not has_checkpoint:
                 # Lowest survivor with no predecessor and nothing authorizing the missing front:
                 # the earlier seals (and rows) were truncated away.
                 findings.append(
-                    Finding("tampered", f"seal chain starts at seq {seal.seq} with no checkpoint "
-                            "authorizing the missing earlier seals (front truncation)",
-                            f"seal {seal.seq}")
+                    Finding(
+                        "tampered",
+                        f"seal chain starts at seq {seal.seq} with no checkpoint "
+                        "authorizing the missing earlier seals (front truncation)",
+                        f"seal {seal.seq}",
+                    )
                 )
                 counters.tampered += 1
 
@@ -498,8 +566,11 @@ class Verifier:
         ).all()
         for row in dups:
             findings.append(
-                Finding("tampered", f"entry_id {row.entry_id!r} appears more than once (replay)",
-                        f"entry_id {row.entry_id}")
+                Finding(
+                    "tampered",
+                    f"entry_id {row.entry_id!r} appears more than once (replay)",
+                    f"entry_id {row.entry_id}",
+                )
             )
             counters.tampered += 1
 
@@ -512,6 +583,7 @@ class Verifier:
         floor: int,
         boundary: int | None,
         keyring: dict[str, Key],
+        seal_keyring: dict[str, Key],
         counters: _Counters,
         findings: list[Finding],
         *,
@@ -529,27 +601,31 @@ class Verifier:
         # gap even if seq stayed dense (the deleted seal's rows now fall through a hole).
         if covering[0].from_id != floor:
             findings.append(
-                Finding("tampered",
-                        f"the earliest covering seal starts at id {covering[0].from_id}, "
-                        f"not the expected floor {floor} (coverage gap at the front)",
-                        f"seal {covering[0].seq}")
+                Finding(
+                    "tampered",
+                    f"the earliest covering seal starts at id {covering[0].from_id}, "
+                    f"not the expected floor {floor} (coverage gap at the front)",
+                    f"seal {covering[0].seq}",
+                )
             )
             counters.tampered += 1
         for prev, cur in pairwise(covering):
             if cur.from_id != prev.to_id:
                 findings.append(
-                    Finding("tampered", f"seals {prev.seq} and {cur.seq} are not contiguous "
-                            f"({prev.to_id} != {cur.from_id})", f"seal {prev.seq}->{cur.seq}")
+                    Finding(
+                        "tampered",
+                        f"seals {prev.seq} and {cur.seq} are not contiguous "
+                        f"({prev.to_id} != {cur.from_id})",
+                        f"seal {prev.seq}->{cur.seq}",
+                    )
                 )
                 counters.tampered += 1
 
         selected = self._select_ranges(covering, from_seq=from_seq, full=full)
         for seal in selected:
-            self._verify_one_range(conn, seal, boundary, keyring, counters, findings)
+            self._verify_one_range(conn, seal, boundary, keyring, seal_keyring, counters, findings)
 
-    def _select_ranges(
-        self, covering: list[Any], *, from_seq: int | None, full: bool
-    ) -> list[Any]:
+    def _select_ranges(self, covering: list[Any], *, from_seq: int | None, full: bool) -> list[Any]:
         """Pick which covering ranges to recompute this run (design review D12).
 
         ``full`` → all of them; ``from_seq`` → every range at or after that seq; otherwise the
@@ -590,6 +666,7 @@ class Verifier:
         seal: Any,
         boundary: int | None,
         keyring: dict[str, Key],
+        seal_keyring: dict[str, Key],
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
@@ -612,24 +689,31 @@ class Verifier:
             if self._check_row(row, boundary, keyring, counters, findings) != "ok":
                 all_signed = False
 
-        key = keyring[seal.key_id]  # known: the chain walk already validated this seal's key_id
+        # ``rows_mac`` is signed by the seal key (design "two-key split"), so it resolves through
+        # the seal keyring — known already, the chain walk validated this seal's key_id there.
+        key = seal_keyring[seal.key_id]
         recomputed = integrity.rows_mac(key, pairs)
         if recomputed == seal.rows_mac and len(pairs) == seal.row_count:
             return
         if all_signed and len(pairs) > seal.row_count:
             findings.append(
-                Finding("warning", f"seal seq {seal.seq} covers {len(pairs)} rows but sealed "
-                        f"{seal.row_count} — {len(pairs) - seal.row_count} valid-MAC late "
-                        "commit(s). Widen grace or record long jobs via the own-transaction path.",
-                        f"seal {seal.seq}")
+                Finding(
+                    "warning",
+                    f"seal seq {seal.seq} covers {len(pairs)} rows but sealed "
+                    f"{seal.row_count} — {len(pairs) - seal.row_count} valid-MAC late "
+                    "commit(s). Widen grace or record long jobs via the own-transaction path.",
+                    f"seal {seal.seq}",
+                )
             )
             counters.warning += 1
         else:
             findings.append(
-                Finding("tampered",
-                        f"seal seq {seal.seq} range ({seal.from_id}, {seal.to_id}] no longer "
-                        "matches its rows_mac/row_count (rows deleted, inserted, or swapped)",
-                        f"seal {seal.seq} ids {seal.from_id + 1}..{seal.to_id}")
+                Finding(
+                    "tampered",
+                    f"seal seq {seal.seq} range ({seal.from_id}, {seal.to_id}] no longer "
+                    "matches its rows_mac/row_count (rows deleted, inserted, or swapped)",
+                    f"seal {seal.seq} ids {seal.from_id + 1}..{seal.to_id}",
+                )
             )
             counters.tampered += 1
 
@@ -673,9 +757,13 @@ class Verifier:
         age = (now - tail_oldest).total_seconds()
         if age > self.audit._unsealed_tail_max_age:
             findings.append(
-                Finding("warning", f"the oldest unsealed row is {int(age)}s old (> "
-                        f"{int(self.audit._unsealed_tail_max_age)}s) — the sealer looks stalled; "
-                        "un-sealed rows are not deletion-protected.", "unsealed-tail")
+                Finding(
+                    "warning",
+                    f"the oldest unsealed row is {int(age)}s old (> "
+                    f"{int(self.audit._unsealed_tail_max_age)}s) — the sealer looks stalled; "
+                    "un-sealed rows are not deletion-protected.",
+                    "unsealed-tail",
+                )
             )
             counters.warning += 1
 
@@ -700,9 +788,12 @@ class Verifier:
                 counters.unprotected += 1
                 return "unprotected"  # legacy row from before the key existed — not an alarm
             findings.append(
-                Finding("tampered", f"row {row.id} has no row_mac but is after the activation "
-                        "boundary (forged insert, or an instance writing without the key)",
-                        f"row {row.id}")
+                Finding(
+                    "tampered",
+                    f"row {row.id} has no row_mac but is after the activation "
+                    "boundary (forged insert, or an instance writing without the key)",
+                    f"row {row.id}",
+                )
             )
             counters.tampered += 1
             return "tampered"
@@ -716,8 +807,11 @@ class Verifier:
         expected = recompute_row_mac(key, row)
         if not hmac.compare_digest(expected, row.row_mac):
             findings.append(
-                Finding("tampered", f"row {row.id} row_mac does not recompute (modified)",
-                        f"row {row.id}")
+                Finding(
+                    "tampered",
+                    f"row {row.id} row_mac does not recompute (modified)",
+                    f"row {row.id}",
+                )
             )
             counters.tampered += 1
             return "tampered"
@@ -758,8 +852,12 @@ class Verifier:
         if anchor is None:
             if seals:
                 findings.append(
-                    Finding("warning", f"anchor file {anchor_path!r} is missing or empty but seals "
-                            "exist — the external truncation guard is not being written.", "anchor")
+                    Finding(
+                        "warning",
+                        f"anchor file {anchor_path!r} is missing or empty but seals "
+                        "exist — the external truncation guard is not being written.",
+                        "anchor",
+                    )
                 )
                 counters.warning += 1
             return None, True, False
@@ -770,13 +868,15 @@ class Verifier:
         matched = by_seq.get(seq)
         legitimately_pruned = matched is None and seq <= floor
         if not legitimately_pruned and (
-            matched is None
-            or not hmac.compare_digest(matched.seal_mac, seal_mac)
-            or head_seq < seq
+            matched is None or not hmac.compare_digest(matched.seal_mac, seal_mac) or head_seq < seq
         ):
             findings.append(
-                Finding("tampered", f"the newest anchor (seq {seq}) is not present at the head of "
-                        "the stored chain — tail truncation or a drop-and-recreate.", f"seal {seq}")
+                Finding(
+                    "tampered",
+                    f"the newest anchor (seq {seq}) is not present at the head of "
+                    "the stored chain — tail truncation or a drop-and-recreate.",
+                    f"seal {seq}",
+                )
             )
             counters.tampered += 1
 
@@ -784,9 +884,13 @@ class Verifier:
         age = (now - sealed_at).total_seconds()
         if age > self.audit._anchor_max_age:
             findings.append(
-                Finding("warning", f"the newest anchor is {int(age)}s old (> "
-                        f"{int(self.audit._anchor_max_age)}s) — the anchor sink looks stalled; the "
-                        "silently-truncatable window is growing.", "anchor")
+                Finding(
+                    "warning",
+                    f"the newest anchor is {int(age)}s old (> "
+                    f"{int(self.audit._anchor_max_age)}s) — the anchor sink looks stalled; the "
+                    "silently-truncatable window is growing.",
+                    "anchor",
+                )
             )
             counters.warning += 1
             force_nonzero = True

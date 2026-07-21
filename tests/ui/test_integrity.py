@@ -260,9 +260,7 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
 
 
 def test_mobile_wrap_contract_is_present(runtime) -> None:
-    css = (
-        importlib.resources.files("firm.ui").joinpath("static", "style.css").read_text()
-    )
+    css = importlib.resources.files("firm.ui").joinpath("static", "style.css").read_text()
     media_query = "@media (max-width: 560px)"
     assert media_query in css
     mobile_css = css.split(media_query, maxsplit=1)[1]
@@ -333,9 +331,9 @@ def test_overview_hides_ok_strip(runtime) -> None:
 
 def test_overview_hides_benign_late_commit_warning(runtime) -> None:
     body = _overview_html(_state(_status(outcome="warning", warning_count=2)))
-    assert "class=\"integrity" not in body
+    assert 'class="integrity' not in body
 
 
 def test_overview_no_audit_part_renders_nothing_integrity(runtime) -> None:
     body = render.overview_page(["queue"], {}, [], [], [], integrity=None)
-    assert "class=\"integrity" not in body
+    assert 'class="integrity' not in body

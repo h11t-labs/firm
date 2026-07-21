@@ -878,7 +878,9 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
                 f"key + sealing active {_reltime(since)} — schedule a firm-audit verify cron"
             )
         else:
-            view["detail"] = "key configured — enable sealing, then schedule a firm-audit verify cron"
+            view["detail"] = (
+                "key configured — enable sealing, then schedule a firm-audit verify cron"
+            )
         return view
 
     assert s is not None  # ok/warning/error/tampered always carry a status row

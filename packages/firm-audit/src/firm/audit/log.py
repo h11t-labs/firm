@@ -82,6 +82,7 @@ class AuditLog:
         background_retention: bool = False,
         retention_interval: float = 3600.0,
         mac_key: str | None = None,
+        seal_key: str | None = None,
         background_sealing: bool = False,
         seal_interval: float = 60.0,
         grace: float = 60.0,
@@ -110,6 +111,25 @@ class AuditLog:
         # secret here at construction (design review 4A); ``None`` means the feature is off and
         # every write behaves exactly as it did before tamper-evidence existed.
         self._key = load_key(mac_key) if mac_key is not None else _env_key()
+
+        # Seal key (Layer 2 signer — the two-key split). ``seal_key=`` wins, else
+        # ``FIRM_AUDIT_SEAL_KEY``; when neither is set the seal key *defaults to the row key*, so a
+        # deployment with no seal key behaves exactly as before (every instance may seal, one key
+        # signs everything). Set it — on the designated sealer/verifier hosts only — to shrink the
+        # blast radius: a compromised app instance then holds only the row key and can forge at most
+        # individual unsealed rows; the seal chain stays out of reach. It signs ``rows_mac`` and
+        # ``seal_mac`` (everything in ``firm_audit_seals``); row MACs keep using the row key. If the
+        # configured seal key equals the row key, that is simply single-key mode.
+        # ``_seal_key_split`` records whether a *distinct* seal key is in force (drives verify's
+        # seal-keyring narrowing and retention's checkpoint gate).
+        _seal_raw = seal_key if seal_key is not None else os.environ.get("FIRM_AUDIT_SEAL_KEY")
+        _loaded_seal = load_key(_seal_raw)  # None if unset/empty; hard-fails a too-short secret
+        self._seal_key = _loaded_seal if _loaded_seal is not None else self._key
+        self._seal_key_split = (
+            self._key is not None
+            and self._seal_key is not None
+            and self._seal_key.id != self._key.id
+        )
 
         # Sealing config (Layer 2). ``grace`` must exceed the longest audit-recording transaction
         # plus inter-instance clock skew; the anchor path falls back to ``FIRM_AUDIT_ANCHOR_PATH``.
@@ -164,11 +184,13 @@ class AuditLog:
         """Restate the two-phase rollout and grace-sizing rules when sealing is switched on
         (design review 1A/D13). A stderr-only startup line would vanish; a warning is visible and
         testable, and the no-key case is loud because it silently produces no seals at all."""
-        if self._key is None:
+        if self._seal_key is None:
             warnings.warn(
-                "audit sealing is enabled but no FIRM_AUDIT_KEY / mac_key is configured — no "
-                "seals will be written. Two-phase rollout: deploy the key to every instance "
-                "first (phase 1), then enable sealing (phase 2).",
+                "audit sealing is enabled but no seal key is configured — no seals will be "
+                "written. Sealing signs with the seal key (FIRM_AUDIT_SEAL_KEY / seal_key=), which "
+                "defaults to the row key (FIRM_AUDIT_KEY / mac_key=) when unset — so this means no "
+                "key at all. Two-phase rollout: deploy the row key to every instance first "
+                "(phase 1), then enable sealing on a host that has a seal key (phase 2).",
                 stacklevel=3,
             )
             return

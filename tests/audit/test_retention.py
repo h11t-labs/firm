@@ -144,8 +144,9 @@ def _seals_by_seq(engine) -> list:
 def _age(engine, *, upto_id: int, seconds: float) -> None:
     with transaction(engine) as conn:
         conn.execute(
-            update(_audits).where(_audits.c.id <= upto_id).values(
-                created_at=now_utc() - timedelta(seconds=seconds))
+            update(_audits)
+            .where(_audits.c.id <= upto_id)
+            .values(created_at=now_utc() - timedelta(seconds=seconds))
         )
 
 
@@ -219,8 +220,9 @@ def test_checkpoint_pruning_the_anchored_seal_keeps_verify_ok(
     # seq 1 away. The checkpoint must be exported to the anchor too — otherwise the next
     # `verify --anchor` reads the pruned-away anchored seq 1 as a tail truncation (false TAMPERED).
     anchor = tmp_path / "anchor.log"
-    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0,
-                     anchor_path=str(anchor))
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, anchor_path=str(anchor)
+    )
     try:
         with at_time(now_utc() - timedelta(seconds=7200)):
             audit.record("only")
@@ -242,8 +244,9 @@ def test_anchor_naming_a_pruned_below_floor_seal_is_not_a_truncation(
     # checkpoint floor was legitimately pruned — a key-signed checkpoint (re-verified by the chain
     # walk) vouches for its absence, so it is not a tail truncation.
     anchor = tmp_path / "anchor.log"
-    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0,
-                     anchor_path=str(anchor))
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, anchor_path=str(anchor)
+    )
     try:
         with at_time(now_utc() - timedelta(seconds=7200)):
             audit.record("only")
@@ -269,8 +272,11 @@ def test_prune_refuses_unsealed_rows_and_reports_the_skip(db_url: str, at_time) 
         # Three expired but UNSEALED rows (raw inserts past the last seal).
         with transaction(audit.engine) as conn:
             for i in range(3):
-                conn.execute(_audits.insert().values(
-                    action=f"unsealed{i}", created_at=now_utc() - timedelta(seconds=7200)))
+                conn.execute(
+                    _audits.insert().values(
+                        action=f"unsealed{i}", created_at=now_utc() - timedelta(seconds=7200)
+                    )
+                )
 
         deleted = audit.retention.run_once()
         assert deleted == 3  # only the sealed, expired rows
@@ -289,8 +295,9 @@ def test_prune_refuses_a_tampered_sealed_range(db_url: str, at_time) -> None:
     # catches the edit. Once the row ages past max_age a naive prune would delete it and checkpoint
     # over it, and verify would then report OK. Retention must instead REFUSE and preserve it.
     seen: list[BaseException] = []
-    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0,
-                     on_error=seen.append)
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, on_error=seen.append
+    )
     try:
         with at_time(now_utc() - timedelta(seconds=7200)):
             audit.record("range1.a")
@@ -302,8 +309,11 @@ def test_prune_refuses_a_tampered_sealed_range(db_url: str, at_time) -> None:
 
         # Tamper a sealed row's content — a real UPDATE, row_mac left as-is.
         with transaction(audit.engine) as conn:
-            conn.execute(update(_audits).where(_audits.c.action == "range1.a")
-                         .values(action="range1.a.TAMPERED"))
+            conn.execute(
+                update(_audits)
+                .where(_audits.c.action == "range1.a")
+                .values(action="range1.a.TAMPERED")
+            )
 
         deleted = audit.retention.run_once()
         assert deleted == 0  # refused — nothing is pruned
@@ -317,7 +327,10 @@ def test_prune_refuses_a_tampered_sealed_range(db_url: str, at_time) -> None:
         seals = _seals_by_seq(audit.engine)
         assert all(s.kind == "seal" for s in seals)  # no checkpoint written
         assert {r.action for r in _rows(audit.engine)} == {
-            "range1.a.TAMPERED", "range1.b", "range2.a"}
+            "range1.a.TAMPERED",
+            "range1.b",
+            "range2.a",
+        }
 
         # And the evidence is not laundered: a subsequent verify still surfaces the tampering.
         report = audit.verify(full=True)
@@ -332,8 +345,9 @@ def test_prune_refuses_a_created_at_mutated_row(db_url: str) -> None:
     # MAC-invalidating edit (created_at is bound into row_mac). Retention must REFUSE such a range,
     # not prune it — which is exactly why the aging convention moved to signed past-dated inserts.
     seen: list[BaseException] = []
-    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0,
-                     on_error=seen.append)
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, on_error=seen.append
+    )
     try:
         audit.record("fresh.a")
         audit.record("fresh.b")
@@ -355,15 +369,19 @@ def test_large_unsealed_skip_routes_to_on_error(db_url: str, monkeypatch) -> Non
 
     monkeypatch.setattr(retention_mod, "_SKIP_ALERT_THRESHOLD", 2)
     seen: list[BaseException] = []
-    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0,
-                     on_error=seen.append)
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, on_error=seen.append
+    )
     try:
         audit.record("sealed")
         audit.sealer.run_once()
         with transaction(audit.engine) as conn:
             for i in range(3):  # 3 > threshold 2
-                conn.execute(_audits.insert().values(
-                    action=f"unsealed{i}", created_at=now_utc() - timedelta(seconds=7200)))
+                conn.execute(
+                    _audits.insert().values(
+                        action=f"unsealed{i}", created_at=now_utc() - timedelta(seconds=7200)
+                    )
+                )
         audit.retention.run_once()
         assert seen and "UNSEALED" in str(seen[0])
     finally:

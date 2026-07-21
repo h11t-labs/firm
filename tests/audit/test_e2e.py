@@ -48,9 +48,7 @@ def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
         def writer(thread_id: int) -> None:
             try:
                 for i in range(per_thread):
-                    audit.record(
-                        f"e2e.{thread_id}.{i}", actor=("Worker", str(thread_id))
-                    )
+                    audit.record(f"e2e.{thread_id}.{i}", actor=("Worker", str(thread_id)))
             except Exception as exc:
                 errors.append(exc)
 

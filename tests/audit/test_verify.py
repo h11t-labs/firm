@@ -30,8 +30,12 @@ _status = schema.verify_status
 
 @pytest.fixture(autouse=True)
 def _no_ambient_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    for var in ("FIRM_AUDIT_KEY", "FIRM_AUDIT_KEYS", "FIRM_AUDIT_ANCHOR_PATH",
-                "FIRM_AUDIT_VERIFY_STATE"):
+    for var in (
+        "FIRM_AUDIT_KEY",
+        "FIRM_AUDIT_KEYS",
+        "FIRM_AUDIT_ANCHOR_PATH",
+        "FIRM_AUDIT_VERIFY_STATE",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -56,13 +60,32 @@ def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_m
     """Insert a hand-built (still key-signed) seal — for simulating late commits and edits."""
     sealed_at = now_utc()
     rmac = rows_mac(_KEY, pairs)
-    smac = seal_mac(_KEY, seq=seq, kind=kind, from_id=from_id, to_id=to_id, row_count=row_count,
-                    rows_mac=rmac, prev_mac=prev_mac, sealed_at=sealed_at)
+    smac = seal_mac(
+        _KEY,
+        seq=seq,
+        kind=kind,
+        from_id=from_id,
+        to_id=to_id,
+        row_count=row_count,
+        rows_mac=rmac,
+        prev_mac=prev_mac,
+        sealed_at=sealed_at,
+    )
     with transaction(engine) as conn:
-        conn.execute(_seals.insert().values(
-            seq=seq, kind=kind, from_id=from_id, to_id=to_id, row_count=row_count, rows_mac=rmac,
-            prev_mac=prev_mac, seal_mac=smac, sealed_at=sealed_at, key_id=_KEY.id,
-        ))
+        conn.execute(
+            _seals.insert().values(
+                seq=seq,
+                kind=kind,
+                from_id=from_id,
+                to_id=to_id,
+                row_count=row_count,
+                rows_mac=rmac,
+                prev_mac=prev_mac,
+                seal_mac=smac,
+                sealed_at=sealed_at,
+                key_id=_KEY.id,
+            )
+        )
 
 
 # -- happy paths --------------------------------------------------------------------------------
@@ -222,10 +245,15 @@ _EDIT_COLUMNS = {
 def test_editing_any_column_is_tampered(db_url: str, column: str, value: str) -> None:
     audit = _make(db_url)
     try:
-        audit.record("obj.changed", subject=Ref("Invoice", 1, name="Acme"),
-                     actor=Ref("User", 2, name="alice"),
-                     data={"amount": 100}, changes={"a": 1}, context={"ip": "10.0.0.1"},
-                     correlation_id="req-1")
+        audit.record(
+            "obj.changed",
+            subject=Ref("Invoice", 1, name="Acme"),
+            actor=Ref("User", 2, name="alice"),
+            data={"amount": 100},
+            changes={"a": 1},
+            context={"ip": "10.0.0.1"},
+            correlation_id="req-1",
+        )
         audit.sealer.run_once()
         target = _rows(audit.engine)[0]
         with transaction(audit.engine) as conn:
@@ -246,8 +274,11 @@ def test_editing_created_at_is_tampered(db_url: str) -> None:
         audit.sealer.run_once()
         target = _rows(audit.engine)[0]
         with transaction(audit.engine) as conn:
-            conn.execute(update(_audits).where(_audits.c.id == target.id).values(
-                created_at=target.created_at + timedelta(seconds=1)))
+            conn.execute(
+                update(_audits)
+                .where(_audits.c.id == target.id)
+                .values(created_at=target.created_at + timedelta(seconds=1))
+            )
         report = audit.verify(full=True)
         assert report.outcome == "tampered"
     finally:
@@ -295,9 +326,16 @@ def test_forged_row_with_garbage_mac_in_sealed_range_is_tampered(db_url: str) ->
         victim = _rows(audit.engine)[1].id
         with transaction(audit.engine) as conn:
             conn.execute(delete(_audits).where(_audits.c.id == victim))
-            conn.execute(_audits.insert().values(
-                id=victim, action="forged", created_at=now_utc(),
-                entry_id="ZZZZZZZZZZZZZZZZZZZZZZZZZZ", row_mac="00" * 32, key_id=_KEY.id))
+            conn.execute(
+                _audits.insert().values(
+                    id=victim,
+                    action="forged",
+                    created_at=now_utc(),
+                    entry_id="ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+                    row_mac="00" * 32,
+                    key_id=_KEY.id,
+                )
+            )
         report = audit.verify(full=True)
         assert report.outcome == "tampered"
     finally:
@@ -315,9 +353,15 @@ def test_duplicate_entry_id_reported_when_index_bypassed(db_url: str, is_sqlite:
         # Simulate an attacker who dropped the unique index and replayed a real row.
         with transaction(audit.engine) as conn:
             conn.exec_driver_sql("DROP INDEX index_firm_audit_events_on_entry_id")
-            conn.execute(_audits.insert().values(
-                action=original.action, created_at=original.created_at,
-                entry_id=original.entry_id, row_mac=original.row_mac, key_id=original.key_id))
+            conn.execute(
+                _audits.insert().values(
+                    action=original.action,
+                    created_at=original.created_at,
+                    entry_id=original.entry_id,
+                    row_mac=original.row_mac,
+                    key_id=original.key_id,
+                )
+            )
         report = audit.verify(full=True)
         assert report.outcome == "tampered"
         assert any("appears more than once" in f.message for f in report.findings)
@@ -475,8 +519,15 @@ def test_late_commit_is_a_warning_not_tampered(db_url: str) -> None:
         rows = _rows(audit.engine)
         # A seal that covers ids (0, 3] but only counted rows 1 and 3 (row 2 "committed late").
         pairs = [(rows[0].id, rows[0].row_mac), (rows[2].id, rows[2].row_mac)]
-        _insert_manual_seal(audit.engine, seq=1, from_id=0, to_id=rows[2].id, pairs=pairs,
-                            row_count=2, prev_mac="genesis")
+        _insert_manual_seal(
+            audit.engine,
+            seq=1,
+            from_id=0,
+            to_id=rows[2].id,
+            pairs=pairs,
+            row_count=2,
+            prev_mac="genesis",
+        )
         report = audit.verify(full=True)
         assert report.outcome == "warning"
         assert report.exit_code == 0
@@ -528,12 +579,28 @@ def _signed_row_values(action: str, created_at: datetime) -> dict:
     genuine unsealed row in the past without editing (and thereby invalidating) its MAC."""
     entry_id = new_ulid(created_at)
     mac = row_mac(
-        _KEY, entry_id=entry_id, action=action, subject_type=None, subject_id=None,
-        subject_label=None, actor_type=None, actor_id=None, actor_label=None, correlation_id=None,
-        data=None, changes=None, context=None, created_at=created_at,
+        _KEY,
+        entry_id=entry_id,
+        action=action,
+        subject_type=None,
+        subject_id=None,
+        subject_label=None,
+        actor_type=None,
+        actor_id=None,
+        actor_label=None,
+        correlation_id=None,
+        data=None,
+        changes=None,
+        context=None,
+        created_at=created_at,
     )
-    return {"action": action, "created_at": created_at, "entry_id": entry_id, "row_mac": mac,
-            "key_id": _KEY.id}
+    return {
+        "action": action,
+        "created_at": created_at,
+        "entry_id": entry_id,
+        "row_mac": mac,
+        "key_id": _KEY.id,
+    }
 
 
 def test_stalled_sealer_unsealed_tail_age_warns(db_url: str) -> None:
@@ -544,8 +611,11 @@ def test_stalled_sealer_unsealed_tail_age_warns(db_url: str) -> None:
         # A genuine, validly signed unsealed row that is an hour old: the sealer has fallen behind.
         # It is authentic, so the only verdict is the sealer-liveness WARNING (exit 0), not tamper.
         with transaction(audit.engine) as conn:
-            conn.execute(_audits.insert().values(
-                **_signed_row_values("stuck", now_utc() - timedelta(hours=1))))
+            conn.execute(
+                _audits.insert().values(
+                    **_signed_row_values("stuck", now_utc() - timedelta(hours=1))
+                )
+            )
         report = audit.verify(full=True)
         assert report.outcome == "warning"
         assert report.exit_code == 0

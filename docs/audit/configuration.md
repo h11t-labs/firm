@@ -11,6 +11,7 @@ AuditLog(
     background_retention=False,     # run a retention loop on a timer
     retention_interval=3600.0,      # seconds between background retention runs
     mac_key=None,                   # tamper-evidence secret; None = feature off (env: FIRM_AUDIT_KEY)
+    seal_key=None,                  # separate seal-side secret; None = use mac_key (env: FIRM_AUDIT_SEAL_KEY)
     background_sealing=False,       # run the seal loop on a timer (requires a key)
     seal_interval=60.0,             # seconds between seal runs
     grace=60.0,                     # seal only rows older than this (out-of-order commit window)
@@ -35,8 +36,9 @@ picture. Without a key, none of these have any effect and the schema behaves exa
 
 | Option | Default | Notes |
 |---|---|---|
-| `mac_key` | `None` (env `FIRM_AUDIT_KEY`) | Feature key. Must be a UTF-8 string of **≥ 32 chars** — shorter is a hard error at startup. Pass `""` to force the feature off and ignore the environment. |
-| `background_sealing` / `seal_interval` | `False` / `60.0` | Opt-in timer-based sealing (Layer 2). Enable only after the key is deployed fleet-wide — see the [two-phase rollout](tamper-evidence.md#rolling-it-out-key-first-then-sealing). |
+| `mac_key` | `None` (env `FIRM_AUDIT_KEY`) | Feature key (the **row key**). Must be a UTF-8 string of **≥ 32 chars** — shorter is a hard error at startup. Pass `""` to force the feature off and ignore the environment. |
+| `seal_key` | `None` (env `FIRM_AUDIT_SEAL_KEY`) | Optional **separate seal key** — signs `rows_mac`/`seal_mac` (seals + checkpoints); row MACs keep using `mac_key`. Unset (or equal to `mac_key`) = single-key mode, unchanged. Same ≥ 32-char validation. Set it on **sealer/verifier hosts only** to shrink the blast radius of an instance compromise — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
+| `background_sealing` / `seal_interval` | `False` / `60.0` | Opt-in timer-based sealing (Layer 2), signing with the seal key. Enable only after the key is deployed fleet-wide — see the [two-phase rollout](tamper-evidence.md#rolling-it-out-key-first-then-sealing). |
 | `grace` | `60.0` | Seals cover only rows older than this. **Must exceed the longest audit-recording transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
 | `seal_batch_size` | `10_000` | Max rows sealed per transaction, so a sealer backlog becomes several seals, never one monster transaction. |
 | `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file the seal-chain head is written to (Layer 3). |
@@ -49,7 +51,8 @@ verify only — see [Key rotation](tamper-evidence.md#rotation).
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret (≥ 32 chars). |
+| `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret — the **row key** (≥ 32 chars). |
+| `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals + checkpoints; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
 | `FIRM_AUDIT_KEYS` | verify | Labelled keyring for rotation: `"id1=old,id2=new"`. |
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
 | `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
