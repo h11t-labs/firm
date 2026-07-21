@@ -6,6 +6,15 @@ pre-1.0 (breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** the cache table is renamed `firm_entries` → `firm_cache_entries` to match the
+  workspace `firm_<module>_<entity>` table convention, and its secondary indexes are renamed to
+  match (`index_firm_entries_*` → `index_firm_cache_entries_*`). Migration `0002` renames the table
+  and its indexes in place (existing rows preserved). Direct-SQL consumers, least-privilege `GRANT`
+  recipes, and anything referencing these names must be updated. A database migrated from 0.1.0
+  keeps its original Postgres sequence name `firm_entries_id_seq`.
+
 ## [0.1.0] - 2026-07-07
 
 ### Added

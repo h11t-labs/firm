@@ -25,7 +25,7 @@ Attempt counting is tracked on the `jobs.attempts` column.
 
 ## Inspecting failures
 
-A failed job has a row in `firm_failed_executions` with the full traceback in `error`:
+A failed job has a row in `firm_queue_failed_executions` with the full traceback in `error`:
 
 ```python
 from sqlalchemy import select

@@ -128,7 +128,7 @@ run_maintenance(rt)                            # expire stale semaphores, unbloc
 ```python
 from firm.cache import Cache
 
-# create the cache; create_schema=True auto-creates the firm_entries table
+# create the cache; create_schema=True auto-creates the firm_cache_entries table
 cache = Cache(database_url="sqlite:///cache.db")
 
 # store / fetch / probe
@@ -242,7 +242,7 @@ from firm.channel import Channel
 
 # Either a database_url (Channel owns the engine) or a shared engine= is required.
 ch = Channel(database_url="sqlite:///channel.db")
-# create_schema=True (default) auto-creates the firm_messages table.
+# create_schema=True (default) auto-creates the firm_channel_messages table.
 ```
 
 ```python

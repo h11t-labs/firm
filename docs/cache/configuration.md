@@ -14,7 +14,7 @@ Cache(
     expiry_batch_size=100,        # rows per eviction run; also sets the write-trigger probability
     max_key_bytesize=1024,        # keys longer than this are truncated + hash-suffixed
     size_estimate_samples=10000,  # exact-sum threshold / sample size for the size estimator
-    create_schema=True,           # create firm_entries if missing
+    create_schema=True,           # create firm_cache_entries if missing
     auto_expire=True,             # let writes probabilistically trigger eviction
     background_expiry=False,      # run an eviction loop on a timer
     expiry_interval=60.0,         # seconds between background eviction runs

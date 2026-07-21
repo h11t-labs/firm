@@ -6,6 +6,22 @@ pre-1.0 (breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** every firm-queue table is renamed to the workspace `firm_<module>_<entity>`
+  convention — `firm_jobs` → `firm_queue_jobs`, `firm_ready_executions` →
+  `firm_queue_ready_executions`, `firm_claimed_executions` → `firm_queue_claimed_executions`,
+  `firm_scheduled_executions` → `firm_queue_scheduled_executions`, `firm_blocked_executions` →
+  `firm_queue_blocked_executions`, `firm_failed_executions` → `firm_queue_failed_executions`,
+  `firm_recurring_executions` → `firm_queue_recurring_executions`, `firm_recurring_tasks` →
+  `firm_queue_recurring_tasks`, `firm_pauses` → `firm_queue_pauses`, `firm_semaphores` →
+  `firm_queue_semaphores`, and the shared `firm_processes` table → `firm_queue_processes`. Every
+  secondary index is renamed to match (`index_firm_jobs_*` → `index_firm_queue_jobs_*`, etc.).
+  Migration `0002` renames the tables and indexes in place (existing rows preserved). Direct-SQL
+  consumers, least-privilege `GRANT` recipes, and anything referencing these table or index names
+  must be updated. A database migrated from 0.1.0 keeps its original Postgres sequence names
+  (e.g. `firm_jobs_id_seq`).
+
 ## [0.1.0] - 2026-07-07
 
 ### Added
