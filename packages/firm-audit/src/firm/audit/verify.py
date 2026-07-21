@@ -61,8 +61,10 @@ it re-raises (design review D24) so a dead verify cron and a real tamper never l
 from __future__ import annotations
 
 import hmac
+import json
 import math
 import os
+import sys
 import time
 import warnings
 from collections.abc import Iterator, Sequence
@@ -99,6 +101,12 @@ _RETIRED_SEAL_KEYS_ENV = "FIRM_AUDIT_RETIRED_SEAL_KEYS"
 
 #: Rows read per keyset page when recomputing Layer-1 MACs (bounded memory on a large table).
 _PAGE = 1000
+
+#: How many tampered findings the status row carries in full detail (the same bound feeds the
+#: :class:`IntegrityAlert` line). The exact count and worst verdict already come from the counters;
+#: this only caps the *per-finding* detail so a mass-tamper never grows the persisted JSON (or a log
+#: line) without bound — a longer run collapses the overflow into one ``kind="more"`` marker.
+_MAX_AFFECTED = 20
 
 #: The fixed primary key of the single ``firm_audit_verify_status`` row (the "single-row" contract).
 _STATUS_ID = 1
@@ -282,13 +290,17 @@ class Finding:
     """One thing verify noticed, tagged with its verdict class and a human identifier.
 
     ``verdict`` is ``"warning"``, ``"unprotected"``, or ``"tampered"`` (an ``OK`` row produces no
-    finding). ``identifier`` names the affected row/seal/id-range so the dashboard can link into
-    the audit table and the CLI can print it.
+    finding). ``identifier`` is a display label for the affected row/seal/id-range (``"row 42"``,
+    ``"seal 3"``) the CLI prints and the dashboard shows as a chip. ``id`` is the numeric
+    ``firm_audit_events`` id when the finding is about *one specific row* — set so the dashboard can
+    link the chip into ``/audit/<id>``; ``None`` for seal-level findings (chain gap, count mismatch)
+    that name a seal, not a row.
     """
 
     verdict: str
     message: str
     identifier: str | None = None
+    id: int | None = None
 
 
 @dataclass
@@ -325,6 +337,77 @@ class VerifyReport:
     unsealed_tail_oldest_at: datetime | None = None
     affected_identifiers: str | None = None
     duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class IntegrityAlert:
+    """One high-severity signal, emitted **once per verify run** whose outcome is ``tampered``
+    (``severity="critical"``) or ``warning`` (``severity="warning"``) — never for ``ok`` /
+    ``unprotected``. It is routed to :class:`~firm.audit.log.AuditLog`'s ``on_finding`` hook so a
+    scheduled or in-process verify that *detects* tampering surfaces an event in the operator's log
+    pipeline out of the box (the default sink writes one stderr line; a custom sink can forward it
+    to Datadog/Loki/JSON logs). A frozen, structured record — it carries counts and human labels,
+    never the key or row content, so it is safe to ship off-host.
+    """
+
+    severity: str  # "critical" (tampered) | "warning"
+    outcome: str
+    ran_at: datetime
+    ok_count: int
+    warning_count: int
+    unprotected_count: int
+    tampered_count: int
+    #: Human labels of the offending findings (``"row 42"``, ``"seal 3"``), bounded to
+    #: :data:`_MAX_AFFECTED` so the line/event stays a fixed size on a mass tamper.
+    affected: tuple[str, ...]
+
+
+def default_on_finding(alert: IntegrityAlert) -> None:
+    """Last-resort sink for :class:`IntegrityAlert`: the project bans stdlib logging, so a detected
+    tamper (or warning) writes **one** concise high-severity line to stderr rather than vanishing —
+    mirroring :func:`~firm._core.poller.default_on_error`'s stderr route, but a single line meant to
+    land in a stock deployment's logstream. Callers silence or redirect it via
+    ``AuditLog(on_finding=...)`` (pass a no-op to mute, a forwarder to route elsewhere)."""
+    n = alert.tampered_count if alert.severity == "critical" else alert.warning_count
+    headline = "tamper detected" if alert.severity == "critical" else "verify warning"
+    detail = f", affected: {', '.join(alert.affected)}" if alert.affected else ""
+    ran_at = alert.ran_at.isoformat(sep=" ", timespec="seconds")
+    print(
+        f"firm-audit: {alert.severity.upper()} {headline} — {n} finding{'' if n == 1 else 's'}"
+        f"{detail} (verified {ran_at})",
+        file=sys.stderr,
+    )
+
+
+def _affected_json(findings: Sequence[Finding]) -> str | None:
+    """Serialize the tampered findings the dashboard links from into the ``affected_identifiers``
+    JSON list — ``[{"kind","label","id"?,"message","verdict"}, …]`` — which ``_affected_cells`` (in
+    :mod:`firm.ui.render`) parses into linked chips + the per-finding "what/why". ``kind`` is the
+    label's leading token (``"row"``, ``"seal"``) so the chip carries a category; ``id`` (when
+    present) is the numeric audit-event id the chip links to. Bounded to :data:`_MAX_AFFECTED`; a
+    longer run appends one ``kind="more"`` marker naming the overflow. ``None`` when nothing
+    tampered, so a clean run leaves the column NULL exactly as before."""
+    tampered = [f for f in findings if f.verdict == "tampered" and f.identifier]
+    if not tampered:
+        return None
+    items: list[dict[str, Any]] = []
+    for f in tampered[:_MAX_AFFECTED]:
+        assert f.identifier is not None  # guarded by the comprehension above
+        item: dict[str, Any] = {
+            "kind": f.identifier.split()[0],
+            "label": f.identifier,
+            "message": f.message,
+            "verdict": f.verdict,
+        }
+        if f.id is not None:
+            item["id"] = f.id
+        items.append(item)
+    overflow = len(tampered) - _MAX_AFFECTED
+    if overflow > 0:
+        items.append(
+            {"kind": "more", "label": f"+{overflow} more finding(s)", "verdict": "tampered"}
+        )
+    return json.dumps(items, separators=(",", ":"))
 
 
 # --- anchor file -----------------------------------------------------------------------------
@@ -479,7 +562,37 @@ class Verifier:
             raise
         report.duration_seconds = time.monotonic() - started
         self._persist(report)
+        self._emit_finding(report)
         return report
+
+    def _emit_finding(self, report: VerifyReport) -> None:
+        """Fire ``AuditLog.on_finding`` once, after persistence, on a ``tampered`` (critical) or
+        ``warning`` run — so a scheduled/looped verify that *detects* tampering emits a readable
+        high-severity event to the operator's log pipeline (default: one stderr line), not just a
+        return value. ``ok`` / ``unprotected`` stay silent; the ``error`` outcome never reaches here
+        (it re-raises before ``run`` returns). A broken user sink is routed to ``on_error`` — a
+        read-only verify must never crash because a log forwarder threw."""
+        if report.outcome not in ("tampered", "warning"):
+            return
+        severity = "critical" if report.outcome == "tampered" else "warning"
+        wanted = "tampered" if severity == "critical" else "warning"
+        affected = tuple(
+            f.identifier for f in report.findings if f.verdict == wanted and f.identifier
+        )[:_MAX_AFFECTED]
+        alert = IntegrityAlert(
+            severity=severity,
+            outcome=report.outcome,
+            ran_at=now_utc(),
+            ok_count=report.ok_count,
+            warning_count=report.warning_count,
+            unprotected_count=report.unprotected_count,
+            tampered_count=report.tampered_count,
+            affected=affected,
+        )
+        try:
+            self.audit.on_finding(alert)
+        except Exception as exc:  # a failing sink must not fail the verification
+            self.audit.on_error(exc)
 
     # -- the verification pass -----------------------------------------------------------------
 
@@ -965,6 +1078,7 @@ class Verifier:
                     f"row {row.id} has no row_mac but is after the activation "
                     "boundary (forged insert, or an instance writing without the key)",
                     f"row {row.id}",
+                    id=row.id,
                 )
             )
             counters.tampered += 1
@@ -974,6 +1088,7 @@ class Verifier:
                     "tampered",
                     f"row {row.id} row_mac does not recompute (modified)",
                     f"row {row.id}",
+                    id=row.id,
                 )
             )
             counters.tampered += 1
@@ -1095,9 +1210,6 @@ class Verifier:
         else:
             outcome = "ok"  # UNPROTECTED-only stays OK/exit-0 (reported as a count, not an alarm)
         exit_code = 1 if (counters.tampered or force_nonzero) else 0
-        affected = "; ".join(
-            f.identifier for f in findings if f.verdict == "tampered" and f.identifier
-        )
         return VerifyReport(
             outcome=outcome,
             exit_code=exit_code,
@@ -1114,7 +1226,7 @@ class Verifier:
             anchor_configured=anchor_configured,
             unsealed_tail_count=tail_count,
             unsealed_tail_oldest_at=tail_oldest,
-            affected_identifiers=affected or None,
+            affected_identifiers=_affected_json(findings),
         )
 
     def _persist(self, report: VerifyReport) -> None:

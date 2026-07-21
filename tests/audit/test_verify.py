@@ -8,6 +8,7 @@ exercises the default (non-full) rotation instead.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -17,7 +18,7 @@ from firm._core.clock import now_utc
 from firm._core.database import transaction
 from firm.audit import AuditLog, Ref, schema
 from firm.audit.integrity import load_key, new_ulid, row_mac, rows_mac, seal_mac
-from firm.audit.verify import VerifyError
+from firm.audit.verify import IntegrityAlert, VerifyError
 
 _SECRET = "verify-secret-key-padding-0123456789ab"  # noqa: S105  (>= 32 chars, throwaway)
 _KEY = load_key(_SECRET)
@@ -789,9 +790,117 @@ def test_status_row_records_affected_identifiers_on_tampering(db_url: str) -> No
         status = _status_row(audit.engine)
         assert status.outcome == "tampered"
         assert status.tampered_count >= 1
-        assert status.affected_identifiers and "row" in status.affected_identifiers
+        # affected_identifiers is a JSON list of structured, linkable findings — not a flat label.
+        items = json.loads(status.affected_identifiers)
+        assert isinstance(items, list) and items
+        finding = next(i for i in items if i["kind"] == "row")
+        assert finding["id"] == 1  # links the chip into /audit/1
+        assert finding["label"] == "row 1"
+        assert finding["verdict"] == "tampered"
+        assert "does not recompute" in finding["message"]  # the real per-finding "what/why"
     finally:
         audit.close()
+
+
+# -- on_finding: high-severity alert on detection ----------------------------------------------
+
+
+def test_on_finding_fires_critical_alert_on_tampering(db_url: str) -> None:
+    alerts: list[IntegrityAlert] = []
+    audit = _make(db_url, on_finding=alerts.append)
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).values(action="HACKED"))
+        audit.verify(full=True)
+    finally:
+        audit.close()
+    assert len(alerts) == 1  # once per run
+    alert = alerts[0]
+    assert alert.severity == "critical"
+    assert alert.outcome == "tampered"
+    assert alert.tampered_count >= 1
+    assert any("row 1" in a for a in alert.affected)
+
+
+def test_on_finding_silent_on_ok_verify(db_url: str) -> None:
+    alerts: list[IntegrityAlert] = []
+    audit = _make(db_url, on_finding=alerts.append)
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        audit.verify(full=True)
+    finally:
+        audit.close()
+    assert alerts == []  # ok/unprotected never alert
+
+
+def test_on_finding_fires_warning_severity_on_late_commit(db_url: str) -> None:
+    # A valid-MAC row in an already-sealed range is a WARNING (late commit), not tampering.
+    alerts: list[IntegrityAlert] = []
+    audit = _make(db_url, on_finding=alerts.append)
+    try:
+        audit.record("a")
+        audit.record("b")
+        # Hand-build a seal that spans both rows but claims only one — every present row is validly
+        # signed, so the surplus row is a valid-MAC late commit (WARNING), not tampering.
+        rows = _rows(audit.engine)
+        _insert_manual_seal(
+            audit.engine,
+            seq=1,
+            from_id=0,
+            to_id=rows[-1].id,
+            pairs=[(rows[0].id, rows[0].row_mac)],
+            row_count=1,
+            prev_mac="genesis",
+        )
+        report = audit.verify(full=True)
+    finally:
+        audit.close()
+    assert report.outcome == "warning"
+    assert len(alerts) == 1
+    assert alerts[0].severity == "warning"
+    assert alerts[0].warning_count >= 1
+
+
+def test_default_sink_writes_one_stderr_line_on_tampering(db_url: str, capsys) -> None:
+    audit = _make(db_url)  # no on_finding -> the default stderr sink
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).values(action="HACKED"))
+        capsys.readouterr()  # drop the sealing-enabled warning noise
+        audit.verify(full=True)
+    finally:
+        audit.close()
+    err = capsys.readouterr().err
+    lines = [ln for ln in err.splitlines() if ln.startswith("firm-audit:")]
+    assert len(lines) == 1  # exactly one high-severity line
+    assert "CRITICAL tamper detected" in lines[0]
+    assert "row 1" in lines[0]
+
+
+def test_failing_on_finding_callback_routes_to_on_error(db_url: str) -> None:
+    errors: list[BaseException] = []
+
+    def boom(_alert: IntegrityAlert) -> None:
+        raise RuntimeError("sink is down")
+
+    audit = _make(db_url, on_finding=boom, on_error=errors.append)
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).values(action="HACKED"))
+        # A broken sink must not crash the (read-only) verify.
+        report = audit.verify(full=True)
+    finally:
+        audit.close()
+    assert report.outcome == "tampered"
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
 
 
 # -- CLI exit codes -----------------------------------------------------------------------------

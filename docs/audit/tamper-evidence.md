@@ -306,6 +306,46 @@ host — and heed the warning verify emits whenever a non-`--full` run does a pa
 > *full-coverage* pass, not just the last run — "green" never silently means "only the tail was
 > swept".
 
+## Alerting / log stream
+
+A verify run that *detects* tampering is a signal, not just a return value. So besides persisting
+the outcome (for the dashboard) and returning an exit code (for a cron), every run whose outcome is
+`TAMPERED` or `WARNING` fires an **`on_finding`** hook — **once per run, after the status row is
+persisted** — with a structured `IntegrityAlert` (severity `critical` for tampered, `warning` for
+warning; the outcome, the counts, the affected identifiers, and `ran_at`). This is the *in-process
+event path*; a scheduled `firm-audit verify` (cron) plus its **exit code** is the *batch path*.
+
+Wire a sink to forward alerts to Datadog / Loki / a JSON logger:
+
+```python
+from firm.audit import AuditLog, IntegrityAlert
+
+def to_logs(alert: IntegrityAlert) -> None:
+    # alert.severity is "critical" (tampered) or "warning"; never the key or row content.
+    my_logger.error("audit integrity", extra={"severity": alert.severity, **alert.__dict__})
+
+audit = AuditLog(engine=app_engine, mac_key="...", on_finding=to_logs)
+audit.verify(full=True)  # fires to_logs on a tampered/warning outcome
+```
+
+**The default is present, not silent.** With no `on_finding` configured, a detection writes **one**
+concise high-severity line to stderr (the project bans stdlib logging, so this mirrors
+`on_error`'s stderr route) — so even a stock deployment's logstream shows it:
+
+```text
+firm-audit: CRITICAL tamper detected — 2 findings, affected: row 42, seal 12 (verified 2026-07-21 03:00:00)
+```
+
+`OK` and `UNPROTECTED` runs stay silent; the `error` outcome (verify itself could not check — e.g.
+an unknown `key_id`) is surfaced by the raised `VerifyError` and `on_error`, not `on_finding`. To
+**mute** the default line, pass a no-op (`on_finding=lambda alert: None`); to redirect it, pass your
+own sink. A sink that raises is routed to `on_error` and **never crashes the (read-only) verify**.
+
+This fires for both `AuditLog.verify()` and the CLI `firm-audit verify` (the CLI still prints the
+per-finding messages to stdout and returns the exit code; the stderr line is the log-pipeline
+event). There is deliberately **no `VerifyLoop`** yet — the detection cadence is a cron/CLI run or a
+caller-run loop; `on_finding` is what turns each such run into an event.
+
 ## Retention and checkpoints
 
 Pruning deletes old rows, which would read as tampering — so retention and sealing are wired

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 from .events import Ref
 from .log import AuditLog, record
+from .verify import IntegrityAlert
 
 __version__ = "0.1.0"
 
-__all__ = ["AuditLog", "Ref", "__version__", "record"]
+__all__ = ["AuditLog", "IntegrityAlert", "Ref", "__version__", "record"]

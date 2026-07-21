@@ -12,6 +12,22 @@ pre-1.0 (breaking changes bump the minor version).
   sealed rows (Layer 2, `firm_audit_seals`), and a `verify` pass with a dashboard integrity panel
   backed by `firm_audit_verify_status`. Inert without a configured `FIRM_AUDIT_KEY` — behavior and
   schema semantics are unchanged for a key-less deployment.
+- **Structured, linkable verify findings on the dashboard.** The verify-status row's
+  `affected_identifiers` now carries a JSON list of the top-N (20) tampered findings — each with its
+  verdict, human message, display label, and (for a row-level finding) the numeric audit-event `id`
+  — instead of one flattened label string. The TAMPERED banner surfaces the real per-finding
+  "what/why" and links each affected record into `/audit/<id>`. No schema change (the existing
+  `Text` column is reused); a clean run still leaves it NULL.
+- **`on_finding` — a high-severity alert on detection.** A verify run whose outcome is `TAMPERED`
+  (severity `critical`) or `WARNING` fires `AuditLog(on_finding=...)` once, after the status row is
+  persisted, with a structured `IntegrityAlert` (severity, outcome, counts, affected identifiers,
+  `ran_at`) — so a scheduled or in-process verify emits a routable event to the operator's log
+  pipeline (Datadog/Loki/JSON), not just a return value. Fires for both `AuditLog.verify()` and the
+  CLI `firm-audit verify`; never for `ok`/`unprotected`. With no sink configured, the default writes
+  **one** concise high-severity line to stderr (no stdlib logging), so a stock deployment's
+  logstream shows it; pass a no-op to mute it. A failing sink routes to `on_error` and never crashes
+  the read-only verify. There is deliberately no `VerifyLoop` yet — cron/CLI (batch, via exit code)
+  or a caller-run loop is the cadence; `on_finding` is the in-process event path.
 - Optional **two-key split** for tamper-evidence: a separate seal key (`FIRM_AUDIT_SEAL_KEY` /
   `AuditLog(seal_key=...)`) signs seals and checkpoints while the row key stays on every instance,
   so an attacker who compromises an app instance can forge at most individual unsealed rows — the

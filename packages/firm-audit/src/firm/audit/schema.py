@@ -128,7 +128,9 @@ verify_status = Table(
     Column("anchor_configured", Boolean, nullable=False, default=False),  # vs. "no anchor" (D22)
     Column("unsealed_tail_count", Integer, nullable=False, default=0),
     Column("unsealed_tail_oldest_at", _DT),  # oldest unsealed row → tail age via ``When``
-    Column("affected_identifiers", Text),  # seal seqs / id ranges on tampering (D22)
+    # JSON list of the top-N tampered findings on tampering (kind/label/id?/message/verdict), read
+    # by the dashboard's integrity banner as linked chips + per-finding "what/why" (D22).
+    Column("affected_identifiers", Text),
     Column("duration_seconds", Float),
 )
 

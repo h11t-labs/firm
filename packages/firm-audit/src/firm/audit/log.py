@@ -19,10 +19,14 @@ from .events import Reference
 from .integrity import Key, load_key
 from .retention import Retention, RetentionLoop
 from .sealing import Sealer, SealLoop
-from .verify import Verifier, VerifyReport
+from .verify import IntegrityAlert, Verifier, VerifyReport, default_on_finding
 
 #: The anchor callback's signature: ``(seq, seal_mac, sealed_at)`` for one freshly sealed block.
 AnchorCallback = Callable[[int, str, datetime], None]
+
+#: The integrity-alert callback's signature: one :class:`~firm.audit.verify.IntegrityAlert` per
+#: verify run that detected tampering (critical) or a warning. Defaults to a one-line stderr sink.
+FindingCallback = Callable[[IntegrityAlert], None]
 
 
 @lru_cache(maxsize=8)
@@ -95,6 +99,7 @@ class AuditLog:
         unsealed_tail_max_age: float | None = None,
         verify_state_path: str | None = None,
         on_error: Callable[[BaseException], None] | None = None,
+        on_finding: FindingCallback | None = None,
     ) -> None:
         if engine is not None:
             self.engine = engine
@@ -180,6 +185,11 @@ class AuditLog:
 
         # Background pruning / sealing failures are routed here (default: traceback to stderr).
         self.on_error = on_error if on_error is not None else default_on_error
+        # Integrity alerts (a verify run that detected tampering/warning) are routed here — a
+        # dedicated hook, because a TAMPERED verdict is a signal, not an exception. Default: one
+        # high-severity stderr line per detection, so a stock deployment's logstream shows it. Pass
+        # a no-op to mute it, or a forwarder to ship it to Datadog/Loki/JSON logs.
+        self.on_finding = on_finding if on_finding is not None else default_on_finding
         self.retention = Retention(self)
         self._loop = (
             RetentionLoop(self.retention, retention_interval, on_error=self.on_error)
