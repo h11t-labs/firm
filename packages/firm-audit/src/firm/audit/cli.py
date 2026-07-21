@@ -31,7 +31,7 @@ def stats(database_url: str | None) -> None:
     engine = create_engine_for(_url(database_url))
     try:
         with transaction(engine) as conn:
-            count = conn.execute(select(func.count()).select_from(schema.audits)).scalar_one()
+            count = conn.execute(select(func.count()).select_from(schema.audit_events)).scalar_one()
     finally:
         dispose_engine(engine)
     click.echo(f"events: {count}")
@@ -100,9 +100,63 @@ def prune(database_url: str | None, max_age: float | None) -> None:
         with AuditLog(engine=engine, create_schema=False) as audit:
             if max_age is not None:
                 audit.max_age = max_age
-            click.echo(f"pruned {audit.retention.run_once()} events")
+            pruned = audit.retention.run_once()
+            click.echo(f"pruned {pruned} events")
+            # With sealing active, expired rows past the last seal cannot be pruned (D15).
+            if audit.retention.last_skipped_unsealed:
+                click.echo(
+                    f"skipped {audit.retention.last_skipped_unsealed} expired but UNSEALED events "
+                    "— the sealer must catch up before they can be pruned"
+                )
+            # A sealed range that no longer verifies is refused, not pruned — retention will not
+            # delete tampered evidence (see `firm-audit verify --full`).
+            if audit.retention.last_refused_tampered:
+                click.echo(
+                    f"REFUSED to prune {audit.retention.last_refused_tampered} sealed range(s) "
+                    "that no longer verify — run `firm-audit verify --full` and preserve the DB",
+                    err=True,
+                )
     finally:
         dispose_engine(engine)
+
+
+@main.command(help="Seal the backlog of committed, past-grace rows (Layer 2). Needs a key.")
+@_db_option
+def seal(database_url: str | None) -> None:
+    engine = create_engine_for(_url(database_url))
+    try:
+        with AuditLog(engine=engine, create_schema=False) as audit:
+            click.echo(f"sealed {audit.sealer.run_once()} events")
+    finally:
+        dispose_engine(engine)
+
+
+@main.command(help="Verify Layers 1-3 (row MACs, seal chain, anchor). Exit non-zero on tampering.")
+@_db_option
+@click.option("--anchor", "anchor_path", default=None, help="Anchor file to check (Layer 3).")
+@click.option("--from-seq", default=None, type=int, help="Row-verify only seals from this seq.")
+@click.option("--full", is_flag=True, help="Recompute every sealed range from the genesis floor.")
+def verify(
+    database_url: str | None, anchor_path: str | None, from_seq: int | None, full: bool
+) -> None:
+    engine = create_engine_for(_url(database_url))
+    try:
+        with AuditLog(engine=engine, create_schema=False) as audit:
+            report = audit.verify(anchor_path=anchor_path, from_seq=from_seq, full=full)
+    finally:
+        dispose_engine(engine)
+
+    click.echo(
+        f"{report.outcome.upper()}: {report.ok_count} ok, {report.warning_count} warning, "
+        f"{report.unprotected_count} unprotected, {report.tampered_count} tampered "
+        f"({report.unsealed_tail_count} unsealed)"
+    )
+    for finding in report.findings:
+        marker = {"tampered": "TAMPERED", "warning": "WARNING", "unprotected": "UNPROTECTED"}[
+            finding.verdict
+        ]
+        click.echo(f"  {marker}: {finding.message}")
+    raise SystemExit(report.exit_code)
 
 
 if __name__ == "__main__":  # pragma: no cover

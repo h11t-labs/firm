@@ -6,10 +6,17 @@ Every `AuditLog(...)` option, with its default:
 AuditLog(
     database_url=None,              # SQLAlchemy URL (or pass engine=)
     engine=None,                    # a pre-built SQLAlchemy Engine, instead of database_url
-    create_schema=True,             # create firm_audits if missing
+    create_schema=True,             # create firm_audit_events if missing
     max_age=None,                   # prune events older than this many seconds; None = keep forever
     background_retention=False,     # run a retention loop on a timer
     retention_interval=3600.0,      # seconds between background retention runs
+    mac_key=None,                   # tamper-evidence secret; None = feature off (env: FIRM_AUDIT_KEY)
+    background_sealing=False,       # run the seal loop on a timer (requires a key)
+    seal_interval=60.0,             # seconds between seal runs
+    grace=60.0,                     # seal only rows older than this (out-of-order commit window)
+    seal_batch_size=10_000,         # max rows sealed per transaction
+    anchor_path=None,               # append the seal-chain head here (env: FIRM_AUDIT_ANCHOR_PATH)
+    on_anchor=None,                 # callback(seq, seal_mac, sealed_at) for custom anchor sinks
 )
 ```
 
@@ -19,7 +26,33 @@ AuditLog(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
-| `on_error` | traceback to stderr | Callback for background-pruning failures. |
+| `on_error` | traceback to stderr | Callback for background-pruning, sealing, and anchor-write failures. |
+
+## Tamper-evidence
+
+All opt-in and off until a key is set — see [Tamper-evidence](tamper-evidence.md) for the full
+picture. Without a key, none of these have any effect and the schema behaves exactly as before.
+
+| Option | Default | Notes |
+|---|---|---|
+| `mac_key` | `None` (env `FIRM_AUDIT_KEY`) | Feature key. Must be a UTF-8 string of **≥ 32 chars** — shorter is a hard error at startup. Pass `""` to force the feature off and ignore the environment. |
+| `background_sealing` / `seal_interval` | `False` / `60.0` | Opt-in timer-based sealing (Layer 2). Enable only after the key is deployed fleet-wide — see the [two-phase rollout](tamper-evidence.md#rolling-it-out-key-first-then-sealing). |
+| `grace` | `60.0` | Seals cover only rows older than this. **Must exceed the longest audit-recording transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
+| `seal_batch_size` | `10_000` | Max rows sealed per transaction, so a sealer backlog becomes several seals, never one monster transaction. |
+| `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file the seal-chain head is written to (Layer 3). |
+| `on_anchor` | `None` | Callback `(seq, seal_mac, sealed_at)` for shipping the anchor off-host (S3, a second DB, a webhook). Failures route to `on_error`, never crash the seal. |
+
+Rotation uses a separate **`FIRM_AUDIT_KEYS`** env var (`"label=secret,label2=secret2"`) read by
+verify only — see [Key rotation](tamper-evidence.md#rotation).
+
+### Environment variables
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret (≥ 32 chars). |
+| `FIRM_AUDIT_KEYS` | verify | Labelled keyring for rotation: `"id1=old,id2=new"`. |
+| `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
+| `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 
 Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
 

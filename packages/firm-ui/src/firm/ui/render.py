@@ -19,10 +19,11 @@ from urllib.parse import quote, urlencode
 from jinja2 import Environment, PackageLoader, select_autoescape
 from jinjax import Catalog
 from jinjax.jinjax import JinjaX
-from markupsafe import Markup
+from markupsafe import Markup, escape
 
 from firm._core.clock import now_utc
 
+from .audit_queries import IntegrityState
 from .queries import STATES
 
 _PART_NAV = {
@@ -420,6 +421,7 @@ def overview_page(
     processes: list[dict[str, Any]],
     recurring: list[dict[str, Any]],
     *,
+    integrity: IntegrityState | None = None,
     refresh: int = 5,
     request_path: str = "/",
     theme: str = "system",
@@ -449,6 +451,7 @@ def overview_page(
         refresh=refresh,
         request_path=request_path,
         theme=theme,
+        integrity_view=_integrity_view(integrity),
         cards=cards,
         counts=counts,
         queue_rows=queue_rows,
@@ -753,12 +756,181 @@ def _sort_columns(
     return columns
 
 
+# -- integrity (tamper-evidence) panel ---------------------------------------------------------
+# :func:`audit_queries.integrity_state` decides *which* of the six states applies; this section
+# turns that state into the ready-made strings/markup the <Integrity/> component renders (design
+# review D22-D25). Every state carries an icon glyph + a word, never colour alone; the glyphs are
+# plain unicode (no new SVG icons), so a screen with images off still reads the verdict.
+_INTEGRITY_GLYPH = {
+    "ok": "✓",  # ✓
+    "warning": "⚠",  # ⚠
+    "error": "⚠",
+    "tampered": "⛔",  # ⛔
+    "never_ran": "⚠",
+    "not_configured": "○",  # ○ (neutral, no alarm)
+}
+_INTEGRITY_WORD = {
+    "ok": "integrity OK",
+    "warning": "WARNING",
+    "error": "ERROR",
+    "tampered": "TAMPERED",
+    "never_ran": "never verified",
+    "not_configured": "not configured",
+}
+# The pill tone modifier ("" = the neutral base pill, legacy/not-configured is no alarm); the
+# strip's own background class mirrors it but names the neutral case explicitly.
+_INTEGRITY_PILL = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": ""}
+_INTEGRITY_STRIP = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": "neutral"}
+
+# The tamper-evidence docs (design/threat model + the "what to do when it's red" runbook).
+_TAMPER_DOCS_URL = "https://github.com/h11t-labs/firm/blob/main/docs/audit/tamper-evidence.md"
+
+
+def _cause_text(
+    cause: str, status: dict[str, Any], verify_max_age: float, anchor_max_age: float
+) -> str:
+    """The itemized WARNING/ERROR line for one machine cause token — distinct prose per cause so
+    the amber strip never reads as one undifferentiated colour (design D22)."""
+    if cause == "stale":
+        return (
+            f"verify last ran {_reltime(status['ran_at'])} "
+            f"(expected within {_humanize(verify_max_age)})"
+        )
+    if cause == "sealer_stalled":
+        return (
+            f"sealer stalled — oldest unsealed row {_reltime(status['unsealed_tail_oldest_at'])} "
+            f"({_num(status['unsealed_tail_count'])} rows)"
+        )
+    if cause == "anchor_stale":
+        return (
+            f"anchor stale — newest anchor {_reltime(status['newest_anchor_at'])} "
+            f"(expected within {_humanize(anchor_max_age)})"
+        )
+    if cause == "late_commits":
+        n = status["warning_count"]
+        return (
+            f"{_num(n)} late commit{'' if n == 1 else 's'} in a sealed range — "
+            "tune grace or use the long-job pattern"
+        )
+    return cause
+
+
+def _affected_cells(raw: str | None) -> list[tuple[str, Any]]:
+    """Turn the verifier's ``affected_identifiers`` (a JSON list of ``{"kind", "label", "id"?}``)
+    into ``Kv`` cells; an item with an integer ``id`` links into the audit table. Malformed or
+    absent data degrades to a single plain cell rather than hiding the finding."""
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError):
+        return [("affected", raw)]
+    if not isinstance(items, list):
+        items = [items]
+    cells: list[tuple[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            kind = str(item.get("kind", "affected"))
+            label = str(item.get("label", ""))
+            id_ = item.get("id")
+            if isinstance(id_, int):
+                cells.append((kind, Markup(f'<a href="/audit/{id_}">{escape(label)}</a>')))
+            else:
+                cells.append((kind, label))
+        else:
+            cells.append(("affected", str(item)))
+    return cells
+
+
+def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
+    """Build the <Integrity/> component's ready-made data from a derived state, or ``None`` when
+    there is no audit part to report on. The component stays dumb: every string, link, and colour
+    token it renders is decided here."""
+    if state is None:
+        return None
+    s = state.status
+    view: dict[str, Any] = {
+        "state": state.state,
+        "strip_class": _INTEGRITY_STRIP[state.tone],
+        "pill_class": _INTEGRITY_PILL[state.tone],
+        "glyph": _INTEGRITY_GLYPH[state.state],
+        "word": _INTEGRITY_WORD[state.state],
+        "escalate": state.escalate,
+        "role_alert": state.state == "tampered",
+        "layout": "banner" if state.state == "tampered" else "strip",
+        "when": None,
+        "when_label": "",
+        "detail": "",
+        "cause_lines": [],
+        "headline": "",
+        "kv": None,
+        "next_step": None,
+    }
+
+    if state.state == "not_configured":
+        view["detail"] = "set FIRM_AUDIT_KEY to enable tamper-evidence"
+        return view
+
+    if state.state == "never_ran":
+        since = state.config.sealing_since
+        if since is not None:
+            view["detail"] = (
+                f"key + sealing active {_reltime(since)} — schedule a firm-audit verify cron"
+            )
+        else:
+            view["detail"] = "key configured — enable sealing, then schedule a firm-audit verify cron"
+        return view
+
+    assert s is not None  # ok/warning/error/tampered always carry a status row
+
+    if state.state == "tampered":
+        n = s["tampered_count"]
+        view["headline"] = f"{_num(n)} integrity finding{'' if n == 1 else 's'}"
+        cells = _affected_cells(s["affected_identifiers"])
+        cells.append(("first detected", _when(s["ran_at"])))
+        view["kv"] = Markup(_CATALOG.render("Kv", cells=cells))
+        view["next_step"] = Markup(
+            "preserve the DB unchanged · run <code>firm-audit verify --full</code> · "
+            f'<a href="{_TAMPER_DOCS_URL}">docs</a>'
+        )
+        return view
+
+    view["when"] = _when(s["ran_at"])
+    view["when_label"] = "verified"
+
+    if state.state == "ok":
+        parts_: list[str] = []
+        if s["last_full_coverage_at"] is not None:
+            fc = f"full coverage {_reltime(s['last_full_coverage_at'])}"
+            if s["cycle_position"] and s["cycle_length"]:
+                fc += f" (cycle {s['cycle_position']}/{s['cycle_length']})"
+            parts_.append(fc)
+        else:
+            parts_.append("full coverage pending")
+        if s["anchor_configured"]:
+            parts_.append(f"anchor {_reltime(s['newest_anchor_at'])}")
+        parts_.append(f"unsealed tail {_num(s['unsealed_tail_count'])} rows")
+        view["detail"] = " · ".join(parts_)
+        return view
+
+    # warning / error: itemize the causes; ERROR leads with the failure message itself (D24).
+    items: list[str] = []
+    if state.state == "error" and s["error_message"]:
+        items.append(f"verify failed: {s['error_message']}")
+    items.extend(
+        _cause_text(token, s, state.verify_max_age, state.anchor_max_age) for token in state.causes
+    )
+    view["cause_lines"] = items
+    return view
+
+
 def audit_page(
     parts: list[str],
     stats: dict[str, Any],
     rows: list[dict[str, Any]],
     filters: dict[str, str],
     *,
+    integrity: IntegrityState | None = None,
     total: int = 0,
     page: int = 1,
     per_page: int = AUDIT_DEFAULT_PER_PAGE,
@@ -786,6 +958,7 @@ def audit_page(
         refresh=refresh,
         request_path=request_path,
         theme=theme,
+        integrity_view=_integrity_view(integrity),
         cards=cards,
         rows=rows,
         filters=filters,

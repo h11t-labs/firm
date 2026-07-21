@@ -51,4 +51,37 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000   # 90 days
 # pruned 12 events
 ```
 
+With sealing enabled, `prune` deletes only rows in ranges already covered by a seal, and prints the
+count of expired-but-**unsealed** rows it had to skip — a nonzero skip count means the sealer is
+behind. See [Tamper-evidence › Retention and checkpoints](tamper-evidence.md#retention-and-checkpoints).
+
+### `seal` — run the seal loop (tamper-evidence)
+
+Seals settled rows into the chain (Layer 2), then exports the chain head to the anchor (Layer 3).
+Requires `FIRM_AUDIT_KEY`. Run it on a timer (cron, or `background_sealing=True` in-process); it is
+idempotent and safe to run on more than one host at once — the loser of a race simply retries.
+
+```bash
+firm-audit seal --database-url sqlite:///audit.db
+# sealed 3 blocks (seq 41..43), 2841 rows
+```
+
+### `verify` — check the audit trail for tampering
+
+Recomputes row MACs, walks the seal chain, and (with `--anchor`) checks the external anchor. Reads
+the key from `FIRM_AUDIT_KEY`, or a labelled keyring from `FIRM_AUDIT_KEYS` for rotation. Read-only.
+
+```bash
+firm-audit verify --database-url sqlite:///audit.db --anchor /var/lib/firm/audit.anchor
+# OK · 12040 rows · 43 seals · full coverage 2 h ago (cycle 3/7) · anchor 41 s old · tail 6 rows
+```
+
+Options: `--anchor PATH` (also enforces anchor freshness), `--from-seq N` (start the seal walk at
+a given `seq`), `--full` (re-read every sealed range from genesis rather than the rolling slice).
+
+**Exit codes:** `0` for `OK`/`UNPROTECTED`/`WARNING`; **non-zero** for any `TAMPERED` finding, and
+non-zero when `--anchor` is given but the newest anchor is older than `anchor_max_age`. This makes
+`verify` a usable cron/CI gate. Verdict classes and the anchor-age rule are described in
+[Tamper-evidence › Verifying](tamper-evidence.md#verifying).
+
 > **Tip:** set `FIRM_AUDIT_DATABASE_URL` in your environment to omit `--database-url`.

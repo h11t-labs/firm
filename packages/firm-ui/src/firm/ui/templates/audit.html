@@ -2,6 +2,7 @@
 {% macro field(name, label) %}<label>{{ label }}<input type="text" name="{{ name }}" value="{{ filters.get(name, "") }}"></label>{% endmacro %}
 {% block content %}
 <h1>Audit</h1>
+{% if integrity_view %}<Integrity view={{ integrity_view }} />{% endif %}
 <div class="cards">
 {% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
 </div>

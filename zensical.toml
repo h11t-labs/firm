@@ -48,6 +48,7 @@ nav = [
     { "Overview" = "audit/overview.md" },
     { "Getting started" = "audit/getting-started.md" },
     { "Retention & querying" = "audit/retention-and-querying.md" },
+    { "Tamper-evidence" = "audit/tamper-evidence.md" },
     { "Configuration" = "audit/configuration.md" },
     { "CLI" = "audit/cli.md" },
     { "Internals" = "audit/internals.md" },

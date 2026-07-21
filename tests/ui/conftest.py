@@ -175,7 +175,7 @@ class Seeder:
     ) -> int:
         with self.engine.begin() as conn:
             return conn.execute(
-                insert(audit_schema.audits).values(
+                insert(audit_schema.audit_events).values(
                     action=action,
                     subject_type=subject_type,
                     subject_id=subject_id,
@@ -188,6 +188,77 @@ class Seeder:
                     created_at=now_utc(),
                 )
             ).inserted_primary_key[0]
+
+    def seal(
+        self,
+        *,
+        seq: int = 1,
+        kind: str = "seal",
+        from_id: int = 0,
+        to_id: int = 1,
+        row_count: int = 1,
+        sealed_at=None,
+    ) -> None:
+        """A ``firm_audit_seals`` row — the panel reads only ``sealed_at`` (for the activation
+        moment), so the MAC columns get harmless placeholder hex."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(audit_schema.seals).values(
+                    seq=seq,
+                    kind=kind,
+                    from_id=from_id,
+                    to_id=to_id,
+                    row_count=row_count,
+                    rows_mac="00" * 32,
+                    prev_mac="genesis",
+                    seal_mac="ab" * 32,
+                    sealed_at=sealed_at or now_utc(),
+                    key_id="deadbeef",
+                )
+            )
+
+    def verify_status(
+        self,
+        *,
+        outcome: str = "ok",
+        ran_at=None,
+        ok_count: int = 0,
+        warning_count: int = 0,
+        unprotected_count: int = 0,
+        tampered_count: int = 0,
+        error_message: str | None = None,
+        last_full_coverage_at=None,
+        cycle_position: int | None = None,
+        cycle_length: int | None = None,
+        newest_anchor_at=None,
+        anchor_configured: bool = False,
+        unsealed_tail_count: int = 0,
+        unsealed_tail_oldest_at=None,
+        affected_identifiers: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """The single ``firm_audit_verify_status`` row the verifier would upsert."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(audit_schema.verify_status).values(
+                    ran_at=ran_at or now_utc(),
+                    outcome=outcome,
+                    ok_count=ok_count,
+                    warning_count=warning_count,
+                    unprotected_count=unprotected_count,
+                    tampered_count=tampered_count,
+                    error_message=error_message,
+                    last_full_coverage_at=last_full_coverage_at,
+                    cycle_position=cycle_position,
+                    cycle_length=cycle_length,
+                    newest_anchor_at=newest_anchor_at,
+                    anchor_configured=anchor_configured,
+                    unsealed_tail_count=unsealed_tail_count,
+                    unsealed_tail_oldest_at=unsealed_tail_oldest_at,
+                    affected_identifiers=affected_identifiers,
+                    duration_seconds=duration_seconds,
+                )
+            )
 
 
 @pytest.fixture

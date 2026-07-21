@@ -2,7 +2,7 @@
 
 ## Schema
 
-One table, `firm_audits`:
+One table, `firm_audit_events`:
 
 ```
 id              autoincrement PK, total event order
@@ -37,7 +37,7 @@ is no `update`, and the only `delete` anywhere in the package is opt-in, age-bas
 [Retention & querying](retention-and-querying.md)) — recording never triggers it.
 
 This is an application-level guarantee, not a database constraint: nothing stops raw SQL against
-`firm_audits` from outside firm-audit. The guarantee is "the module is the sole writer, and it
+`firm_audit_events` from outside firm-audit. The guarantee is "the module is the sole writer, and it
 only inserts."
 
 ## JSON-as-text, not JSONB
@@ -58,7 +58,7 @@ A small tagged-object protocol round-trips `datetime`/`date`/`Decimal`/`UUID` va
 ## Same-transaction guarantee — the fine print
 
 `record(conn, ...)` writes on exactly the connection you pass. The atomicity guarantee holds
-only when `firm_audits` lives in the same database that connection belongs to — pass a
+only when `firm_audit_events` lives in the same database that connection belongs to — pass a
 connection from a different database and the row is simply written there, untethered from
 whatever transaction you think it's joining. There's no cheap way to detect this misuse at
 runtime, so it's a documented contract rather than an enforced one.

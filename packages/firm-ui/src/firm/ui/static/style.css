@@ -205,6 +205,31 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
          padding: 2.5rem 1rem; text-align: center; }
 .empty svg { width: 30px; height: 30px; opacity: .55; }
 
+/* -- integrity (tamper-evidence) panel --------------------------------------- */
+/* A state-adaptive strip above the KPI cards: OK recedes to one calm ~40px line, TAMPERED
+   expands to a full-width banner that dominates (design D22, variant A). Tones reuse the
+   pill palette; only the strip/banner layout is new here. */
+.integrity { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .9rem;
+             padding: .45rem .75rem; margin: .4rem 0 .1rem; border-radius: var(--radius-lg);
+             background: var(--surface-2); font-size: var(--fs-sm); }
+.integrity.warn { background: var(--warn-bg); }
+.integrity.danger.banner { display: block; background: var(--danger-bg);
+                           border: 1px solid var(--danger); padding: .9rem 1rem; }
+.integrity-badge { display: flex; align-items: center; gap: .6rem; min-width: 0; }
+.integrity-detail { min-width: 0; }
+.integrity-headline { font-weight: 600; color: var(--danger); }
+.integrity-items { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .15rem; color: var(--warn); }
+.integrity.banner .kv { margin: .7rem 0 .5rem; }
+.integrity-next { margin-top: .5rem; }
+.integrity-next code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Mobile (design D25): the strip wraps to badge + When on line 1, the detail truncatable on
+   line 2; the banner stacks its Kv rows and gives links a >=44px touch target. */
+@media (max-width: 560px) {
+  .integrity-detail { flex-basis: 100%; }
+  .integrity.banner .kv { grid-template-columns: 1fr; }
+  .integrity.banner a, .integrity-next a { display: inline-flex; align-items: center; min-height: 44px; }
+}
+
 /* -- filter form ------------------------------------------------------------- */
 .filters { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin: 1rem 0; }
 .filters label { display: flex; flex-direction: column; gap: .25rem; font-size: var(--fs-xs); color: var(--text-3); }

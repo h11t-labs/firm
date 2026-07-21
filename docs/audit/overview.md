@@ -21,7 +21,7 @@ no longer atomic with the business write. See [Configuration](configuration.md).
 
 ## The model
 
-One table, `firm_audits`:
+One table, `firm_audit_events`:
 
 | Column | Purpose |
 |---|---|

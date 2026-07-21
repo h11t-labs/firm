@@ -1,4 +1,4 @@
-"""initial schema (firm_audits)
+"""initial schema (firm_audit_events)
 
 Revision ID: 0001
 Revises:

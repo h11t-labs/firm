@@ -1,0 +1,17 @@
+{#def view #}
+{# The tamper-evidence verify-status panel (design D22-D25). `view` is the ready-made dict built
+   by render._integrity_view: every string, link, and tone token is decided there, so this only
+   places them. OK/WARNING/ERROR/never/not-configured render as a thin strip; TAMPERED expands to
+   a full-width `role="alert"` banner. Every state shows an icon glyph + a word, never colour
+   alone. Built from existing tokens only (pill, Kv, When). #}
+<div class="integrity {{ view.strip_class }}{{ ' banner' if view.layout == 'banner' }}"{% if view.role_alert %} role="alert"{% endif %}>
+  <div class="integrity-badge">
+    <span class="pill lg{{ ' ' ~ view.pill_class if view.pill_class }}">{{ view.glyph }} {{ view.word }}</span>
+    {% if view.when %}<span class="integrity-when secondary">{{ view.when_label }} {{ view.when }}</span>{% endif %}
+    {% if view.headline %}<span class="integrity-headline">{{ view.headline }}</span>{% endif %}
+  </div>
+  {% if view.detail %}<div class="integrity-detail secondary truncate" title="{{ view.detail }}">{{ view.detail }}</div>{% endif %}
+  {% if view.cause_lines %}<ul class="integrity-items">{% for line in view.cause_lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+  {% if view.kv %}{{ view.kv }}{% endif %}
+  {% if view.next_step %}<div class="integrity-next secondary">{{ view.next_step }}</div>{% endif %}
+</div>

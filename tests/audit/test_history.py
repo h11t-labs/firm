@@ -44,8 +44,8 @@ def test_filter_by_since(audit: AuditLog) -> None:
     audit.record("old")
     with transaction(audit.engine) as conn:
         conn.execute(
-            update(schema.audits)
-            .where(schema.audits.c.action == "old")
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action == "old")
             .values(created_at=now_utc() - timedelta(days=2))
         )
     audit.record("new")

@@ -15,9 +15,10 @@ from sqlalchemy import Connection, select
 
 from .._core.clock import now_utc
 from . import schema
+from .integrity import Key, new_ulid, row_mac
 from .serialization import dump_json, load_json
 
-_audits = schema.audits
+_audits = schema.audit_events
 
 
 class Ref(NamedTuple):
@@ -94,12 +95,46 @@ def append(
     changes: dict[str, Any] | None = None,
     correlation_id: str | None = None,
     context: dict[str, Any] | None = None,
+    key: Key | None = None,
 ) -> None:
-    """Insert one audit row on ``conn``. The sole mutating call on the write path."""
+    """Insert one audit row on ``conn``. The sole mutating call on the write path.
+
+    Without ``key`` this is exactly the pre-tamper-evidence insert: the same columns, one
+    statement, no extra reads or round-trips, ``entry_id``/``row_mac``/``key_id`` left NULL.
+
+    With ``key`` (Layer 1) the writer additionally, still in this one INSERT and without any
+    coordination: mints a ULID ``entry_id``, captures ``created_at`` **once** and feeds that
+    same value to both the MAC input and the row (two ``now_utc()`` calls would differ by
+    microseconds and make the row verify as TAMPERED), and computes ``row_mac`` over the
+    canonical row. The JSON payloads are serialized once and fed verbatim to both the MAC and
+    the insert, so the signed bytes are exactly the bytes stored.
+    """
     subject_type, subject_id, subject_label = _ref(subject)
     actor_type, actor_id, actor_label = _ref(actor)
-    conn.execute(
-        _audits.insert().values(
+    data_json = dump_json(data)
+    changes_json = dump_json(changes)
+    context_json = dump_json(context)
+    values: dict[str, Any] = {
+        "action": action,
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "subject_label": subject_label,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "actor_label": actor_label,
+        "correlation_id": correlation_id,
+        "data": data_json,
+        "changes": changes_json,
+        "context": context_json,
+        "created_at": now_utc(),
+    }
+    if key is not None:
+        entry_id = new_ulid(values["created_at"])
+        values["entry_id"] = entry_id
+        values["key_id"] = key.id
+        values["row_mac"] = row_mac(
+            key,
+            entry_id=entry_id,
             action=action,
             subject_type=subject_type,
             subject_id=subject_id,
@@ -108,12 +143,12 @@ def append(
             actor_id=actor_id,
             actor_label=actor_label,
             correlation_id=correlation_id,
-            data=dump_json(data),
-            changes=dump_json(changes),
-            context=dump_json(context),
-            created_at=now_utc(),
+            data=data_json,
+            changes=changes_json,
+            context=context_json,
+            created_at=values["created_at"],
         )
-    )
+    conn.execute(_audits.insert().values(**values))
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:

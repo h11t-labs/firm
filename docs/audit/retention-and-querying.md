@@ -36,7 +36,7 @@ audit.history(actor="cron")                                    # a role/label ac
 ```
 
 The same-transaction `record(conn, ...)` path has no equivalent inline query — open your own
-connection and call `audit.history(...)`, or query `firm.audit.schema.audits` directly if you
+connection and call `audit.history(...)`, or query `firm.audit.schema.audit_events` directly if you
 need something `history()` doesn't express.
 
 ## Retention
@@ -75,3 +75,23 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000
 > **Note:** with `max_age` unset, the audit log never prunes — it grows until you explicitly set
 > a retention policy. For compliance-sensitive deployments, this is the point: nothing deletes
 > audit history unless you've configured it to.
+
+### Pruning with tamper-evidence on
+
+Without a key, pruning simply deletes rows older than `max_age` in batches. With
+[tamper-evidence](tamper-evidence.md) active (a key is configured and at least one seal exists),
+pruning **aligns to seal boundaries and only prunes what verifies**:
+
+- It deletes only rows in ranges **fully covered by seals older than the cutoff** — never partial
+  ranges, never unsealed rows — then writes a `kind="checkpoint"` seal carrying the chain forward.
+- Before deleting a range it **re-verifies** it (recomputing each row's `row_mac` and the range's
+  `rows_mac`/`row_count` against the seal). A range that no longer verifies is **refused**: nothing
+  in or beyond it is pruned, the checkpoint does not advance, `Retention.last_refused_tampered`
+  records it, and the refusal routes through `on_error`. This stops a tampered-then-expired row
+  from being laundered by deletion — the evidence stays in place, and a later `firm-audit verify`
+  still reports it as `TAMPERED`.
+- The refusal repeats on every subsequent run until you preserve the database and investigate with
+  `firm-audit verify --full`.
+
+The one cost of the guarantee is a read: pre-prune verification re-reads (keyset-paginated) every
+row it is about to delete.

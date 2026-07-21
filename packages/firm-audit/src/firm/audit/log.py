@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import warnings
 from collections.abc import Callable
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import Connection, Engine
@@ -12,7 +15,27 @@ from .._core.database import create_engine_for, dispose_engine, transaction
 from .._core.poller import default_on_error
 from . import events, schema
 from .events import Reference
+from .integrity import Key, load_key
 from .retention import Retention, RetentionLoop
+from .sealing import Sealer, SealLoop
+from .verify import Verifier, VerifyReport
+
+#: The anchor callback's signature: ``(seq, seal_mac, sealed_at)`` for one freshly sealed block.
+AnchorCallback = Callable[[int, str, datetime], None]
+
+
+@lru_cache(maxsize=8)
+def _load_key_cached(raw: str | None) -> Key | None:
+    # Parsing derives a SHA-256; cache it per distinct raw value so the module-level ``record``
+    # path doesn't re-hash on every event. Keyed on the raw string, so a test (or a live config
+    # reload) that changes ``FIRM_AUDIT_KEY`` still gets a fresh parse. A too-short key raises
+    # (design review 4A) and is deliberately not cached.
+    return load_key(raw)
+
+
+def _env_key() -> Key | None:
+    """The writer key from ``FIRM_AUDIT_KEY``, or ``None`` when unset/empty (feature off)."""
+    return _load_key_cached(os.environ.get("FIRM_AUDIT_KEY"))
 
 
 def record(
@@ -29,8 +52,11 @@ def record(
     """Record an event inside the caller's transaction (the shared-DB, atomic path).
 
     The row joins ``conn``'s transaction, so it commits or rolls back together with whatever else
-    that transaction does — the same-transaction guarantee. This only holds when ``firm_audits``
-    lives in the database ``conn`` belongs to.
+    that transaction does — the same-transaction guarantee. This only holds when
+    ``firm_audit_events`` lives in the database ``conn`` belongs to.
+
+    This standalone path has no ``AuditLog`` to carry a key, so it picks the writer key up from
+    ``FIRM_AUDIT_KEY`` directly; with no key set it behaves exactly as before.
     """
     events.append(
         conn,
@@ -41,6 +67,7 @@ def record(
         changes=changes,
         correlation_id=correlation_id,
         context=context,
+        key=_env_key(),
     )
 
 
@@ -54,6 +81,17 @@ class AuditLog:
         max_age: float | None = None,
         background_retention: bool = False,
         retention_interval: float = 3600.0,
+        mac_key: str | None = None,
+        background_sealing: bool = False,
+        seal_interval: float = 60.0,
+        grace: float = 60.0,
+        seal_batch_size: int = 10_000,
+        anchor_path: str | None = None,
+        on_anchor: AnchorCallback | None = None,
+        verify_cycle: int = 7,
+        anchor_max_age: float | None = None,
+        unsealed_tail_max_age: float | None = None,
+        verify_state_path: str | None = None,
         on_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         if engine is not None:
@@ -67,10 +105,43 @@ class AuditLog:
 
         self.max_age = max_age
 
+        # Tamper-evidence key: explicit ``mac_key=`` wins (pass "" to force it off and ignore
+        # the environment), otherwise ``FIRM_AUDIT_KEY``. ``load_key`` hard-fails a too-short
+        # secret here at construction (design review 4A); ``None`` means the feature is off and
+        # every write behaves exactly as it did before tamper-evidence existed.
+        self._key = load_key(mac_key) if mac_key is not None else _env_key()
+
+        # Sealing config (Layer 2). ``grace`` must exceed the longest audit-recording transaction
+        # plus inter-instance clock skew; the anchor path falls back to ``FIRM_AUDIT_ANCHOR_PATH``.
+        self.grace = grace
+        self.seal_interval = seal_interval
+        self.seal_batch_size = seal_batch_size
+        self._anchor_path = (
+            anchor_path if anchor_path is not None else os.environ.get("FIRM_AUDIT_ANCHOR_PATH")
+        )
+        self._on_anchor = on_anchor
+
+        # Verification config (Layer 3 / rolling coverage). ``anchor_max_age`` defaults to 3x the
+        # seal interval (design D16); the unsealed-tail liveness threshold to a generous multiple
+        # of the seal cadence (grace + interval is the normal ceiling, so well past means stalled).
+        # The rolling-cursor state path is advisory only and falls back to an env var.
+        self.verify_cycle = verify_cycle
+        self._anchor_max_age = anchor_max_age if anchor_max_age is not None else 3.0 * seal_interval
+        self._unsealed_tail_max_age = (
+            unsealed_tail_max_age
+            if unsealed_tail_max_age is not None
+            else max(10.0 * seal_interval, grace + seal_interval)
+        )
+        self._verify_state_path = (
+            verify_state_path
+            if verify_state_path is not None
+            else os.environ.get("FIRM_AUDIT_VERIFY_STATE")
+        )
+
         if create_schema:
             schema.create_all(self.engine)
 
-        # Background pruning failures are routed here (default: traceback to stderr).
+        # Background pruning / sealing failures are routed here (default: traceback to stderr).
         self.on_error = on_error if on_error is not None else default_on_error
         self.retention = Retention(self)
         self._loop = (
@@ -80,6 +151,35 @@ class AuditLog:
         )
         if self._loop is not None:
             self._loop.start()
+
+        self.sealer = Sealer(self)
+        self.verifier = Verifier(self)
+        self._seal_loop: SealLoop | None = None
+        if background_sealing:
+            self._warn_sealing_enabled(seal_interval)
+            self._seal_loop = SealLoop(self.sealer, seal_interval, on_error=self.on_error)
+            self._seal_loop.start()
+
+    def _warn_sealing_enabled(self, seal_interval: float) -> None:
+        """Restate the two-phase rollout and grace-sizing rules when sealing is switched on
+        (design review 1A/D13). A stderr-only startup line would vanish; a warning is visible and
+        testable, and the no-key case is loud because it silently produces no seals at all."""
+        if self._key is None:
+            warnings.warn(
+                "audit sealing is enabled but no FIRM_AUDIT_KEY / mac_key is configured — no "
+                "seals will be written. Two-phase rollout: deploy the key to every instance "
+                "first (phase 1), then enable sealing (phase 2).",
+                stacklevel=3,
+            )
+            return
+        warnings.warn(
+            f"audit sealing is enabled (grace={self.grace}s, interval={seal_interval}s). Grace "
+            "must exceed your longest audit-recording transaction plus inter-instance clock "
+            "skew, or legitimate late commits land in a sealed range (verify reports them as a "
+            "WARNING, never TAMPERED). Record long-running jobs via the own-transaction path "
+            "(omit conn=) rather than widening grace fleet-wide.",
+            stacklevel=3,
+        )
 
     def record(
         self,
@@ -106,6 +206,7 @@ class AuditLog:
                 changes=changes,
                 correlation_id=correlation_id,
                 context=context,
+                key=self._key,
             )
         else:
             with transaction(self.engine) as own_conn:
@@ -118,6 +219,7 @@ class AuditLog:
                     changes=changes,
                     correlation_id=correlation_id,
                     context=context,
+                    key=self._key,
                 )
 
     def history(
@@ -149,9 +251,29 @@ class AuditLog:
                 limit=limit,
             )
 
+    def verify(
+        self, *, anchor_path: str | None = None, from_seq: int | None = None, full: bool = False
+    ) -> VerifyReport:
+        """Verify Layers 1-3 read-only and persist the outcome to ``firm_audit_verify_status``.
+
+        ``anchor_path`` defaults to the configured anchor (:data:`FIRM_AUDIT_ANCHOR_PATH`) so a
+        deployment that writes an anchor also checks it; pass a path to override, or ``full=True``
+        to recompute every sealed range from the genesis/checkpoint floor (design review D12).
+        Raises :class:`~firm.audit.verify.VerifyError` on an unknown ``key_id`` (after writing the
+        ``error`` outcome). Reuses one :class:`~firm.audit.verify.Verifier` so the advisory rolling
+        cursor advances across calls in a long-running process.
+        """
+        return self.verifier.run(
+            anchor_path=anchor_path if anchor_path is not None else self._anchor_path,
+            from_seq=from_seq,
+            full=full,
+        )
+
     def close(self) -> None:
         if self._loop is not None:
             self._loop.stop()
+        if self._seal_loop is not None:
+            self._seal_loop.stop()
         if self._owns_engine:
             dispose_engine(self.engine)
 

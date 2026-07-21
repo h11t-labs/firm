@@ -100,8 +100,8 @@ def test_prune_with_max_age_flag_deletes_old_rows(db_url: str) -> None:
     audit.record("old")
     with transaction(audit.engine) as conn:
         conn.execute(
-            update(schema.audits)
-            .where(schema.audits.c.action == "old")
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action == "old")
             .values(created_at=now_utc() - timedelta(hours=2))
         )
     audit.close()
@@ -109,6 +109,50 @@ def test_prune_with_max_age_flag_deletes_old_rows(db_url: str) -> None:
     result = CliRunner().invoke(main, ["prune", "--database-url", db_url, "--max-age", "3600"])
     assert result.exit_code == 0
     assert "pruned 1 events" in result.output
+
+
+def test_prune_prints_skipped_unsealed_count(db_url: str, monkeypatch) -> None:
+    secret = "cli-prune-test-key-padding-0123456789"  # noqa: S105  (throwaway)
+    audit = AuditLog(database_url=db_url, mac_key=secret, grace=0.0)
+    audit.record("sealed")
+    audit.sealer.run_once()
+    audit.record("old.a")
+    audit.record("old.b")
+    with transaction(audit.engine) as conn:
+        conn.execute(
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action.in_(["old.a", "old.b"]))
+            .values(created_at=now_utc() - timedelta(hours=2))
+        )
+    audit.close()
+    monkeypatch.setenv("FIRM_AUDIT_KEY", secret)
+
+    result = CliRunner().invoke(main, ["prune", "--database-url", db_url, "--max-age", "3600"])
+    assert result.exit_code == 0
+    assert "skipped" in result.output
+    assert "UNSEALED" in result.output
+
+
+def test_prune_reports_refused_tampered_range(db_url: str, monkeypatch, at_time) -> None:
+    secret = "cli-refuse-test-key-padding-0123456789"  # noqa: S105  (throwaway)
+    audit = AuditLog(database_url=db_url, mac_key=secret, grace=0.0)
+    with at_time(now_utc() - timedelta(hours=2)):  # signed old, so it seals and expires cleanly
+        audit.record("sealed")
+    audit.sealer.run_once()
+    # Tamper the sealed row's content with a plain UPDATE (row_mac column left untouched).
+    with transaction(audit.engine) as conn:
+        conn.execute(
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action == "sealed")
+            .values(action="sealed.TAMPERED")
+        )
+    audit.close()
+    monkeypatch.setenv("FIRM_AUDIT_KEY", secret)
+
+    result = CliRunner().invoke(main, ["prune", "--database-url", db_url, "--max-age", "3600"])
+    assert result.exit_code == 0
+    assert "pruned 0 events" in result.output
+    assert "REFUSED" in result.output
 
 
 def test_env_var_supplies_url(db_url: str, monkeypatch) -> None:
