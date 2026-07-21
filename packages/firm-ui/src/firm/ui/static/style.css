@@ -206,27 +206,74 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
 .empty svg { width: 30px; height: 30px; opacity: .55; }
 
 /* -- integrity (tamper-evidence) panel --------------------------------------- */
-/* A state-adaptive strip above the KPI cards: OK recedes to one calm ~40px line, TAMPERED
-   expands to a full-width banner that dominates (design D22, variant A). Tones reuse the
-   pill palette; only the strip/banner layout is new here. */
-.integrity { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .9rem;
-             padding: .45rem .75rem; margin: .4rem 0 .1rem; border-radius: var(--radius-lg);
-             background: var(--surface-2); font-size: var(--fs-sm); }
-.integrity.warn { background: var(--warn-bg); }
-.integrity.danger.banner { display: block; background: var(--danger-bg);
-                           border: 1px solid var(--danger); padding: .9rem 1rem; }
-.integrity-badge { display: flex; align-items: center; gap: .6rem; min-width: 0; }
-.integrity-detail { min-width: 0; }
-.integrity-headline { font-weight: 600; color: var(--danger); }
-.integrity-items { margin: 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .15rem; color: var(--warn); }
-.integrity.banner .kv { margin: .7rem 0 .5rem; }
-.integrity-next { margin-top: .5rem; }
-.integrity-next code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-/* Mobile (design D25): the strip wraps to badge + When on line 1, the detail truncatable on
-   line 2; the banner stacks its Kv rows and gives links a >=44px touch target. */
+/* A state-adaptive panel above the KPI cards: OK recedes to one calm line, TAMPERED expands to a
+   full-width banner that dominates (design D22, variant A). A tinted shield medallion anchors the
+   verdict in every state; per-state tints derive from the status tokens via color-mix, so there
+   is no new hue here. */
+.integrity { display: flex; align-items: center; gap: .7rem;
+             padding: .5rem .7rem; margin: .5rem 0 .15rem; border-radius: var(--radius-lg);
+             background: var(--surface-2); border: 1px solid var(--border); font-size: var(--fs-sm); }
+.integrity.ok   { background: var(--ok-bg);   border-color: color-mix(in oklab, var(--ok) 22%, transparent); }
+.integrity.warn { background: var(--warn-bg); border-color: color-mix(in oklab, var(--warn) 30%, transparent); }
+
+/* The medallion: a tinted rounded square holding the shield. `currentColor` is set to the state
+   tone just below, so both the 14%-tint fill and the full-strength glyph track it. */
+.integrity-icon { display: grid; place-items: center; flex: none; width: 30px; height: 30px;
+                  border-radius: 9px; background: color-mix(in oklab, currentColor 14%, transparent); }
+.integrity-icon svg { width: 17px; height: 17px; }
+.integrity.ok      .integrity-icon { color: var(--ok); }
+.integrity.warn    .integrity-icon { color: var(--warn); }
+.integrity.danger  .integrity-icon { color: var(--danger); }
+.integrity.neutral .integrity-icon { color: var(--text-3); }
+
+/* Strip body: inline, wrapping meta (word · when · detail) on one calm line that wraps only when
+   it must. */
+.integrity-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .55rem; min-width: 0; }
+.integrity-word { font-weight: 600; }
+.integrity.ok      .integrity-word { color: var(--ok); }
+.integrity.warn    .integrity-word { color: var(--warn); }
+.integrity.neutral .integrity-word { color: var(--text-2); }
+.integrity-when, .integrity-detail { color: var(--text-2); min-width: 0; }
+.integrity-items { margin: .15rem 0 0; padding-left: 1.05rem; display: flex; flex-direction: column;
+                   gap: .15rem; color: var(--warn); flex-basis: 100%; }
+
+/* TAMPERED banner: a medallion-anchored alert that owns the top of the page. The danger reads
+   through the tinted fill, the medallion, and the type — not a loud outline. */
+.integrity.danger.banner { align-items: flex-start; gap: .85rem; background: var(--danger-bg);
+                           border-color: color-mix(in oklab, var(--danger) 38%, transparent);
+                           padding: .95rem 1.05rem; }
+.integrity.danger .integrity-icon { width: 38px; height: 38px; border-radius: 11px; }
+.integrity.danger .integrity-icon svg { width: 22px; height: 22px; }
+.integrity.banner .integrity-body { display: block; flex: 1; }
+.integrity.banner .integrity-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: .5rem; }
+.integrity.banner .integrity-word { font-size: var(--fs-lg); letter-spacing: .02em; color: var(--danger); }
+.integrity.banner .integrity-when { margin-left: auto; }  /* push the timestamp to the right edge */
+.integrity-headline { font-weight: 500; color: var(--text-2); }
+
+/* What it means: a plain-language sentence in body colour, the most legible line in the alert. */
+.integrity-meaning { margin: .4rem 0 0; color: var(--text); font-size: var(--fs-md); line-height: 1.5; }
+
+/* Which records: chips that link into the audit table when a row id was recorded. */
+.integrity-affected { margin-top: .6rem; display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.integrity-affected-label { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); }
+.integrity-chip { display: inline-flex; align-items: center; padding: .1rem .55rem; border-radius: var(--radius-pill);
+                  font-size: var(--fs-sm); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                  background: color-mix(in oklab, var(--danger) 13%, transparent);
+                  border: 1px solid color-mix(in oklab, var(--danger) 26%, transparent); }
+.integrity-chip a { color: var(--danger); }
+
+/* What to do: a hairline-divided footer — verify command, evidence caution, runbook link. */
+.integrity-next { margin-top: .85rem; padding-top: .65rem; display: flex; flex-wrap: wrap;
+                  align-items: baseline; gap: .3rem .9rem; color: var(--text-2);
+                  border-top: 1px solid color-mix(in oklab, var(--danger) 20%, transparent); }
+.integrity-verify { color: var(--text); }
+.integrity-caution { color: var(--text-2); }
+.integrity-next code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                       background: color-mix(in oklab, var(--danger) 12%, transparent);
+                       padding: .05rem .35rem; border-radius: 5px; color: var(--danger); }
+/* Mobile (design D25): the timestamp drops below the title and links get a >=44px touch target. */
 @media (max-width: 560px) {
-  .integrity-detail { flex-basis: 100%; }
-  .integrity.banner .kv { grid-template-columns: 1fr; }
+  .integrity.banner .integrity-when { margin-left: 0; flex-basis: 100%; }
   .integrity.banner a, .integrity-next a { display: inline-flex; align-items: center; min-height: 44px; }
 }
 

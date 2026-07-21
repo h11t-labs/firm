@@ -223,7 +223,7 @@ def _state(status, config=None, **kw):
 def test_render_ok_is_a_calm_strip(runtime) -> None:
     body = _audit_html(_state(_status()))
     assert 'class="integrity ok"' in body
-    assert "✓" in body
+    assert 'class="integrity-icon"' in body  # shield medallion anchors the verdict
     assert "integrity OK" in body
     assert "unsealed tail 2 rows" in body
     assert "cycle 3/7" in body
@@ -233,7 +233,7 @@ def test_render_ok_is_a_calm_strip(runtime) -> None:
 def test_render_warning_itemizes_the_cause(runtime) -> None:
     body = _audit_html(_state(_status(outcome="warning", warning_count=2)))
     assert 'class="integrity warn"' in body
-    assert "⚠" in body
+    assert 'class="integrity-icon"' in body
     assert "WARNING" in body
     assert "2 late commits in a sealed range" in body
 
@@ -251,12 +251,15 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
     body = _audit_html(_state(status))
     assert 'role="alert"' in body
     assert "integrity danger banner" in body
-    assert "⛔" in body
+    assert 'class="integrity-icon"' in body
     assert "TAMPERED" in body
-    assert "2 integrity findings" in body
-    assert 'href="/audit/4041"' in body  # affected range links into the audit table
-    assert "firm-audit verify --full" in body
-    assert "docs" in body
+    assert "2 findings" in body
+    assert "no longer matches its signatures" in body  # plain-language "what is wrong"
+    assert "Affected" in body
+    assert 'href="/audit/4041"' in body  # affected record links into the audit table
+    assert 'class="integrity-chip"' in body
+    assert "firm-audit verify --full" in body  # the verify command
+    assert render._TAMPER_DOCS_URL in body  # runbook link
 
 
 def test_mobile_wrap_contract_is_present(runtime) -> None:
@@ -265,10 +268,9 @@ def test_mobile_wrap_contract_is_present(runtime) -> None:
     assert media_query in css
     mobile_css = css.split(media_query, maxsplit=1)[1]
     compact_mobile_css = mobile_css.replace(" ", "")
-    assert ".integrity-detail" in mobile_css
+    # The banner drops its timestamp below the title and gives links a >=44px touch target.
+    assert ".integrity.banner .integrity-when" in mobile_css
     assert "flex-basis:100%" in compact_mobile_css
-    assert ".integrity.banner .kv" in mobile_css
-    assert "grid-template-columns:1fr" in compact_mobile_css
     assert ".integrity.banner a" in mobile_css
     assert ".integrity-next a" in mobile_css
     assert "min-height:44px" in compact_mobile_css
@@ -279,7 +281,7 @@ def test_mobile_wrap_contract_is_present(runtime) -> None:
     affected = '[{"kind": "seal", "label": "#12", "id": 4041}]'
     tampered = _status(outcome="tampered", tampered_count=1, affected_identifiers=affected)
     tampered_body = _audit_html(_state(tampered))
-    assert 'class="kv"' in tampered_body
+    assert 'class="integrity-affected"' in tampered_body
     assert 'class="integrity-next' in tampered_body
 
 

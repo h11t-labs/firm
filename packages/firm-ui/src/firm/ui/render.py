@@ -49,6 +49,14 @@ _ICONS = {
     "sun": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     "moon": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     "monitor": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    # Shield state marks for the tamper-evidence panel (stroke = currentColor, tinted per state
+    # by the .integrity-icon medallion). A crisp icon beats the emoji glyphs that render
+    # inconsistently across platforms; the verdict word travels alongside, so meaning never
+    # rides on the icon (or colour) alone.
+    "shield-check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="m8.8 11.3 2.2 2.2 4.2-4.5"/></svg>',
+    "shield-alert": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="M12 7.7v3.6"/><path d="M12 14.4h.01"/></svg>',
+    "shield-x": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="m10 9.4 4 4.4M14 9.4l-4 4.4"/></svg>',
+    "shield": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/></svg>',
 }
 
 # The auto-refresh interval choices, in display order; 0 means off. Shared by the header control
@@ -759,15 +767,15 @@ def _sort_columns(
 # -- integrity (tamper-evidence) panel ---------------------------------------------------------
 # :func:`audit_queries.integrity_state` decides *which* of the six states applies; this section
 # turns that state into the ready-made strings/markup the <Integrity/> component renders (design
-# review D22-D25). Every state carries an icon glyph + a word, never colour alone; the glyphs are
-# plain unicode (no new SVG icons), so a screen with images off still reads the verdict.
-_INTEGRITY_GLYPH = {
-    "ok": "✓",  # ✓
-    "warning": "⚠",  # ⚠
-    "error": "⚠",
-    "tampered": "⛔",  # ⛔
-    "never_ran": "⚠",
-    "not_configured": "○",  # ○ (neutral, no alarm)
+# review D22-D25). Every state carries a shield icon + a word, never colour alone, so the verdict
+# still reads with images off (the word) and without colour vision (icon shape + word).
+_INTEGRITY_ICON = {
+    "ok": "shield-check",
+    "warning": "shield-alert",
+    "error": "shield-alert",
+    "tampered": "shield-x",
+    "never_ran": "shield-alert",
+    "not_configured": "shield",  # plain outline — neutral, no alarm
 }
 _INTEGRITY_WORD = {
     "ok": "integrity OK",
@@ -777,9 +785,8 @@ _INTEGRITY_WORD = {
     "never_ran": "never verified",
     "not_configured": "not configured",
 }
-# The pill tone modifier ("" = the neutral base pill, legacy/not-configured is no alarm); the
-# strip's own background class mirrors it but names the neutral case explicitly.
-_INTEGRITY_PILL = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": ""}
+# The panel's tone class drives both the background tint and the medallion colour; the neutral
+# case (legacy / not-configured) is named explicitly so it reads as "no alarm", not "unstyled".
 _INTEGRITY_STRIP = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": "neutral"}
 
 # The tamper-evidence docs (design/threat model + the "what to do when it's red" runbook).
@@ -852,8 +859,7 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
     view: dict[str, Any] = {
         "state": state.state,
         "strip_class": _INTEGRITY_STRIP[state.tone],
-        "pill_class": _INTEGRITY_PILL[state.tone],
-        "glyph": _INTEGRITY_GLYPH[state.state],
+        "icon": Markup(_ICONS[_INTEGRITY_ICON[state.state]]),
         "word": _INTEGRITY_WORD[state.state],
         "escalate": state.escalate,
         "role_alert": state.state == "tampered",
@@ -863,7 +869,8 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         "detail": "",
         "cause_lines": [],
         "headline": "",
-        "kv": None,
+        "meaning": "",
+        "affected": None,
         "next_step": None,
     }
 
@@ -887,13 +894,31 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
 
     if state.state == "tampered":
         n = s["tampered_count"]
-        view["headline"] = f"{_num(n)} integrity finding{'' if n == 1 else 's'}"
+        view["when"] = _when(s["ran_at"])
+        view["when_label"] = "first detected"
+        view["headline"] = f"{_num(n)} finding{'' if n == 1 else 's'}"
+        # What it means, in plain language — true for every tamper class (modify / delete / insert
+        # / broken seal chain), since the precise per-finding message is not persisted to the
+        # status row today.
+        view["meaning"] = (
+            "Sealed audit data no longer matches its signatures — it was modified, deleted, or "
+            "inserted after being recorded."
+        )
+        # Which records: each affected identifier as a chip, linking into the audit table when the
+        # verifier recorded a row id.
         cells = _affected_cells(s["affected_identifiers"])
-        cells.append(("first detected", _when(s["ran_at"])))
-        view["kv"] = Markup(_CATALOG.render("Kv", cells=cells))
+        if cells:
+            view["affected"] = Markup(" ").join(
+                Markup('<span class="integrity-chip">{}</span>').format(value)
+                for _kind, value in cells
+            )
+        # What to do: verify it yourself, and don't disturb the evidence.
         view["next_step"] = Markup(
-            "preserve the DB unchanged · run <code>firm-audit verify --full</code> · "
-            f'<a href="{_TAMPER_DOCS_URL}">docs</a>'
+            '<span class="integrity-verify">Verify it yourself: '
+            "<code>firm-audit verify --full</code></span>"
+            '<span class="integrity-caution">Keep the database unchanged — it is the evidence.'
+            "</span>"
+            f'<a href="{_TAMPER_DOCS_URL}">read the runbook</a>'
         )
         return view
 
