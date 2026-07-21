@@ -867,6 +867,7 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         "when": None,
         "when_label": "",
         "detail": "",
+        "facts": [],
         "cause_lines": [],
         "headline": "",
         "meaning": "",
@@ -922,23 +923,26 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         )
         return view
 
+    if state.state == "ok":
+        # Distinct facts, each with its own label so they don't blur into one grey run-on,
+        # ordered by what matters most at a glance: is the check fresh, how complete is its
+        # coverage, is the anchor current, how much recent data isn't sealed yet.
+        facts: list[dict[str, Any]] = [{"label": "verified", "value": _when(s["ran_at"])}]
+        if s["last_full_coverage_at"] is not None:
+            cov = _reltime(s["last_full_coverage_at"])
+            if s["cycle_position"] and s["cycle_length"]:
+                cov += f" · cycle {s['cycle_position']}/{s['cycle_length']}"
+        else:
+            cov = "pending"
+        facts.append({"label": "full coverage", "value": cov})
+        if s["anchor_configured"]:
+            facts.append({"label": "anchor", "value": _reltime(s["newest_anchor_at"])})
+        facts.append({"label": "unsealed tail", "value": f"{_num(s['unsealed_tail_count'])} rows"})
+        view["facts"] = facts
+        return view
+
     view["when"] = _when(s["ran_at"])
     view["when_label"] = "verified"
-
-    if state.state == "ok":
-        parts_: list[str] = []
-        if s["last_full_coverage_at"] is not None:
-            fc = f"full coverage {_reltime(s['last_full_coverage_at'])}"
-            if s["cycle_position"] and s["cycle_length"]:
-                fc += f" (cycle {s['cycle_position']}/{s['cycle_length']})"
-            parts_.append(fc)
-        else:
-            parts_.append("full coverage pending")
-        if s["anchor_configured"]:
-            parts_.append(f"anchor {_reltime(s['newest_anchor_at'])}")
-        parts_.append(f"unsealed tail {_num(s['unsealed_tail_count'])} rows")
-        view["detail"] = " · ".join(parts_)
-        return view
 
     # warning / error: itemize the causes; ERROR leads with the failure message itself (D24).
     items: list[str] = []

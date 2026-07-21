@@ -225,7 +225,11 @@ def test_render_ok_is_a_calm_strip(runtime) -> None:
     assert 'class="integrity ok"' in body
     assert 'class="integrity-icon"' in body  # shield medallion anchors the verdict
     assert "integrity OK" in body
-    assert "unsealed tail 2 rows" in body
+    # The strip's facts are labelled units, not one grey run-on.
+    assert 'class="integrity-facts"' in body
+    assert "verified" in body  # freshness — the primary fact
+    assert "unsealed tail" in body  # label
+    assert "2 rows" in body  # value
     assert "cycle 3/7" in body
     assert 'role="alert"' not in body
 
@@ -276,7 +280,7 @@ def test_mobile_wrap_contract_is_present(runtime) -> None:
     assert "min-height:44px" in compact_mobile_css
 
     ok_body = _audit_html(_state(_status()))
-    assert 'class="integrity-detail' in ok_body
+    assert 'class="integrity-facts"' in ok_body
 
     affected = '[{"kind": "seal", "label": "#12", "id": 4041}]'
     tampered = _status(outcome="tampered", tampered_count=1, affected_identifiers=affected)

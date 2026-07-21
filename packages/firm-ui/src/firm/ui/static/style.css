@@ -234,6 +234,15 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
 .integrity.warn    .integrity-word { color: var(--warn); }
 .integrity.neutral .integrity-word { color: var(--text-2); }
 .integrity-when, .integrity-detail { color: var(--text-2); min-width: 0; }
+
+/* OK strip facts: each is a labelled unit (muted key, brighter value) so three distinct metrics
+   — freshness, coverage, unsealed tail — read apart instead of as one grey run-on. A dim dot
+   separates units; within a unit the key and value sit tight together. */
+.integrity-facts { display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .8rem; }
+.integrity-fact { display: inline-flex; align-items: baseline; gap: .35rem; }
+.integrity-fact:not(:first-child)::before { content: "·"; margin-right: .8rem; color: var(--border-strong); }
+.integrity-fact .fk { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .03em; color: var(--text-3); }
+.integrity-fact .fv { color: var(--text-2); font-variant-numeric: tabular-nums; }
 .integrity-items { margin: .15rem 0 0; padding-left: 1.05rem; display: flex; flex-direction: column;
                    gap: .15rem; color: var(--warn); flex-basis: 100%; }
 
