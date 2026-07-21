@@ -17,7 +17,15 @@ from sqlalchemy import delete, func, select, update
 from firm._core.clock import now_utc
 from firm._core.database import transaction
 from firm.audit import AuditLog, Ref, schema
-from firm.audit.integrity import load_key, new_ulid, row_mac, rows_mac, seal_mac
+from firm.audit.integrity import (
+    canonical_gaps,
+    gaps_for_range,
+    load_key,
+    new_ulid,
+    row_mac,
+    rows_mac,
+    seal_mac,
+)
 from firm.audit.verify import IntegrityAlert, VerifyError
 
 _SECRET = "verify-secret-key-padding-0123456789ab"  # noqa: S105  (>= 32 chars, throwaway)
@@ -59,9 +67,14 @@ def _status_row(engine):
 
 
 def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_mac, kind="seal"):
-    """Insert a hand-built (still key-signed) seal — for simulating late commits and edits."""
+    """Insert a hand-built (still key-signed) seal — for simulating late commits and edits.
+
+    ``gap_ranges`` is derived from the covered ``pairs`` so a seal that models a late commit (it
+    counts fewer ids than the range spans) records the skipped id as a gap, exactly as the real
+    sealer would (Bug #1)."""
     sealed_at = now_utc()
     rmac = rows_mac(_KEY, pairs)
+    gaps = canonical_gaps(gaps_for_range(from_id, to_id, [rid for rid, _ in pairs]))
     smac = seal_mac(
         _KEY,
         seq=seq,
@@ -72,6 +85,7 @@ def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_m
         rows_mac=rmac,
         prev_mac=prev_mac,
         sealed_at=sealed_at,
+        gaps=gaps,
     )
     with transaction(engine) as conn:
         conn.execute(
@@ -86,6 +100,7 @@ def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_m
                 seal_mac=smac,
                 sealed_at=sealed_at,
                 key_id=_KEY.id,
+                gap_ranges=gaps or None,
             )
         )
 
@@ -539,6 +554,54 @@ def test_late_commit_is_a_warning_not_tampered(db_url: str) -> None:
         audit.close()
 
 
+def test_delete_and_relocate_into_gaps_is_tampered_not_late_commit(db_url: str) -> None:
+    # Bug #1 laundering attack. A DB-write attacker with NO key deletes a genuinely-sealed row and
+    # back-fills id-gaps in the range with other valid signed rows (relocated — changing ``id``,
+    # which the row MAC used to ignore) so the present count climbs PAST ``row_count``. Before the
+    # fix that read as a benign "late_commit" WARNING (every present row is validly signed and there
+    # are more than were sealed), which retention would then prune, laundering the deletion. The
+    # seal now signs its covered membership (``gap_ranges``), so the deleted covered row is caught:
+    # the covered subset no longer reproduces ``rows_mac`` → TAMPERED.
+    audit = _make(db_url)
+    try:
+        for a in ("a", "b", "c", "d", "e", "f"):
+            audit.record(a)  # ids 1..6
+        rows = _rows(audit.engine)
+        gap_id = rows[2].id  # delete the middle row BEFORE sealing → a recorded gap at its id
+        with transaction(audit.engine) as conn:
+            conn.execute(delete(_audits).where(_audits.c.id == gap_id))
+        audit.sealer.run_once()  # seals {1,2,4,5,6}, gap {3}, row_count 5, to_id 6
+        (seal,) = [s for s in _seal_rows(audit.engine) if s.kind == "seal"]
+        assert seal.row_count == 5
+        assert audit.verify(full=True).outcome == "ok"
+
+        # Two valid signed rows to relocate (recorded as the unsealed tail, ids 7 & 8).
+        audit.record("src1")
+        audit.record("src2")
+        tail = [r for r in _rows(audit.engine) if r.id > seal.to_id]
+        victim = rows[4].id  # a genuinely-sealed row (id 5) whose evidence the attacker erases
+
+        with transaction(audit.engine) as conn:
+            conn.execute(delete(_audits).where(_audits.c.id == victim))
+            # Relocate the two valid tail rows into the freed slots inside the sealed range: one
+            # into the recorded gap (id 3), one onto the deleted covered id (id 5). Count → 6 > 5.
+            conn.execute(update(_audits).where(_audits.c.id == tail[0].id).values(id=gap_id))
+            conn.execute(update(_audits).where(_audits.c.id == tail[1].id).values(id=victim))
+
+        present = [r.id for r in _rows(audit.engine) if seal.from_id < r.id <= seal.to_id]
+        assert len(present) == 6  # 6 present rows in a range that sealed 5 — the late-commit shape
+        report = audit.verify(full=True)
+        assert report.outcome == "tampered"  # NOT "warning"/late_commit — the deletion is caught
+        assert report.exit_code == 1
+    finally:
+        audit.close()
+
+
+def _seal_rows(engine) -> list:
+    with transaction(engine) as conn:
+        return conn.execute(select(_seals).order_by(_seals.c.seq)).all()
+
+
 def test_unknown_key_id_is_a_hard_error(db_url: str) -> None:
     audit = _make(db_url)
     try:
@@ -798,6 +861,45 @@ def test_status_row_records_affected_identifiers_on_tampering(db_url: str) -> No
         assert finding["label"].startswith("#1 ")  # "#<id> <action>", a meaningful identity
         assert finding["verdict"] == "tampered"
         assert "modified after it was sealed" in finding["message"]  # plain-language what/why
+    finally:
+        audit.close()
+
+
+def test_mass_tamper_keeps_findings_bounded_but_persists_tampered(db_url: str) -> None:
+    # Bug #6. Verify used to append one Finding per tampered row, capping only at serialize time — a
+    # mass tamper could grow the in-memory list without bound and OOM verify BEFORE it persisted the
+    # red status or fired the alert. Findings are now capped during accumulation while the counters
+    # stay exact, so the run always lands the TAMPERED outcome with the true count, and alerts.
+    from firm.audit import verify as verify_mod
+
+    n = verify_mod._MAX_FINDINGS + 50
+    alerts: list[IntegrityAlert] = []
+    audit = _make(db_url, on_finding=alerts.append)
+    try:
+        for i in range(n):
+            audit.record(f"e{i}")
+        audit.sealer.run_once()
+        # Tamper EVERY sealed row (each recomputes to a different MAC → per-row tampered).
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).values(action="HACKED"))
+        report = audit.verify(full=True)
+
+        # The in-memory findings list is bounded, but the counts are exact and persisted.
+        assert len(report.findings) <= verify_mod._MAX_FINDINGS
+        assert report.outcome == "tampered"
+        assert report.tampered_count == n  # exact, from the counters — not the capped list
+        status = _status_row(audit.engine)
+        assert status.outcome == "tampered"
+        assert status.tampered_count == n
+        # The alert still fired, with the exact count and a bounded sample of identifiers.
+        assert len(alerts) == 1
+        assert alerts[0].tampered_count == n
+        assert len(alerts[0].affected) <= 20
+        # The persisted affected_identifiers stays small, and its overflow marker is honest.
+        items = json.loads(status.affected_identifiers)
+        assert len(items) <= 21  # 20 findings + one "+N more" marker
+        more = next(i for i in items if i["kind"] == "more")
+        assert f"+{n - 20} more" in more["label"]
     finally:
         audit.close()
 

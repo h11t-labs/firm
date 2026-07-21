@@ -178,13 +178,18 @@ def test_verify_status_row_reads_upserted_row(runtime, seed) -> None:
     assert row["unsealed_tail_count"] == 7
 
 
-def test_verify_status_row_takes_newest_when_several_exist(runtime, seed) -> None:
-    seed.verify_status(outcome="ok", ran_at=NOW - timedelta(days=1))
-    seed.verify_status(outcome="tampered", tampered_count=1, ran_at=NOW)
+def test_verify_status_row_reads_canonical_id_not_newest_ran_at(runtime, seed) -> None:
+    # Bug #2. The verifier upserts a single fixed row (id 1). A DB-write attacker cannot flip the
+    # panel green by inserting a SECOND, far-future ``outcome="ok"`` row: the dashboard reads the
+    # canonical row by id, never the newest by ``ran_at``. The first seeded row is the genuine
+    # tampered verify at id 1; the second is the attacker's future-dated forgery at id 2.
+    seed.verify_status(outcome="tampered", tampered_count=1, ran_at=NOW)  # id 1 — the real verify
+    seed.verify_status(outcome="ok", ran_at=NOW + timedelta(days=3650))  # id 2 — attacker forgery
     with runtime.engine.connect() as conn:
         row = audit_queries.verify_status_row(conn)
     assert row is not None
-    assert row["outcome"] == "tampered"
+    assert row["outcome"] == "tampered"  # the canonical row wins — the forgery is ignored
+    assert row["tampered_count"] == 1
 
 
 def test_integrity_config_without_seals_is_inactive(runtime) -> None:
@@ -282,6 +287,24 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
     assert 'class="finding-ref"' in body
     assert "firm-audit verify --full" in body  # the verify command
     assert render._TAMPER_DOCS_URL in body  # runbook link
+
+
+def test_render_tampered_survives_deeply_nested_affected_json(runtime) -> None:
+    # Bug #3. A deeply-nested affected_identifiers blob must never crash the tampered banner — it is
+    # rendered on every audit-page request, so an uncaught parse error (RecursionError on scanners
+    # that recurse) is a persistent 500 DoS. Rendering must complete regardless of nesting depth.
+    deep = "[" * 5000 + "]" * 5000
+    status = _status(outcome="tampered", tampered_count=1, affected_identifiers=deep)
+    body = _audit_html(_state(status))  # must not raise
+    assert "TAMPERED" in body
+
+
+def test_render_tampered_rejects_oversized_affected_json(runtime) -> None:
+    huge = '[{"kind":"seal","label":"#1","verdict":"tampered"}]' + "x" * (render._MAX_AFFECTED_JSON)
+    status = _status(outcome="tampered", tampered_count=1, affected_identifiers=huge)
+    body = _audit_html(_state(status))  # must not raise, must not echo the blob
+    assert "integrity findings unavailable" in body
+    assert "xxxxxxxx" not in body
 
 
 def test_render_tampered_without_messages_falls_back_to_generic_meaning(runtime) -> None:

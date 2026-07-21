@@ -76,6 +76,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import Connection, func, select
 
 from .._core.clock import now_utc
+from .._core.database import snapshot_transaction
 from .._core.dialects import get_dialect
 from . import integrity, schema
 from .integrity import Key, parse_keyring
@@ -110,6 +111,27 @@ _MAX_AFFECTED = 20
 
 #: The fixed primary key of the single ``firm_audit_verify_status`` row (the "single-row" contract).
 _STATUS_ID = 1
+
+#: Hard cap on how many :class:`Finding` objects verify keeps in memory in one run (Bug #6).
+#: The *counters* carry the exact totals (and drive the persisted outcome + the alert), so a mass
+#: tamper needs no more than a bounded sample of findings for display — a million tampered rows must
+#: not grow this list without bound and OOM verify *before* it persists the red status / fires
+#: ``on_finding``. Comfortably above :data:`_MAX_AFFECTED` so the handful of displayed chips are
+#: always present; the honest overflow count for the "+N more" marker comes from the exact counter.
+_MAX_FINDINGS = 1000
+
+
+class _Findings(list):  # type: ignore[type-arg]
+    """A ``list`` of :class:`Finding` that stops growing past :data:`_MAX_FINDINGS` (Bug #6).
+
+    ``append`` silently drops findings once the cap is reached; the counters (not the list) are the
+    source of truth for the exact totals, so dropping the tail of the *sample* is safe. This is the
+    single change that keeps a mass-tamper run bounded in memory all the way through to persisting
+    the TAMPERED outcome and firing the alert."""
+
+    def append(self, item: Finding) -> None:
+        if len(self) < _MAX_FINDINGS:
+            super().append(item)
 
 
 def _iter_rows(conn: Connection, low: int, high: int | None) -> Iterator[Any]:
@@ -194,15 +216,27 @@ def classify_range(
 
     * ``"ok"`` — the recomputed ``rows_mac`` and ``row_count`` still match the seal exactly;
     * ``"late_commit"`` — the *only* divergence is extra rows that **all** carry valid row MACs
-      (design 1A): a transaction that outran the grace window committed into an already-sealed
-      range. A valid MAC in a sealed range is a latecomer, never an attack — verify reports it as an
-      amber WARNING and retention treats it as prunable (the extras have all expired since the range
-      is past ``max_age``, so deleting them destroys no evidence). Downgrading this to WARNING is
-      deliberate: "false alarms train people to ignore real ones";
+      **and** land in ids the seal recorded as gaps (design 1A): a transaction that outran the grace
+      window committed into an already-sealed range. A valid MAC in a *recorded gap* of a sealed
+      range is a latecomer, never an attack — verify reports it as an amber WARNING and retention
+      treats it as prunable (the extras have all expired since the range is past ``max_age``, so
+      deleting them destroys no evidence). Downgrading this to WARNING is deliberate: "false alarms
+      train people to ignore real ones";
     * ``"tampered"`` — anything else: a deletion, a count-preserving swap, an invalid/missing MAC
       after the boundary, or an extra row that is *not* a valid-MAC late commit (e.g. a NULL-MAC
       forged insert — ``_row_verdict`` calls it "unprotected" per-row, but once it makes the range's
       count/``rows_mac`` diverge it is a forged insert, not a benign latecomer).
+
+    **The late-commit test proves the sealed set *survived*, not merely that the present rows are
+    valid (Bug #1).** The seal signs both ``rows_mac`` (over the covered ``(id, row_mac)`` pairs)
+    and ``gap_ranges`` (the ids in ``(from_id, to_id]`` it did *not* cover). A benign late commit
+    fills one of those recorded gaps and leaves every covered row in place, so restricting the
+    present rows to the non-gap ids still reproduces ``rows_mac``/``row_count`` exactly. A
+    delete-and-relocate laundering attack — delete a genuinely covered row, back-fill id-gaps with
+    other valid signed rows so the count climbs past ``row_count`` — cannot: the deleted id was a
+    *covered* id, so the covered subset no longer reproduces ``rows_mac`` (or is short of
+    ``row_count``) → TAMPERED. Without this, "every present row is validly signed and there are more
+    of them than were sealed" wrongly read as a late commit and let retention prune the evidence.
 
     ``per_row`` is ``[(row, row_verdict), …]`` so the verifier can emit granular per-row findings
     without re-reading. The per-row recompute is load-bearing: an attacker who edits a sealed row's
@@ -231,7 +265,19 @@ def classify_range(
         len(pairs) == seal.row_count
     ):
         return "ok", per_row
-    if all_ok and len(pairs) > seal.row_count:
+    # Late commit (Bug #1): every present row is validly signed, there ARE surplus rows, and the
+    # rows at the seal's *covered* (non-gap) ids still reproduce the signed ``rows_mac``/count
+    # — i.e. no covered row was deleted or swapped; the surplus all sits in ids the seal recorded as
+    # gaps. Anything short of that (a covered id missing, a covered row's MAC changed, an extra that
+    # is not in a recorded gap, or an invalid/missing MAC) falls through to TAMPERED.
+    gaps = integrity.parse_gaps(seal.gap_ranges)
+    covered = [(rid, mac) for rid, mac in pairs if not integrity.id_in_gaps(rid, gaps)]
+    if (
+        all_ok
+        and len(pairs) > seal.row_count
+        and len(covered) == seal.row_count
+        and hmac.compare_digest(integrity.rows_mac(seal_key, covered), seal.rows_mac)
+    ):
         return "late_commit", per_row
     return "tampered", per_row
 
@@ -379,7 +425,7 @@ def default_on_finding(alert: IntegrityAlert) -> None:
     )
 
 
-def _affected_json(findings: Sequence[Finding]) -> str | None:
+def _affected_json(findings: Sequence[Finding], total_tampered: int) -> str | None:
     """Serialize the tampered findings the dashboard links from into the ``affected_identifiers``
     JSON list — ``[{"kind","label","id"?,"message","verdict"}, …]`` — which ``_affected_cells`` (in
     :mod:`firm.ui.render`) parses into linked chips + the per-finding "what/why". ``kind`` is
@@ -387,12 +433,16 @@ def _affected_json(findings: Sequence[Finding]) -> str | None:
     for a seal/chain-level one; the ``label`` is the display identity (e.g. ``"#3 invoice.paid"`` /
     ``"sealed range #1"``). Bounded to :data:`_MAX_AFFECTED`; a longer run appends one
     ``kind="more"`` marker naming the overflow. ``None`` when nothing tampered, so a clean run
-    leaves the column NULL exactly as before."""
-    tampered = [f for f in findings if f.verdict == "tampered" and f.identifier]
-    if not tampered:
+    leaves the column NULL exactly as before.
+
+    ``total_tampered`` is the **exact** tampered counter — the ``findings`` list itself is capped at
+    :data:`_MAX_FINDINGS` (Bug #6), so the overflow marker is computed from the counter, not from
+    ``len(findings)``, to stay honest under a mass tamper that dropped most of its sample."""
+    shown = [f for f in findings if f.verdict == "tampered" and f.identifier][:_MAX_AFFECTED]
+    if not shown:
         return None
     items: list[dict[str, Any]] = []
-    for f in tampered[:_MAX_AFFECTED]:
+    for f in shown:
         assert f.identifier is not None  # guarded by the comprehension above
         item: dict[str, Any] = {
             "kind": "row" if f.id is not None else "seal",
@@ -403,7 +453,7 @@ def _affected_json(findings: Sequence[Finding]) -> str | None:
         if f.id is not None:
             item["id"] = f.id
         items.append(item)
-    overflow = len(tampered) - _MAX_AFFECTED
+    overflow = total_tampered - len(items)
     if overflow > 0:
         items.append(
             {"kind": "more", "label": f"+{overflow} more finding(s)", "verdict": "tampered"}
@@ -612,10 +662,15 @@ class Verifier:
 
         now = now_utc()
         counters = _Counters()
-        findings: list[Finding] = []
+        findings: list[Finding] = _Findings()  # bounded accumulation (Bug #6)
         engine = self.audit.engine
 
-        with engine.connect() as conn:
+        # A snapshot transaction (design "Bug #5"): verify reads seals, then rows, across many
+        # statements. On Postgres/MySQL READ COMMITTED a concurrent legitimate prune committing
+        # between those reads would make verify compare stale seals to already-pruned rows and cry
+        # a false TAMPERED. Reading them all from one REPEATABLE READ / WAL snapshot removes that
+        # window; verify stays read-only.
+        with snapshot_transaction(engine) as conn:
             seals = conn.execute(select(_seals).order_by(_seals.c.seq)).all()
             floor, boundary = self._floor_and_boundary(seals)
             max_sealed = max((s.to_id for s in seals), default=0)
@@ -768,6 +823,7 @@ class Verifier:
                     rows_mac=seal.rows_mac,
                     prev_mac=seal.prev_mac,
                     sealed_at=seal.sealed_at,
+                    gaps=seal.gap_ranges or "",
                 ),
                 seal.seal_mac,
             ):
@@ -1226,7 +1282,7 @@ class Verifier:
             anchor_configured=anchor_configured,
             unsealed_tail_count=tail_count,
             unsealed_tail_oldest_at=tail_oldest,
-            affected_identifiers=_affected_json(findings),
+            affected_identifiers=_affected_json(findings, counters.tampered),
         )
 
     def _persist(self, report: VerifyReport) -> None:

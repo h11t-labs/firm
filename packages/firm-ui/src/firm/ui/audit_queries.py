@@ -30,6 +30,12 @@ _audits = schema.audit_events
 _seals = schema.seals
 _verify_status = schema.verify_status
 
+#: The fixed primary key of the single ``firm_audit_verify_status`` row the verifier upserts (it
+#: mirrors :data:`firm.audit.verify._STATUS_ID`). The dashboard reads *this* row by id, never the
+#: newest by ``ran_at`` — an attacker with DB write access could otherwise insert a second,
+#: future-dated ``outcome="ok"`` row and pin the panel green forever (Bug #2).
+_STATUS_ID = 1
+
 # Sortable columns, in table order. Each maps to one or more real columns (composite for
 # subject/actor, so e.g. sorting by "subject" groups same-type rows together); always a plain
 # allowlist lookup, never user input reaching SQL directly.
@@ -173,15 +179,24 @@ def audit_detail(conn: Connection, event_id: int) -> dict[str, Any] | None:
 # is unit-testable without a database.
 
 
+#: Hard cap on the ``affected_identifiers`` JSON the dashboard will parse. The verifier bounds it to
+#: :data:`firm.audit.verify._MAX_AFFECTED` small findings, so anything larger is corrupt or hostile.
+#: Rejecting it before ``json.loads`` (and catching ``RecursionError`` below) keeps a DB-write
+#: attacker from 500-ing every audit-page render with an oversized or deeply-nested blob (Bug #3):
+#: the page is re-rendered on every request, so an uncaught parse crash is a persistent DoS.
+_MAX_AFFECTED_JSON = 64 * 1024
+
+
 def _tampered_row_ids(raw: str | None) -> set[int]:
     """The integer row ids the latest verify run flagged as tampered, from its
-    ``affected_identifiers`` JSON. Parses defensively — malformed/absent data yields an empty set,
-    never an exception (booleans are excluded even though ``bool`` is an ``int`` subclass)."""
-    if not raw:
+    ``affected_identifiers`` JSON. Parses defensively — malformed/absent/oversized/deeply-nested
+    data yields an empty set, never an exception (booleans are excluded even though ``bool`` is an
+    ``int`` subclass)."""
+    if not raw or len(raw) > _MAX_AFFECTED_JSON:
         return set()
     try:
         items = json.loads(raw)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return set()
     if not isinstance(items, list):
         return set()
@@ -195,6 +210,23 @@ def _tampered_row_ids(raw: str | None) -> set[int]:
     return ids
 
 
+def _affected_is_truncated(raw: str | None) -> bool:
+    """Whether the verifier truncated its ``affected_identifiers`` — i.e. more rows were flagged
+    tampered than the JSON carries individual ids for (the ``kind="more"`` overflow marker). When it
+    did, the set from :func:`_tampered_row_ids` is *incomplete*, so a sealed row not in it may
+    still be one of the un-listed tampered rows — the table must not vouch for it as verified
+    (Bug #8)."""
+    if not raw or len(raw) > _MAX_AFFECTED_JSON:
+        return False
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not isinstance(items, list):
+        return False
+    return any(isinstance(i, dict) and i.get("kind") == "more" for i in items)
+
+
 def row_integrity_context(conn: Connection) -> dict[str, Any]:
     """The signals :func:`row_status` needs, gathered once per page: whether tamper-evidence is in
     use at all (``active`` — any seal exists or a verify run has happened), the newest sealed
@@ -203,10 +235,18 @@ def row_integrity_context(conn: Connection) -> dict[str, Any]:
     column at all, so a plain audit log looks exactly as it did before tamper-evidence existed."""
     max_to = conn.execute(select(func.max(_seals.c.to_id))).scalar()
     status = verify_status_row(conn)
+    affected = status["affected_identifiers"] if status else None
+    # When the latest run is tampered AND its affected list was truncated, the known tampered-id set
+    # is incomplete — a sealed row not in it may still be one of the un-listed tampered rows, so the
+    # table must not render it as "Sealed & verified" (Bug #8).
+    truncated = bool(
+        status and status["outcome"] == "tampered" and _affected_is_truncated(affected)
+    )
     return {
         "active": max_to is not None or status is not None,
         "max_sealed_to_id": max_to or 0,
-        "tampered_ids": _tampered_row_ids(status["affected_identifiers"]) if status else set(),
+        "tampered_ids": _tampered_row_ids(affected),
+        "tampered_truncated": truncated,
     }
 
 
@@ -214,7 +254,12 @@ def row_status(row: dict[str, Any], ctx: dict[str, Any]) -> str | None:
     """One row's tamper-evidence status, or ``None`` when tamper-evidence is not in use (so the
     caller renders nothing). Priority, top wins: ``tampered`` (verify flagged this row id) >
     ``unprotected`` (no signature — a legacy pre-key row) > ``unsealed`` (signed but past the newest
-    seal — the grace-window tail) > ``sealed`` (signed and within a seal)."""
+    seal — the grace-window tail) > ``sealed`` (signed and within a seal).
+
+    When the latest run flagged more tampered rows than its ``affected_identifiers`` lists ids for
+    (``ctx["tampered_truncated"]`` — Bug #8), a sealed row not in the known set may still be one of
+    the un-listed tampered rows, so it degrades to ``unverified`` (honest: "sealed, but this run
+    could not vouch for it") instead of falsely reading ``sealed`` & verified."""
     if not ctx["active"]:
         return None
     if row["id"] in ctx["tampered_ids"]:
@@ -223,6 +268,8 @@ def row_status(row: dict[str, Any], ctx: dict[str, Any]) -> str | None:
         return "unprotected"
     if row["id"] > ctx["max_sealed_to_id"]:
         return "unsealed"
+    if ctx.get("tampered_truncated"):
+        return "unverified"  # a truncated tamper run cannot vouch for this sealed row
     return "sealed"
 
 
@@ -278,9 +325,12 @@ class IntegrityState:
 
 def verify_status_row(conn: Connection) -> dict[str, Any] | None:
     """The single ``firm_audit_verify_status`` row the verifier upserts, as a plain dict, or
-    ``None`` when verify has never run. "Single row" is the writer's contract, not a schema
-    constraint, so we order by ``ran_at`` and take the newest — a stale leftover never wins."""
-    row = conn.execute(select(_verify_status).order_by(_verify_status.c.ran_at.desc())).first()
+    ``None`` when verify has never run. Read by its fixed primary key (:data:`_STATUS_ID`) — the one
+    canonical row the verifier upserts — **not** the newest by ``ran_at``. Ordering by ``ran_at``
+    would let a DB-write attacker insert a second, far-future ``outcome="ok"`` row and keep the
+    dashboard green even after real verifies flagged tampering (Bug #2); the id-keyed read always
+    reflects the last genuine verify run."""
+    row = conn.execute(select(_verify_status).where(_verify_status.c.id == _STATUS_ID)).first()
     if row is None:
         return None
     return {

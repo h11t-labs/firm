@@ -180,6 +180,14 @@ class Sealer:
         sealed_at = now_utc()
         rows_mac = integrity.rows_mac(key, rows)
         row_count = len(rows)
+        # Record which ids in ``(from_id, to_id]`` this seal does NOT cover — rolled-back id-gaps,
+        # or rows not yet visible at seal time. Signed into ``seal_mac``, so verify can later tell a
+        # benign late commit (an extra row that fills a recorded gap) from a delete-and-relocate
+        # laundering attack (a covered id gone missing). Dense in the common case → ``""`` (review
+        # "Bug #1").
+        gaps = integrity.canonical_gaps(
+            integrity.gaps_for_range(from_id, to_id, [rid for rid, _ in rows])
+        )
         seal_mac = integrity.seal_mac(
             key,
             seq=seq,
@@ -190,6 +198,7 @@ class Sealer:
             rows_mac=rows_mac,
             prev_mac=prev_mac,
             sealed_at=sealed_at,
+            gaps=gaps,
         )
         conn.execute(
             _seals.insert().values(
@@ -203,6 +212,7 @@ class Sealer:
                 seal_mac=seal_mac,
                 sealed_at=sealed_at,
                 key_id=key.id,
+                gap_ranges=gaps or None,
             )
         )
         return seq, seal_mac, sealed_at, row_count

@@ -794,6 +794,12 @@ _INTEGRITY_STRIP = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": "
 # The tamper-evidence docs (design/threat model + the "what to do when it's red" runbook).
 _TAMPER_DOCS_URL = "https://github.com/h11t-labs/firm/blob/main/docs/audit/tamper-evidence.md"
 
+#: Hard cap on the ``affected_identifiers`` JSON this page will parse (mirrors
+#: :data:`firm.ui.audit_queries._MAX_AFFECTED_JSON`). The verifier bounds the column to a handful of
+#: small findings, so a larger blob is corrupt or hostile — rejected before ``json.loads`` and paired
+#: with a ``RecursionError`` guard so a deeply-nested payload cannot 500 every render (Bug #3).
+_MAX_AFFECTED_JSON = 64 * 1024
+
 
 def _cause_text(
     cause: str, status: dict[str, Any], verify_max_age: float, anchor_max_age: float
@@ -829,11 +835,17 @@ def _affected_cells(raw: str | None) -> list[dict[str, Any]]:
     ``{"kind", "label", "id"?, "message"?, "verdict"?}`` — into render-ready rows. Each row carries a
     ``chip`` (a link into ``/audit/<id>`` when the finding names a specific row id, else the plain
     label) and the finding's human ``message`` (the "what/why" the banner surfaces). Malformed or
-    absent data degrades to a single plain chip rather than hiding the finding."""
+    absent data degrades to a single plain chip rather than hiding the finding; oversized or
+    deeply-nested data (a DB-write attacker's DoS attempt — this render runs on every request)
+    degrades to one neutral chip without echoing the blob or raising (Bug #3)."""
     if not raw:
         return []
+    if len(raw) > _MAX_AFFECTED_JSON:
+        return [{"kind": "affected", "chip": "integrity findings unavailable", "message": ""}]
     try:
         items = json.loads(raw)
+    except RecursionError:
+        return [{"kind": "affected", "chip": "integrity findings unavailable", "message": ""}]
     except (ValueError, TypeError):
         return [{"kind": "affected", "chip": raw, "message": ""}]
     if not isinstance(items, list):
@@ -972,6 +984,14 @@ _ROW_STATUS = {
     "unsealed": ("shield-alert", "warn", "Signed, not yet sealed"),
     "unprotected": ("shield", "muted", "Unprotected — recorded before tamper-evidence"),
     "tampered": ("shield-x", "danger", "Tampered — failed verification"),
+    # A sealed row on a run whose tamper findings were truncated: it is within a seal, but the run
+    # flagged more tampered rows than it listed ids for, so the table cannot vouch for THIS row
+    # (Bug #8). Warn tone + neutral shield — honest "sealed, not individually verified", not green.
+    "unverified": (
+        "shield-alert",
+        "warn",
+        "Sealed, but this run couldn't verify it (findings truncated)",
+    ),
 }
 # Shorter words for the detail page's integrity cell, where the icon already sits beside a label.
 _ROW_STATUS_WORD = {
@@ -979,6 +999,7 @@ _ROW_STATUS_WORD = {
     "unsealed": "Signed, not yet sealed",
     "unprotected": "Unprotected",
     "tampered": "Tampered",
+    "unverified": "Sealed, not individually verified",
 }
 
 

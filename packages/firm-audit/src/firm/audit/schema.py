@@ -103,6 +103,12 @@ seals = Table(
     Column("seal_mac", String(64), nullable=False),
     Column("sealed_at", _DT, nullable=False),
     Column("key_id", String(16), nullable=False),
+    # Canonical ``"lo-hi,lo-hi"`` intervals of ids in ``(from_id, to_id]`` this seal does NOT
+    # cover (rolled-back id-gaps, or rows not yet visible at seal time). NULL/empty = dense range,
+    # the common case. Signed into ``seal_mac`` so the covered membership is tamper-evident: verify
+    # trusts it to tell a genuine late commit (an extra row in a recorded gap) from a
+    # delete-and-relocate laundering attack (a covered id now missing) — see :mod:`.integrity`.
+    Column("gap_ranges", Text),
     Index("index_firm_audit_seals_on_seq", "seq", unique=True),
 )
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import delete, select, update
 
 from firm._core.clock import now_utc
@@ -151,9 +152,15 @@ def _age(engine, *, upto_id: int, seconds: float) -> None:
 
 
 def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_mac, kind="seal"):
-    """Insert a hand-built (still key-signed) seal — for simulating a late commit into a range."""
+    """Insert a hand-built (still key-signed) seal — for simulating a late commit into a range.
+
+    ``gap_ranges`` is derived from the covered ``pairs`` so a late-commit model (covering fewer ids
+    than the range spans) records the skipped id as a gap, exactly as the real sealer would."""
     sealed_at = now_utc()
     rmac = integrity.rows_mac(_KEY, pairs)
+    gaps = integrity.canonical_gaps(
+        integrity.gaps_for_range(from_id, to_id, [rid for rid, _ in pairs])
+    )
     smac = integrity.seal_mac(
         _KEY,
         seq=seq,
@@ -164,6 +171,7 @@ def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_m
         rows_mac=rmac,
         prev_mac=prev_mac,
         sealed_at=sealed_at,
+        gaps=gaps,
     )
     with transaction(engine) as conn:
         conn.execute(
@@ -178,6 +186,7 @@ def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_m
                 seal_mac=smac,
                 sealed_at=sealed_at,
                 key_id=_KEY.id,
+                gap_ranges=gaps or None,
             )
         )
 
@@ -194,6 +203,43 @@ def test_key_but_no_seals_uses_plain_pruning(db_url: str) -> None:
         assert _seals_by_seq(audit.engine) == []  # no checkpoint written on the plain path
     finally:
         audit.close()
+
+
+def test_sealing_active_when_seals_exist_even_without_a_row_key(db_url: str, at_time) -> None:
+    # Bug #7. A host that carries a seal key but NO row key (``audit._key is None``) — e.g. a
+    # two-key sealer/verifier host — used to fall through to the plain path and delete sealed
+    # age with no checkpoint, destroying evidence. Sealing is now "active" whenever seals exist, so
+    # such a host takes the aligned, checkpoint-writing path (or refuses) — it never plain-prunes
+    # sealed rows.
+    writer = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0)
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            for i in range(3):
+                writer.record(f"old{i}")
+        writer.sealer.run_once()  # seal chain signed by _SECRET (the one key)
+
+        # A pruner on the same DB with the seal key but the row key forced off.
+        pruner = AuditLog(
+            engine=writer.engine,
+            create_schema=False,
+            mac_key="",  # no row key at all → the old _sealing_active returned False
+            seal_key=_SECRET,
+            grace=0.0,
+            max_age=3600.0,
+        )
+        try:
+            assert pruner._key is None  # the misconfiguration the bug hinged on
+            deleted = pruner.retention.run_once()
+            assert deleted == 3  # pruned via the ALIGNED path (a checkpoint), not plain destruction
+            checkpoint = next(s for s in _seals_by_seq(writer.engine) if s.kind == "checkpoint")
+            assert checkpoint.to_id > 0
+        finally:
+            pruner.close()
+
+        # The evidence was not destroyed without a checkpoint: the writer still verifies OK.
+        assert writer.verify(full=True).outcome == "ok"
+    finally:
+        writer.close()
 
 
 def test_aligned_prune_writes_checkpoint_and_prunes_old_seals(db_url: str, at_time) -> None:
@@ -221,6 +267,39 @@ def test_aligned_prune_writes_checkpoint_and_prunes_old_seals(db_url: str, at_ti
         assert 2 in kinds and kinds[2] == "seal"
         checkpoint = next(s for s in seals if s.kind == "checkpoint")
         assert checkpoint.to_id == old_max
+    finally:
+        audit.close()
+
+
+def test_aligned_prune_crash_before_checkpoint_leaves_consistent_state(
+    db_url: str, at_time
+) -> None:
+    # Bug #4. The re-verify, the row deletion, and the checkpoint write are now one transaction. If
+    # the process crashes after deleting but before the checkpoint commits, the whole transaction
+    # rolls back — the covering seal is never left with missing rows and no checkpoint (which verify
+    # would read as a permanent false TAMPERED). Simulate the crash by making the checkpoint write
+    # raise, then assert nothing was deleted and verify still reads OK.
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            for i in range(3):
+                audit.record(f"old{i}")
+        audit.sealer.run_once()  # seq 1 covers ids 1..3, expired and verifying
+
+        def _boom(*_a, **_k):
+            raise RuntimeError("simulated crash after delete, before checkpoint commit")
+
+        audit.retention._append_checkpoint = _boom  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            audit.retention.run_once()
+
+        # The transaction rolled back: every row is still present, no checkpoint was written, and
+        # verify is OK — never a false TAMPERED from a half-pruned covered range.
+        assert [r.action for r in _rows(audit.engine)] == ["old0", "old1", "old2"]
+        assert all(s.kind == "seal" for s in _seals_by_seq(audit.engine))
+        report = audit.verify(full=True)
+        assert report.outcome == "ok"
+        assert report.exit_code == 0
     finally:
         audit.close()
 
@@ -483,6 +562,56 @@ def test_prune_allows_a_valid_mac_late_commit(db_url: str, at_time) -> None:
         report = audit.verify(full=True)
         assert report.outcome == "ok"
         assert report.exit_code == 0
+    finally:
+        audit.close()
+
+
+def test_prune_refuses_a_delete_and_relocate_laundering_attack(db_url: str, at_time) -> None:
+    # Bug #1 end-to-end. An attacker deletes a genuinely-sealed, now-expired row and back-fills the
+    # range's id-gaps with other valid signed rows so the count climbs past ``row_count`` — the
+    # "late commit" shape. Before the fix retention pruned such a range and checkpointed over it,
+    # erasing the deletion; verify then returned OK. Now the seal signs its covered membership, so
+    # the range classifies TAMPERED and retention REFUSES it — the evidence is preserved.
+    seen: list[BaseException] = []
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, on_error=seen.append
+    )
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            for a in ("a", "b", "c", "d", "e", "f"):
+                audit.record(a)  # ids 1..6, all genuinely old (and signed at the past time)
+            rows = _rows(audit.engine)
+            gap_id = rows[2].id  # delete a middle row BEFORE sealing → a recorded gap
+            with transaction(audit.engine) as conn:
+                conn.execute(delete(_audits).where(_audits.c.id == gap_id))
+            audit.sealer.run_once()  # seals {1,2,4,5,6}, gap {3}, row_count 5, to_id 6
+            # Two more expired signed rows OUTSIDE the covered range (ids 7,8), unsealed so they
+            # can be relocated. Recorded old so the range they land in stays fully expired.
+            audit.record("src1")
+            audit.record("src2")
+        seal = next(s for s in _seals_by_seq(audit.engine) if s.kind == "seal")
+        assert seal.row_count == 5 and seal.gap_ranges  # a recorded gap exists
+        victim = rows[4].id  # id 5 — a covered row the attacker erases
+        sources = sorted(r.id for r in _rows(audit.engine) if r.id > seal.to_id)
+        assert len(sources) == 2
+
+        with transaction(audit.engine) as conn:
+            conn.execute(delete(_audits).where(_audits.c.id == victim))
+            # Relocate the two valid signed rows into the freed slots — the gap (id 3) and the
+            # deleted covered id (id 5) — so the present count (6) exceeds row_count (5).
+            conn.execute(update(_audits).where(_audits.c.id == sources[0]).values(id=gap_id))
+            conn.execute(update(_audits).where(_audits.c.id == sources[1]).values(id=victim))
+
+        deleted = audit.retention.run_once()
+        assert deleted == 0  # refused — nothing pruned
+        assert audit.retention.last_refused_tampered == 1
+        assert seen and "REFUSED" in str(seen[0])
+        # The seal chain never advanced past the tampered range; no checkpoint laundered it.
+        assert all(s.kind == "seal" for s in _seals_by_seq(audit.engine))
+        # And a follow-up verify still surfaces the tampering (never a false OK).
+        report = audit.verify(full=True)
+        assert report.outcome == "tampered"
+        assert report.exit_code == 1
     finally:
         audit.close()
 

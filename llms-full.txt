@@ -3347,9 +3347,11 @@ to its position — id-to-content binding arrives with the seal.
 
 **Layer 2 — seals.** A background `SealLoop` periodically hashes a contiguous range of settled
 rows into a `firm_audit_seals` row: `rows_mac` over `(id, row_mac)` in id order, a dense unique
-`seq`, and a `prev_mac` chain back to genesis. Deleting or inserting a sealed row breaks
-`row_count`/`rows_mac`; editing or reordering a seal breaks the chain. Any instance may run the
-loop — the unique `seq` constraint arbitrates races, so no leader election is needed.
+`seq`, a `prev_mac` chain back to genesis, and `gap_ranges` — the ids inside the range it did *not*
+cover, signed into `seal_mac` so the covered membership itself is tamper-evident. Deleting or
+inserting a sealed row breaks `row_count`/`rows_mac`; editing or reordering a seal breaks the chain.
+Any instance may run the loop — the unique `seq` constraint arbitrates races, so no leader election
+is needed.
 
 **Layer 3 — anchor.** After each seal, the chain head leaves the database — appended to a local
 file and/or handed to a callback (ship it to S3, a second database, a Slack webhook). Verification
@@ -3389,6 +3391,17 @@ A legitimate transaction that still outruns `grace` lands in an already-sealed r
 that a **`WARNING` (late commit)**, never `TAMPERED` — a valid MAC in a sealed range is a
 latecomer, not an attack. Only an *invalid or missing* MAC in a sealed range is tampering. False
 alarms are what train people to ignore real ones.
+
+The late-commit verdict is **soundly bounded**, not just "everything present is validly signed".
+Each seal records — and signs into its `seal_mac` — the ids in its range it did *not* cover
+(`gap_ranges`: rolled-back id-gaps, or rows not yet visible at seal time; empty for a dense range,
+the common case). A late commit fills one of those recorded gaps, so verify grants the `WARNING`
+only when the seal's **covered** (non-gap) rows still reproduce its signed `rows_mac` and
+`row_count` exactly. That closes a laundering hole: without it, a database attacker with no key
+could delete a genuinely sealed row and back-fill id-gaps with other valid signed rows (relocation
+changes only a row's `id`, which the per-row MAC ignores) to push the count past `row_count` and
+disguise the deletion as a benign late commit. Now a deleted *covered* row breaks the covered
+`rows_mac` → `TAMPERED`, and retention refuses the range.
 
 ### Long jobs: record on their own transaction
 
@@ -3565,7 +3578,10 @@ finding carries one of four **verdict classes**:
   it grow unbounded behind an exit-0 warning would quietly degrade the only guarantee the anchor
   exists to give. Anchor *writes* stay best-effort — strictness lives on the verification side.
 
-Verification is read-only and runs anywhere the key is available.
+Verification is read-only and runs anywhere the key is available. It reads seals and rows inside a
+**snapshot transaction** (`REPEATABLE READ` on Postgres/MySQL, a WAL snapshot on SQLite) so a
+concurrent legitimate prune committing between its reads cannot make it compare stale seals to
+already-pruned rows and report a false `TAMPERED`.
 
 ### Rolling full coverage
 
@@ -3661,7 +3677,11 @@ together with **checkpoint seals** (see [Retention & querying](retention-and-que
    pre-prune classification **re-reads (keyset-paginated) every row it is about to delete** — a
    bounded read cost paid once per prune.
 3. After deleting, it writes a `kind="checkpoint"` seal recording `pruned_through_id` and carries
-   the chain forward as usual.
+   the chain forward as usual. The pre-prune re-verify, the deletion, and the checkpoint write all
+   run in **one transaction** (`SERIALIZABLE` on Postgres/MySQL, `BEGIN IMMEDIATE` on SQLite), so a
+   crash mid-prune can never leave a covering seal with rows missing and no checkpoint (which would
+   read as a permanent false `TAMPERED`), and a row changed after the check but before the delete is
+   never laundered.
 4. Verify skips row-recomputation at or below the newest checkpoint but still validates the seal
    chain across it. Rows *above* the checkpoint that go missing remain violations. It also asserts
    the pruned region is **empty**: retention deleted every row through the floor, so *any* surviving
@@ -3729,7 +3749,8 @@ alias) is not enough.
 Turning the feature on requires Alembic migration **`0002`**, which first renames the released
 `firm_audits` table to `firm_audit_events` (with its secondary indexes) to match the workspace
 `firm_<module>_<entity>` convention, then adds three nullable columns (`entry_id`, `row_mac`,
-`key_id`), a unique index on `entry_id`, and the `firm_audit_seals` and `firm_audit_verify_status`
+`key_id`), a unique index on `entry_id`, and the `firm_audit_seals` (including its nullable
+`gap_ranges` column — the signed absent-id intervals a seal skips) and `firm_audit_verify_status`
 side tables. The rename is in place and preserves existing rows; nullable columns are
 zero-downtime. Direct-SQL consumers and least-privilege grants that reference `firm_audits` by
 name must be updated to `firm_audit_events`.

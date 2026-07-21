@@ -109,6 +109,8 @@ def _create_seals() -> None:
         sa.Column("seal_mac", sa.String(64), nullable=False),
         sa.Column("sealed_at", dt_type(), nullable=False),
         sa.Column("key_id", sa.String(16), nullable=False),
+        # Signed absent-id intervals this seal skips (NULL = dense); see schema.py / integrity.py.
+        sa.Column("gap_ranges", sa.Text()),
     )
     op.create_index("index_firm_audit_seals_on_seq", "firm_audit_seals", ["seq"], unique=True)
 

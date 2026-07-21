@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import delete, func, select
 
 from .._core.clock import now_utc
+from .._core.database import snapshot_transaction
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
@@ -124,8 +125,15 @@ class Retention:
         return self._run_plain(cutoff)
 
     def _sealing_active(self) -> bool:
-        if self.audit._key is None:
-            return False
+        """Sealing is active — and pruning must take the aligned, checkpoint-writing path — whenever
+        **any seal exists**, regardless of which keys *this* host happens to carry (Bug #7).
+
+        The old gate returned False when ``audit._key`` (the row key) was None, so a seal-key-only
+        host — a two-key sealer/verifier that carries ``FIRM_AUDIT_SEAL_KEY`` but not
+        ``FIRM_AUDIT_KEY`` — fell through to :meth:`_run_plain` and destroyed sealed rows by
+        age with no checkpoint (a covering seal left short of rows → false TAMPERED). Keying the
+        decision on the seals themselves means sealed rows are *never* plain-pruned: a host missing
+        the seal key that owns the chain refuses loudly in :meth:`_run_aligned` instead."""
         with self.audit.engine.connect() as conn:
             return conn.execute(select(func.count()).select_from(_seals)).scalar_one() > 0
 
@@ -149,46 +157,48 @@ class Retention:
                 return total
 
     def _run_aligned(self, cutoff) -> int:
-        """Prune only fully-sealed, fully-expired, *non-tampered* ranges, then checkpoint ahead.
+        """Prune only fully-sealed, fully-expired, *non-tampered* ranges, then checkpoint ahead —
+        **re-verify, delete, and checkpoint all in one transaction** (Bug #4).
 
         Finds the highest sealed boundary all of whose ranges predate ``cutoff`` **and are prunable
         against their seal** (verify OK, or benign valid-MAC late commits — never TAMPERED), deletes
         through it, writes a checkpoint recording it, and prunes the now-subsumed covering seals
-        below it. A TAMPERED range is refused (design "Retention integration"): pruning stops there
-        so a tampered-then-expired row is surfaced, never laundered by deletion. Records the
-        expired-but-unsealed rows left behind, and exports the checkpoint to the anchor so a pruned
-        seal is not later read as truncation.
+        below it — atomically, so a crash mid-prune can never leave a covering seal short of rows
+        with no checkpoint (which verify would read as a false TAMPERED), and a row modified
+        after the pre-prune re-verify but before the delete cannot be laundered (the re-verify and
+        the delete see one snapshot / are guarded by one write lock; see
+        :func:`~firm._core.database.snapshot_transaction`). A TAMPERED range is refused (design
+        "Retention integration"): pruning stops there so a tampered-then-expired row is surfaced,
+        never laundered by deletion. Records the expired-but-unsealed rows left behind, and exports
+        the checkpoint to the anchor so a pruned seal is not later read as truncation.
         """
         engine = self.audit.engine
         with engine.connect() as conn:
             seals = conn.execute(select(_seals).order_by(_seals.c.seq)).all()
 
         # The aligned path WRITES a checkpoint seal, which must be signed by the seal key that owns
-        # this chain. In a two-key deployment, retention on a non-sealer host (row key only) would
-        # sign the checkpoint with the row key — a checkpoint a proper verifier rejects (the row
-        # key is not a seal signer), laundering nothing but also pruning nothing safely. Detect it
-        # by the head seal's signer: if it is not this host's seal key, refuse the whole aligned
-        # prune loudly and leave the table untouched. In single-key mode the head is signed by the
-        # one key (== the seal key), so this never fires. Pruning must run on a sealer-role host.
+        # this chain. A host that lacks that key — a two-key deployment's non-sealer host (row key
+        # only), or a misconfigured host with no key at all now that :meth:`_sealing_active` reads
+        # the seals, not this host's row key (Bug #7) — would sign the checkpoint with the wrong key
+        # or have no key to sign with. Detect it by the head seal's signer: if it is not this host's
+        # seal key, refuse the whole aligned prune loudly and leave the table untouched, so sealed
+        # rows are never destroyed. In single-key mode the head is signed by the one key (== the
+        # seal key), so this never fires. Pruning must run on a sealer-role host.
         seal_key = self.audit._seal_key
-        if seals and seal_key is not None and seals[-1].key_id != seal_key.id:
+        if seals and (seal_key is None or seals[-1].key_id != seal_key.id):
             self._refuse_no_seal_key(seals[-1])
             return 0
 
         floor = max((s.to_id for s in seals if s.kind == "checkpoint"), default=0)
         max_sealed = max((s.to_id for s in seals), default=0)
-        pruned_through = self._highest_prunable_boundary(seals, floor, max_sealed, cutoff)
 
         self.last_skipped_unsealed = self._count_expired_unsealed(max_sealed, cutoff)
         self._alert_if_over_threshold()
 
-        if pruned_through <= floor:
+        checkpoint = self._prune_aligned_atomic(seals, floor, max_sealed, cutoff)
+        if checkpoint is None:
             return 0  # nothing new is both sealed, fully expired, and still verifying
-
-        deleted = self._delete_through(floor, pruned_through)
-        seq, seal_mac, sealed_at = self._write_checkpoint(
-            seals, from_id=floor, to_id=pruned_through
-        )
+        deleted, seq, seal_mac, sealed_at = checkpoint
         # Advance the external anchor to the checkpoint (best-effort, same sink as the sealer): the
         # checkpoint prunes the seals below it, so an anchor still naming a pruned seq would read as
         # tail truncation on the next ``verify --anchor``. Reusing the sealer's emit keeps the
@@ -196,33 +206,32 @@ class Retention:
         self.audit.sealer._emit_anchor(seq=seq, seal_mac=seal_mac, sealed_at=sealed_at)
         return deleted
 
-    def _highest_prunable_boundary(self, seals, floor: int, boundary: int, cutoff) -> int:
-        """The highest covering-seal ``to_id`` such that every range from the floor up to it is both
-        fully older than ``cutoff`` *and* prunable (not tampered) against its seal.
+    def _prune_aligned_atomic(
+        self, seals, floor: int, boundary: int, cutoff
+    ) -> tuple[int, int, str, datetime] | None:
+        """One transaction: re-verify the prunable boundary, delete through it, and write the
+        checkpoint — the atomic core of :meth:`_run_aligned` (Bug #4). Returns
+        ``(deleted, seq, seal_mac, sealed_at)`` for the checkpoint written, or ``None`` when
+        nothing is prunable (no delete, no checkpoint).
 
         Iterates ranges in id order and stops at the first that either still holds a row newer than
-        ``cutoff`` (young — so a young range never lets an older one past it) or is refused. The
-        prunability test is :func:`~firm.audit.verify.range_is_prunable`, which classifies the range
-        with the *same* classifier the verifier runs (:func:`~firm.audit.verify.classify_range`): a
-        range that verifies OK, or whose only divergence is valid-MAC late commits, is prunable;
-        only a TAMPERED range (a deletion, a count-preserving swap, an invalid/missing MAC, or an
-        unverifiable seal) is refused. Aligning the gate with verify's classification is deliberate:
-        a benign late commit (a writer that outran ``grace`` and landed a valid row in a just-sealed
-        range, which genuinely happens on real-concurrency backends) is a WARNING to verify and must
-        not block retention forever; the late row is expired too (the range is past ``cutoff``), so
-        deleting it with the range destroys no evidence.
-
-        A refused range is counted on :attr:`last_refused_tampered` and routed through ``on_error``;
-        because the boundary stops at it, the checkpoint never advances past it, so the evidence is
-        preserved and every later run refuses it again (it is never laundered by deletion). Ranges
-        at or below ``floor`` are already pruned and out of scope. ``boundary`` is the activation
-        boundary (highest sealed id) the classifier uses to tell a legacy NULL-MAC row from a forged
-        one, matching :meth:`~firm.audit.verify.Verifier._floor_and_boundary`."""
+        ``cutoff`` (young — so a young range never lets an older one past it) or is refused by
+        :func:`~firm.audit.verify.range_is_prunable` (the *same* classifier the verifier runs: OK or
+        benign valid-MAC late commit is prunable, TAMPERED refused). A refused range is counted on
+        :attr:`last_refused_tampered` and routed through ``on_error``; because the boundary stops at
+        it, the checkpoint never advances past it, so the evidence is preserved and every later run
+        refuses it again. Because the re-verify, the delete, and the checkpoint insert (plus the
+        subsumed-seal cleanup) all commit or roll back together, a crash leaves the range fully
+        intact — verify still reads OK, never a covering seal short of rows. ``boundary`` is the
+        activation boundary (highest sealed id) the classifier uses to tell a legacy NULL-MAC row
+        from a forged one, matching :meth:`~firm.audit.verify.Verifier._floor_and_boundary`."""
         covering = [s for s in seals if s.kind == "seal" and s.to_id > floor]
         keyring = self.audit.verifier.keyring
         seal_keyring = self.audit.verifier.seal_keyring
-        pruned_through = floor
-        with self.audit.engine.connect() as conn:
+        seal_key = self.audit._seal_key
+        assert seal_key is not None  # guarded by the seal-key refusal in _run_aligned
+        with snapshot_transaction(self.audit.engine, write=True) as conn:
+            pruned_through = floor
             for seal in covering:
                 newest = conn.execute(
                     select(func.max(_audits.c.created_at)).where(
@@ -235,7 +244,67 @@ class Retention:
                     self._refuse_tampered(seal)
                     break  # refuse to prune tampered evidence; stop so the checkpoint can't skip it
                 pruned_through = seal.to_id
-        return pruned_through
+            if pruned_through <= floor:
+                return None
+            deleted = conn.execute(
+                delete(_audits).where(_audits.c.id > floor, _audits.c.id <= pruned_through)
+            ).rowcount
+            seq, seal_mac, sealed_at = self._append_checkpoint(
+                conn, seal_key, from_id=floor, to_id=pruned_through
+            )
+        return deleted, seq, seal_mac, sealed_at
+
+    def _append_checkpoint(
+        self, conn, key, *, from_id: int, to_id: int
+    ) -> tuple[int, str, datetime]:
+        """Insert the checkpoint seal at the head and prune the covering seals it subsumes, on the
+        caller's (already-open, atomic) ``conn`` (Bug #4 — this must share the prune's transaction).
+
+        The checkpoint covers ``(from_id, to_id]`` with no live rows left (``rows_mac`` over the
+        empty set, no gaps), takes the next ``seq``, and chains ``prev_mac`` to the current head —
+        verify reads its ``to_id`` as the new floor. Covering seals with ``to_id <= to_id`` and any
+        earlier checkpoint are then deleted (their coverage is subsumed); the checkpoint's
+        ``seal_mac`` is what lets verify accept the missing front."""
+        head = conn.execute(select(_seals).order_by(_seals.c.seq.desc()).limit(1)).first()
+        assert head is not None  # a seal exists (guarded by _sealing_active)
+        seq = head.seq + 1
+        prev_mac = head.seal_mac
+        sealed_at = now_utc()
+        rows_mac = integrity.rows_mac(key, [])
+        seal_mac = integrity.seal_mac(
+            key,
+            seq=seq,
+            kind="checkpoint",
+            from_id=from_id,
+            to_id=to_id,
+            row_count=0,
+            rows_mac=rows_mac,
+            prev_mac=prev_mac,
+            sealed_at=sealed_at,
+            gaps="",
+        )
+        conn.execute(
+            _seals.insert().values(
+                seq=seq,
+                kind="checkpoint",
+                from_id=from_id,
+                to_id=to_id,
+                row_count=0,
+                rows_mac=rows_mac,
+                prev_mac=prev_mac,
+                seal_mac=seal_mac,
+                sealed_at=sealed_at,
+                key_id=key.id,
+                gap_ranges=None,
+            )
+        )
+        conn.execute(
+            delete(_seals).where(
+                _seals.c.seq != seq,
+                _seals.c.to_id <= to_id,
+            )
+        )
+        return seq, seal_mac, sealed_at
 
     def _count_expired_unsealed(self, max_sealed: int, cutoff) -> int:
         """Expired rows past the sealed frontier (``id > max_sealed``) — a stalled-sealer backlog,
@@ -278,77 +347,6 @@ class Retention:
                 "produce a seal verify rejects."
             )
         )
-
-    def _delete_through(self, floor: int, pruned_through: int) -> int:
-        engine = self.audit.engine
-        dialect = get_dialect(engine)
-        total = 0
-        while True:
-            with dialect.begin_claim_tx(engine) as conn:
-                stmt = dialect.with_skip_locked(
-                    select(_audits.c.id)
-                    .where(_audits.c.id > floor, _audits.c.id <= pruned_through)
-                    .limit(_BATCH_SIZE)
-                )
-                ids = [row.id for row in conn.execute(stmt)]
-                if ids:
-                    conn.execute(delete(_audits).where(_audits.c.id.in_(ids)))
-            total += len(ids)
-            if len(ids) < _BATCH_SIZE:
-                return total
-
-    def _write_checkpoint(self, seals, *, from_id: int, to_id: int) -> tuple[int, str, datetime]:
-        """Append the checkpoint seal at the head and prune the covering seals it subsumes.
-
-        The checkpoint covers ``(from_id, to_id]`` with no live rows left (``rows_mac`` over the
-        empty set), takes the next ``seq``, and chains ``prev_mac`` to the current head — verify
-        reads its ``to_id`` as the new floor. Covering seals with ``to_id <= to_id`` and any earlier
-        checkpoint are then deleted (their coverage is subsumed); the checkpoint's ``seal_mac`` is
-        what lets verify accept the missing front. Returns ``(seq, seal_mac, sealed_at)`` so the
-        caller can export the new head to the anchor.
-        """
-        key = self.audit._seal_key
-        assert key is not None  # guarded by _sealing_active (seal key defaults to the row key)
-        engine = self.audit.engine
-        with get_dialect(engine).begin_claim_tx(engine) as conn:
-            head = conn.execute(select(_seals).order_by(_seals.c.seq.desc()).limit(1)).first()
-            assert head is not None  # a seal exists (guarded by _sealing_active)
-            seq = head.seq + 1
-            prev_mac = head.seal_mac
-            sealed_at = now_utc()
-            rows_mac = integrity.rows_mac(key, [])
-            seal_mac = integrity.seal_mac(
-                key,
-                seq=seq,
-                kind="checkpoint",
-                from_id=from_id,
-                to_id=to_id,
-                row_count=0,
-                rows_mac=rows_mac,
-                prev_mac=prev_mac,
-                sealed_at=sealed_at,
-            )
-            conn.execute(
-                _seals.insert().values(
-                    seq=seq,
-                    kind="checkpoint",
-                    from_id=from_id,
-                    to_id=to_id,
-                    row_count=0,
-                    rows_mac=rows_mac,
-                    prev_mac=prev_mac,
-                    seal_mac=seal_mac,
-                    sealed_at=sealed_at,
-                    key_id=key.id,
-                )
-            )
-            conn.execute(
-                delete(_seals).where(
-                    _seals.c.seq != seq,
-                    _seals.c.to_id <= to_id,
-                )
-            )
-        return seq, seal_mac, sealed_at
 
     def _alert_if_over_threshold(self) -> None:
         if self.last_skipped_unsealed > _SKIP_ALERT_THRESHOLD:

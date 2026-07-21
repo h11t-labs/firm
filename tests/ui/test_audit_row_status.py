@@ -22,11 +22,18 @@ _EMPTY_FILTERS = {"action": "", "subject": "", "actor": "", "correlation_id": ""
 _MAC = "ab" * 32
 
 
-def _ctx(*, active: bool = True, max_sealed: int = 0, tampered: set[int] | None = None) -> dict:
+def _ctx(
+    *,
+    active: bool = True,
+    max_sealed: int = 0,
+    tampered: set[int] | None = None,
+    truncated: bool = False,
+) -> dict:
     return {
         "active": active,
         "max_sealed_to_id": max_sealed,
         "tampered_ids": tampered or set(),
+        "tampered_truncated": truncated,
     }
 
 
@@ -53,6 +60,18 @@ def test_row_status_unprotected_when_no_row_mac() -> None:
 
 def test_row_status_tampered_dominates_a_sealed_row() -> None:
     assert row_status({"id": 3, "row_mac": _MAC}, _ctx(max_sealed=5, tampered={3})) == "tampered"
+
+
+def test_row_status_degrades_to_unverified_when_findings_truncated() -> None:
+    # Bug #8. A tamper run flagged more rows than its affected list carries ids for (truncated). A
+    # sealed row NOT in the known tampered set could still be one of the un-listed tampered rows, so
+    # it must NOT read "Sealed & verified" — it degrades to the honest "unverified".
+    ctx = _ctx(max_sealed=5, tampered={2}, truncated=True)
+    assert row_status({"id": 4, "row_mac": _MAC}, ctx) == "unverified"  # sealed, but unvouched
+    # A row that IS in the known tampered set still reads tampered (priority unchanged).
+    assert row_status({"id": 2, "row_mac": _MAC}, ctx) == "tampered"
+    # Without truncation the same sealed row reads sealed & verified.
+    assert row_status({"id": 4, "row_mac": _MAC}, _ctx(max_sealed=5, tampered={2})) == "sealed"
 
 
 def test_row_status_tampered_dominates_an_unprotected_row() -> None:
@@ -105,6 +124,43 @@ def test_context_tampered_ids_survives_malformed_json(runtime, seed) -> None:
     assert ctx["tampered_ids"] == set()
 
 
+def test_context_flags_truncated_findings(runtime, seed) -> None:
+    # Bug #8. A tampered run whose affected list carries the "more" overflow marker sets
+    # tampered_truncated, so the table stops vouching for un-listed sealed rows.
+    affected = (
+        '[{"kind": "row", "label": "row 1", "id": 1, "verdict": "tampered"},'
+        '{"kind": "more", "label": "+40 more finding(s)", "verdict": "tampered"}]'
+    )
+    seed.verify_status(outcome="tampered", tampered_count=41, affected_identifiers=affected)
+    with runtime.engine.connect() as conn:
+        ctx = audit_queries.row_integrity_context(conn)
+    assert ctx["tampered_truncated"] is True
+    assert ctx["tampered_ids"] == {1}
+
+
+def test_context_not_truncated_without_the_more_marker(runtime, seed) -> None:
+    affected = '[{"kind": "row", "label": "row 1", "id": 1, "verdict": "tampered"}]'
+    seed.verify_status(outcome="tampered", tampered_count=1, affected_identifiers=affected)
+    with runtime.engine.connect() as conn:
+        ctx = audit_queries.row_integrity_context(conn)
+    assert ctx["tampered_truncated"] is False
+
+
+def test_tampered_row_ids_survives_deeply_nested_json() -> None:
+    # Bug #3. A DB-write attacker could set affected_identifiers to a deeply-nested JSON blob;
+    # json.loads raises RecursionError (not ValueError/TypeError), which used to 500 the audit page
+    # on every render (parsed twice per request). It must degrade to an empty set instead.
+    deep = "[" * 5000 + "]" * 5000
+    assert audit_queries._tampered_row_ids(deep) == set()
+
+
+def test_tampered_row_ids_rejects_oversized_json() -> None:
+    # An oversized blob is rejected before json.loads — the verifier only ever writes a handful of
+    # small findings, so anything past the cap is corrupt or hostile.
+    huge = '[{"kind":"row","id":1,"verdict":"tampered"}]' + " " * (audit_queries._MAX_AFFECTED_JSON)
+    assert audit_queries._tampered_row_ids(huge) == set()
+
+
 # -- the events table column -------------------------------------------------------------------
 
 
@@ -145,6 +201,17 @@ def test_table_shows_unsealed_and_unprotected_marks(runtime) -> None:
     assert render._ICONS["shield-alert"] in body
     assert 'class="row-status muted"' in body  # id 2 has no row_mac
     assert "Unprotected — recorded before tamper-evidence" in body
+
+
+def test_table_shows_unverified_mark_on_a_truncated_tamper_run(runtime) -> None:
+    # Bug #8. On a truncated tamper run a sealed row not in the known set renders the honest
+    # "unverified" mark (warn), never the green "Sealed & verified" checkmark it used to.
+    rows = [_row(4)]
+    ctx = _ctx(max_sealed=5, tampered={2}, truncated=True)
+    body = render.audit_page(["audit"], _EMPTY_STATS, rows, _EMPTY_FILTERS, row_ctx=ctx)
+    assert "verify it (findings truncated)" in body  # apostrophe is HTML-escaped in the title attr
+    assert 'class="row-status warn"' in body
+    assert "Sealed & verified" not in body  # never falsely green
 
 
 def test_table_has_no_status_column_when_inactive(runtime) -> None:

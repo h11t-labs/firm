@@ -71,6 +71,42 @@ pre-1.0 (breaking changes bump the minor version).
 - **Keyring comma contract corrected.** A comma is always an entry delimiter; a secret cannot
   contain one. The parser is fail-closed (never merges two distinct secrets), and the docstring no
   longer over-promises a rejection it cannot make for a well-formed `,label=secret` tail.
+- **Deleted sealed rows can no longer be laundered through the late-commit path** (schema + seal-MAC
+  recipe change). A seal now records — and signs into its `seal_mac` — the id-gaps it did not cover
+  (`firm_audit_seals.gap_ranges`, NULL for a dense range, the common case). Verify's `late_commit`
+  branch was previously granted to *any* sealed range where every present row had a valid MAC and the
+  count exceeded `row_count`; a database attacker with no key could therefore delete a genuinely
+  sealed row and back-fill id-gaps with other valid signed rows (relocation changes only `id`, which
+  the row MAC ignored) to pass the deletion off as a benign late commit — then retention pruned and
+  checkpointed over it. Verify now only grants `late_commit` when the seal's **covered** (non-gap)
+  rows still reproduce the signed `rows_mac`/`row_count` exactly, so a deleted covered row is
+  `TAMPERED` and retention refuses the range. A genuine late commit (a validly-signed row landing in
+  a recorded gap) is still an amber `WARNING`. Folded into migration `0002` (unreleased); no
+  re-signing of existing data.
+- **Retention's aligned prune is atomic.** The pre-prune re-verify, the row deletion, and the
+  checkpoint write now run in **one transaction** (`snapshot_transaction(write=True)` — `BEGIN
+  IMMEDIATE` on SQLite, `SERIALIZABLE` on Postgres/MySQL). A crash mid-prune can no longer leave a
+  covering seal with missing rows and no checkpoint (a permanent false `TAMPERED`), and a row
+  modified after the check but before the delete can no longer be laundered.
+- **`verify` reads a consistent snapshot.** It walks seals then rows across many statements; on
+  Postgres/MySQL `READ COMMITTED` a concurrent legitimate prune committing in between made it compare
+  stale seals to pruned rows and cry a false `TAMPERED`. Verify now runs in a snapshot transaction
+  (`REPEATABLE READ` on Postgres/MySQL, a WAL snapshot on SQLite); it stays read-only.
+- **A seal-key-only host never destroys sealed rows.** Retention decided "sealing active" from the
+  *row* key, so a two-key sealer/verifier host carrying only `FIRM_AUDIT_SEAL_KEY` fell through to
+  the plain age-based delete and removed sealed rows with no checkpoint. Sealing is now active
+  whenever any seal exists; a host lacking the seal key that owns the chain refuses the aligned prune
+  loudly instead.
+- **Mass tampering can no longer OOM verify before it alerts.** Verify capped its findings only at
+  serialize time; it now bounds the in-memory findings list during accumulation (the exact counts are
+  kept separately), so a million-row tamper still persists the `TAMPERED` status and fires
+  `on_finding`, with an honest "+N more" overflow count.
+- **Dashboard integrity status is no longer spoofable, DoS-able, or falsely green** (firm-ui). The
+  panel reads the verifier's single canonical status row by its fixed id instead of the newest by
+  `ran_at` (an attacker could otherwise insert a future-dated `ok` row and pin it green); the
+  `affected_identifiers` JSON parsers reject oversized input and survive deeply-nested input instead
+  of 500-ing every render; and on a truncated tamper run the per-row table degrades sealed rows it
+  cannot vouch for to an honest "not individually verified" mark rather than a green checkmark.
 
 ### Changed
 

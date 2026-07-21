@@ -74,6 +74,7 @@ def _recompute_seal_mac(seal) -> str:
         rows_mac=seal.rows_mac,
         prev_mac=seal.prev_mac,
         sealed_at=seal.sealed_at,
+        gaps=seal.gap_ranges or "",
     )
 
 

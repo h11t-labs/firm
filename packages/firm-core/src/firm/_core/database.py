@@ -128,6 +128,38 @@ def immediate_transaction(engine: Engine) -> Iterator[Connection]:
             conn.info.pop(_IMMEDIATE_KEY, None)
 
 
+@contextmanager
+def snapshot_transaction(engine: Engine, *, write: bool = False) -> Iterator[Connection]:
+    """A transaction that sees a **consistent snapshot** for its whole span — so a multi-statement
+    read (audit verification) or a check-then-mutate (retention's aligned prune) is never fooled by
+    another transaction committing in the middle.
+
+    Dialect-aware isolation, since only Postgres/MySQL default to ``READ COMMITTED`` where that
+    interleaving is visible:
+
+    * **SQLite** — a plain (``write=False``) deferred ``BEGIN`` already reads a stable WAL snapshot
+      from its first statement; ``write=True`` upgrades to ``BEGIN IMMEDIATE`` (the write lock) so a
+      re-verify-then-delete holds off any concurrent writer for the whole transaction.
+    * **Postgres / MySQL** — ``REPEATABLE READ`` for a read snapshot; ``SERIALIZABLE`` for a
+      read-write prune, so a row modified and committed by another session between the pre-prune
+      re-verify and the delete makes the prune fail (and retry) rather than launder the change.
+    """
+    if engine.dialect.name == "sqlite":
+        with engine.connect() as conn:
+            conn.info[_IMMEDIATE_KEY] = write
+            try:
+                with conn.begin():
+                    yield conn
+            finally:
+                conn.info.pop(_IMMEDIATE_KEY, None)
+        return
+    level = "SERIALIZABLE" if write else "REPEATABLE READ"
+    with engine.connect() as raw:
+        conn = raw.execution_options(isolation_level=level)
+        with conn.begin():
+            yield conn
+
+
 def dispose_engine(engine: Engine, *, close: bool = True) -> None:
     """Dispose an engine's pool.
 
