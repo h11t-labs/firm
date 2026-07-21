@@ -777,13 +777,15 @@ _INTEGRITY_ICON = {
     "never_ran": "shield-alert",
     "not_configured": "shield",  # plain outline — neutral, no alarm
 }
+# The status word paired with the "Integrity" label, e.g. "Integrity  OK". TAMPERED stays
+# upper-case: it is the one alarm state, rendered as a banner where the shout is the point.
 _INTEGRITY_WORD = {
-    "ok": "integrity OK",
-    "warning": "WARNING",
-    "error": "ERROR",
+    "ok": "OK",
+    "warning": "Warning",
+    "error": "Error",
     "tampered": "TAMPERED",
-    "never_ran": "never verified",
-    "not_configured": "not configured",
+    "never_ran": "Never verified",
+    "not_configured": "Not configured",
 }
 # The panel's tone class drives both the background tint and the medallion colour; the neutral
 # case (legacy / not-configured) is named explicitly so it reads as "no alarm", not "unstyled".
@@ -822,30 +824,35 @@ def _cause_text(
     return cause
 
 
-def _affected_cells(raw: str | None) -> list[tuple[str, Any]]:
-    """Turn the verifier's ``affected_identifiers`` (a JSON list of ``{"kind", "label", "id"?}``)
-    into ``Kv`` cells; an item with an integer ``id`` links into the audit table. Malformed or
-    absent data degrades to a single plain cell rather than hiding the finding."""
+def _affected_cells(raw: str | None) -> list[dict[str, Any]]:
+    """Parse the verifier's ``affected_identifiers`` — a JSON list of
+    ``{"kind", "label", "id"?, "message"?, "verdict"?}`` — into render-ready rows. Each row carries a
+    ``chip`` (a link into ``/audit/<id>`` when the finding names a specific row id, else the plain
+    label) and the finding's human ``message`` (the "what/why" the banner surfaces). Malformed or
+    absent data degrades to a single plain chip rather than hiding the finding."""
     if not raw:
         return []
     try:
         items = json.loads(raw)
     except (ValueError, TypeError):
-        return [("affected", raw)]
+        return [{"kind": "affected", "chip": raw, "message": ""}]
     if not isinstance(items, list):
         items = [items]
-    cells: list[tuple[str, Any]] = []
+    cells: list[dict[str, Any]] = []
     for item in items:
         if isinstance(item, dict):
             kind = str(item.get("kind", "affected"))
             label = str(item.get("label", ""))
+            message = str(item["message"]) if item.get("message") else ""
             id_ = item.get("id")
-            if isinstance(id_, int):
-                cells.append((kind, Markup(f'<a href="/audit/{id_}">{escape(label)}</a>')))
-            else:
-                cells.append((kind, label))
+            chip: Any = (
+                Markup(f'<a href="/audit/{id_}">{escape(label)}</a>')
+                if isinstance(id_, int)
+                else label
+            )
+            cells.append({"kind": kind, "chip": chip, "message": message})
         else:
-            cells.append(("affected", str(item)))
+            cells.append({"kind": "affected", "chip": str(item), "message": ""})
     return cells
 
 
@@ -898,20 +905,24 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         view["when"] = _when(s["ran_at"])
         view["when_label"] = "first detected"
         view["headline"] = f"{_num(n)} finding{'' if n == 1 else 's'}"
-        # What it means, in plain language — true for every tamper class (modify / delete / insert
-        # / broken seal chain), since the precise per-finding message is not persisted to the
-        # status row today.
+        # What it means, in plain language — the framing sentence, true for every tamper class
+        # (modify / delete / insert / broken seal chain), kept as the lead so a non-expert reads the
+        # category first.
         view["meaning"] = (
             "Sealed audit data no longer matches its signatures — it was modified, deleted, or "
             "inserted after being recorded."
         )
+        cells = _affected_cells(s["affected_identifiers"])
+        # The specific what/why: each finding's own message, itemized (deduped, order-preserved).
+        # Rendered through the same ``integrity-items`` list the WARNING/ERROR strips use. Absent
+        # when the status row carries no per-finding messages (legacy / degraded data) — the generic
+        # ``meaning`` above then stands alone as the fallback.
+        view["cause_lines"] = list(dict.fromkeys(c["message"] for c in cells if c["message"]))
         # Which records: each affected identifier as a chip, linking into the audit table when the
         # verifier recorded a row id.
-        cells = _affected_cells(s["affected_identifiers"])
         if cells:
             view["affected"] = Markup(" ").join(
-                Markup('<span class="integrity-chip">{}</span>').format(value)
-                for _kind, value in cells
+                Markup('<span class="integrity-chip">{}</span>').format(c["chip"]) for c in cells
             )
         # What to do: verify it yourself, and don't disturb the evidence.
         view["next_step"] = Markup(

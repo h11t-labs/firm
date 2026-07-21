@@ -225,7 +225,8 @@ def verify_status_row(conn: Connection) -> dict[str, Any] | None:
         "anchor_configured": row.anchor_configured,
         "unsealed_tail_count": row.unsealed_tail_count,
         "unsealed_tail_oldest_at": row.unsealed_tail_oldest_at,
-        # JSON list of ``{"kind", "label", "id"?}`` on tampering; see ``render._affected_cells``.
+        # JSON list of ``{"kind", "label", "id"?, "message"?, "verdict"}`` on tampering; see
+        # ``render._affected_cells``.
         "affected_identifiers": row.affected_identifiers,
         "duration_seconds": row.duration_seconds,
     }

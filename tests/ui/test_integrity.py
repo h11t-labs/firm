@@ -224,7 +224,9 @@ def test_render_ok_is_a_calm_strip(runtime) -> None:
     body = _audit_html(_state(_status()))
     assert 'class="integrity ok"' in body
     assert 'class="integrity-icon"' in body  # shield medallion anchors the verdict
-    assert "integrity OK" in body
+    assert 'class="integrity-verdict"' in body  # "Integrity  OK", label + status word
+    assert ">Integrity</span>" in body
+    assert ">OK</span>" in body
     # The strip's facts are labelled units, not one grey run-on.
     assert 'class="integrity-facts"' in body
     assert "verified" in body  # freshness — the primary fact
@@ -238,19 +240,29 @@ def test_render_warning_itemizes_the_cause(runtime) -> None:
     body = _audit_html(_state(_status(outcome="warning", warning_count=2)))
     assert 'class="integrity warn"' in body
     assert 'class="integrity-icon"' in body
-    assert "WARNING" in body
+    assert ">Warning</span>" in body
     assert "2 late commits in a sealed range" in body
 
 
 def test_render_error_carries_the_failure_message(runtime) -> None:
     body = _audit_html(_state(_status(outcome="error", error_message="unknown key_id ab12")))
     assert 'class="integrity warn"' in body
-    assert "ERROR" in body
+    assert ">Error</span>" in body
     assert "verify failed: unknown key_id ab12" in body
 
 
 def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
-    affected = '[{"kind": "seal", "label": "#12", "id": 4041}]'
+    # The structured findings the verifier now persists: a row-level finding (linkable id + its own
+    # message) and a seal-level finding (a message, no link).
+    affected = (
+        "["
+        '{"kind": "row", "label": "row 42", "id": 42, '
+        '"message": "row 42 row_mac does not recompute (modified)", "verdict": "tampered"},'
+        '{"kind": "seal", "label": "seal 12", '
+        '"message": "seal seq 12 range no longer matches its rows_mac/row_count", '
+        '"verdict": "tampered"}'
+        "]"
+    )
     status = _status(outcome="tampered", tampered_count=2, affected_identifiers=affected)
     body = _audit_html(_state(status))
     assert 'role="alert"' in body
@@ -258,12 +270,26 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
     assert 'class="integrity-icon"' in body
     assert "TAMPERED" in body
     assert "2 findings" in body
-    assert "no longer matches its signatures" in body  # plain-language "what is wrong"
+    assert "no longer matches its signatures" in body  # plain-language framing (the lead)
+    # The real per-finding "what/why" is surfaced, not just the generic sentence.
+    assert "row 42 row_mac does not recompute (modified)" in body
+    assert "seal seq 12 range no longer matches its rows_mac/row_count" in body
+    assert 'class="integrity-items"' in body
     assert "Affected" in body
-    assert 'href="/audit/4041"' in body  # affected record links into the audit table
+    assert 'href="/audit/42"' in body  # the row-level finding links into the audit table
     assert 'class="integrity-chip"' in body
     assert "firm-audit verify --full" in body  # the verify command
     assert render._TAMPER_DOCS_URL in body  # runbook link
+
+
+def test_render_tampered_without_messages_falls_back_to_generic_meaning(runtime) -> None:
+    # Legacy / degraded data: chips but no per-finding messages — the generic sentence stands alone.
+    affected = '[{"kind": "seal", "label": "#12", "id": 4041}]'
+    status = _status(outcome="tampered", tampered_count=1, affected_identifiers=affected)
+    body = _audit_html(_state(status))
+    assert "no longer matches its signatures" in body
+    assert 'class="integrity-items"' not in body  # nothing to itemize
+    assert 'href="/audit/4041"' in body
 
 
 def test_mobile_wrap_contract_is_present(runtime) -> None:
@@ -291,14 +317,14 @@ def test_mobile_wrap_contract_is_present(runtime) -> None:
 
 def test_render_never_ran_points_at_the_cron(runtime) -> None:
     body = _audit_html(integrity_state(None, _cfg(key=True), now=NOW))
-    assert "never verified" in body
+    assert "Never verified" in body
     assert "schedule a firm-audit verify cron" in body
 
 
 def test_render_not_configured_is_neutral(runtime) -> None:
     body = _audit_html(integrity_state(None, _cfg(key=False, sealing=False), now=NOW))
     assert 'class="integrity neutral"' in body
-    assert "not configured" in body
+    assert "Not configured" in body
     assert "set FIRM_AUDIT_KEY" in body
     assert 'role="alert"' not in body
 

@@ -210,11 +210,13 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
    full-width banner that dominates (design D22, variant A). A tinted shield medallion anchors the
    verdict in every state; per-state tints derive from the status tokens via color-mix, so there
    is no new hue here. */
+/* A plain tinted block — no border, like the KPI cards below it; the fill alone carries the state.
+   Bottom margin matches the cards' gap so the vertical rhythm is even. */
 .integrity { display: flex; align-items: center; gap: .7rem;
-             padding: .5rem .7rem; margin: .5rem 0 .15rem; border-radius: var(--radius-lg);
-             background: var(--surface-2); border: 1px solid var(--border); font-size: var(--fs-sm); }
-.integrity.ok   { background: var(--ok-bg);   border-color: color-mix(in oklab, var(--ok) 22%, transparent); }
-.integrity.warn { background: var(--warn-bg); border-color: color-mix(in oklab, var(--warn) 30%, transparent); }
+             padding: .5rem .7rem; margin: .2rem 0 .6rem; border-radius: var(--radius-lg);
+             background: var(--surface-2); font-size: var(--fs-sm); }
+.integrity.ok   { background: var(--ok-bg); }
+.integrity.warn { background: var(--warn-bg); }
 
 /* The medallion: a tinted rounded square holding the shield. `currentColor` is set to the state
    tone just below, so both the 14%-tint fill and the full-strength glyph track it. */
@@ -226,13 +228,16 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
 .integrity.danger  .integrity-icon { color: var(--danger); }
 .integrity.neutral .integrity-icon { color: var(--text-3); }
 
-/* Strip body: inline, wrapping meta (word · when · detail) on one calm line that wraps only when
-   it must. */
-.integrity-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .55rem; min-width: 0; }
+/* Strip body: verdict on the left, facts pushed to the right edge, on one calm line that wraps
+   only when it must. */
+.integrity-body { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: .3rem .7rem; min-width: 0; }
+.integrity-verdict { display: inline-flex; align-items: baseline; gap: .4rem; }
+.integrity-label { color: var(--text-3); }
 .integrity-word { font-weight: 600; }
 .integrity.ok      .integrity-word { color: var(--ok); }
 .integrity.warn    .integrity-word { color: var(--warn); }
 .integrity.neutral .integrity-word { color: var(--text-2); }
+.integrity-facts { margin-left: auto; }  /* the meta facts sit right-aligned against the verdict */
 .integrity-when, .integrity-detail { color: var(--text-2); min-width: 0; }
 
 /* OK strip facts: each is a labelled unit (muted key, brighter value) so three distinct metrics
@@ -249,7 +254,6 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
 /* TAMPERED banner: a medallion-anchored alert that owns the top of the page. The danger reads
    through the tinted fill, the medallion, and the type — not a loud outline. */
 .integrity.danger.banner { align-items: flex-start; gap: .85rem; background: var(--danger-bg);
-                           border-color: color-mix(in oklab, var(--danger) 38%, transparent);
                            padding: .95rem 1.05rem; }
 .integrity.danger .integrity-icon { width: 38px; height: 38px; border-radius: 11px; }
 .integrity.danger .integrity-icon svg { width: 22px; height: 22px; }

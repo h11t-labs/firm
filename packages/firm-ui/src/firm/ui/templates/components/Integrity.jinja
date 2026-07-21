@@ -17,7 +17,7 @@
     {% if view.meaning %}<p class="integrity-meaning">{{ view.meaning }}</p>{% endif %}
     {% if view.affected %}<div class="integrity-affected"><span class="integrity-affected-label">Affected</span> {{ view.affected }}</div>{% endif %}
     {% else %}
-    <span class="integrity-word">{{ view.word }}</span>
+    <span class="integrity-verdict"><span class="integrity-label">Integrity</span> <span class="integrity-word">{{ view.word }}</span></span>
     {% if view.facts %}<span class="integrity-facts">{% for f in view.facts %}<span class="integrity-fact"><span class="fk">{{ f.label }}</span> <span class="fv">{{ f.value }}</span></span>{% endfor %}</span>{% endif %}
     {% if view.when %}<span class="integrity-when">{{ view.when_label }} {{ view.when }}</span>{% endif %}
     {% if view.detail %}<span class="integrity-detail" title="{{ view.detail }}">{{ view.detail }}</span>{% endif %}
