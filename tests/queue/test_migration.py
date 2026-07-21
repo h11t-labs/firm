@@ -118,9 +118,11 @@ def test_upgrade_0001_to_0002_on_populated_db(tmp_path) -> None:
 
         # The pre-existing rows survive the rename.
         with engine.connect() as conn:
-            classes = conn.execute(
-                select(schema.jobs.c.class_name).order_by(schema.jobs.c.id)
-            ).scalars().all()
+            classes = (
+                conn.execute(select(schema.jobs.c.class_name).order_by(schema.jobs.c.id))
+                .scalars()
+                .all()
+            )
         assert classes == ["LegacyJob", "LegacyJob"]
     finally:
         engine.dispose()

@@ -116,9 +116,11 @@ def test_upgrade_0001_to_0002_on_populated_db(tmp_path) -> None:
 
         # The pre-existing rows survive the rename.
         with engine.connect() as conn:
-            hashes = conn.execute(
-                select(schema.messages.c.channel_hash).order_by(schema.messages.c.id)
-            ).scalars().all()
+            hashes = (
+                conn.execute(select(schema.messages.c.channel_hash).order_by(schema.messages.c.id))
+                .scalars()
+                .all()
+            )
         assert hashes == [11, 22]
     finally:
         engine.dispose()
