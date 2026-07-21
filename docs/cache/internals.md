@@ -2,7 +2,7 @@
 
 ## Schema
 
-One table, `firm_entries`:
+One table, `firm_cache_entries`:
 
 ```
 id          autoincrement PK, FIFO eviction order

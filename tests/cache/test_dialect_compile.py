@@ -11,7 +11,7 @@ from firm.cache import schema
 def test_entries_compiles_for_pg_and_mysql() -> None:
     for dialect in (postgresql.dialect(), mysql.dialect()):
         ddl = str(CreateTable(schema.entries).compile(dialect=dialect))
-        assert "firm_entries" in ddl
+        assert "firm_cache_entries" in ddl
 
 
 def test_mysql_value_is_longblob_with_datetime6() -> None:

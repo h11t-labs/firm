@@ -5,18 +5,18 @@ SQLite, PostgreSQL, or MySQL/MariaDB — no Redis, no message broker, no websock
 
 ## The model
 
-A broadcast inserts a row into `firm_messages`. Subscribers register an in-process callback
+A broadcast inserts a row into `firm_channel_messages`. Subscribers register an in-process callback
 per channel; a background **listener** polls the table for rows newer than the last id it has seen
 on those channels and hands each payload to the matching callbacks.
 
 ```
-broadcast("room:42", payload) ──▶ INSERT firm_messages (channel, payload, channel_hash, …)
+broadcast("room:42", payload) ──▶ INSERT firm_channel_messages (channel, payload, channel_hash, …)
 
 listener (every polling_interval):
   SELECT … WHERE channel_hash IN (subscribed) AND id > last_id  ──▶ callback(payload)
 ```
 
-One table, `firm_messages`:
+One table, `firm_channel_messages`:
 
 | Column | Purpose |
 |---|---|

@@ -128,8 +128,8 @@ then `SIGKILL`s after `terminationGracePeriodSeconds` (default **30s**).
   `exec firm-queue …`.
 
 !!! tip "Hard kills are safe"
-    Every process heartbeats into `firm_processes`; when one dies, its in-flight claims are
-    recovered to `firm_ready_executions` and another worker finishes them (at-least-once — keep
+    Every process heartbeats into `firm_queue_processes`; when one dies, its in-flight claims are
+    recovered to `firm_queue_ready_executions` and another worker finishes them (at-least-once — keep
     jobs idempotent). An ungraceful kill is never lost work; graceful shutdown just avoids
     re-running in-flight jobs. See [crash recovery](queue/workers-and-supervisor.md#crash-recovery).
 
@@ -150,7 +150,7 @@ its own pool. Multiply by replicas and you can exhaust PostgreSQL's `max_connect
 
 Workers expose **no HTTP endpoint** — if the supervisor exits, the container exits and k8s restarts
 it, so a simple process-liveness probe (`pgrep -f firm-queue`) is enough. For a deeper check,
-assert the pod's row in `firm_processes` has a fresh `last_heartbeat_at`.
+assert the pod's row in `firm_queue_processes` has a fresh `last_heartbeat_at`.
 
 The dashboard *does* serve HTTP, but with Basic auth every request returns **401**, which an
 `httpGet` probe counts as a failure — use a **`tcpSocket`** probe on its port instead.
@@ -161,7 +161,7 @@ You often don't need it — idle workers back off their polling, so a right-size
 is a legitimate setup. If you do want it: the built-in **CPU `HorizontalPodAutoscaler`** works with
 no extra components, and to scale on actual backlog instead, point [KEDA](https://keda.sh)'s
 PostgreSQL scaler (or a Prometheus adapter feeding a standard HPA) at
-`SELECT count(*) FROM firm_ready_executions`. Either way, remember the GIL: scale CPU-bound work
+`SELECT count(*) FROM firm_queue_ready_executions`. Either way, remember the GIL: scale CPU-bound work
 with **more replicas (processes)**, not more `--threads`.
 
 ### Recurring tasks

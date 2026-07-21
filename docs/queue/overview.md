@@ -5,7 +5,7 @@ with no Redis or other broker.
 
 ## The model
 
-A job is a registered function. Enqueuing it inserts a row into `firm_jobs` (the source of
+A job is a registered function. Enqueuing it inserts a row into `firm_queue_jobs` (the source of
 truth) plus one *execution* row that tracks where the job is in its lifecycle. The execution moves
 between tables:
 

@@ -43,7 +43,7 @@ module carries its own.
   `config` (`Settings`/`Runtime` — engine+dialect ownership, **no global state**), `database`
   (`create_engine_for`, `transaction`, `immediate_transaction`), `dialects/` (per-DB seam: claim
   locking + native upsert/insert-ignore), `poller.InterruptiblePoller`, `process` + `schema`
-  (the `firm_processes` table — copied into the queue's metadata via `to_metadata`),
+  (the `firm_queue_processes` table — copied into the queue's metadata via `to_metadata`),
   `tagged_json` (the queue/audit JSON envelope), `alembic_env` (shared migrations runner),
   `schema_setup` (create_all + version-table stamping). **Core never imports a feature module.**
 - `packages/firm-ui/src/firm/ui/` — optional dashboard (`firm-ui`; depends on all four modules).

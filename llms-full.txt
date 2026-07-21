@@ -319,7 +319,7 @@ run_maintenance(rt)                            # expire stale semaphores, unbloc
 ```python
 from firm.cache import Cache
 
-# create the cache; create_schema=True auto-creates the firm_entries table
+# create the cache; create_schema=True auto-creates the firm_cache_entries table
 cache = Cache(database_url="sqlite:///cache.db")
 
 # store / fetch / probe
@@ -433,7 +433,7 @@ from firm.channel import Channel
 
 # Either a database_url (Channel owns the engine) or a shared engine= is required.
 ch = Channel(database_url="sqlite:///channel.db")
-# create_schema=True (default) auto-creates the firm_messages table.
+# create_schema=True (default) auto-creates the firm_channel_messages table.
 ```
 
 ```python
@@ -1279,7 +1279,7 @@ with no Redis or other broker.
 
 ## The model
 
-A job is a registered function. Enqueuing it inserts a row into `firm_jobs` (the source of
+A job is a registered function. Enqueuing it inserts a row into `firm_queue_jobs` (the source of
 truth) plus one *execution* row that tracks where the job is in its lifecycle. The execution moves
 between tables:
 
@@ -1734,7 +1734,7 @@ Attempt counting is tracked on the `jobs.attempts` column.
 
 ## Inspecting failures
 
-A failed job has a row in `firm_failed_executions` with the full traceback in `error`:
+A failed job has a row in `firm_queue_failed_executions` with the full traceback in `error`:
 
 ```python
 from sqlalchemy import select
@@ -1806,7 +1806,7 @@ queues.is_paused(rt, "mailers")    # -> True
 queues.resume(rt, "mailers")       # start again
 ```
 
-Pausing is durable (a row in `firm_pauses`), so it survives restarts.
+Pausing is durable (a row in `firm_queue_pauses`), so it survives restarts.
 
 ## Clearing a queue
 
@@ -1920,7 +1920,7 @@ killed.
 
 ## Heartbeats & crash recovery {#crash-recovery}
 
-Every running process registers a row in `firm_processes` and refreshes `last_heartbeat_at`
+Every running process registers a row in `firm_queue_processes` and refreshes `last_heartbeat_at`
 on a timer. The supervisor:
 
 - **Prunes** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and
@@ -2147,7 +2147,7 @@ on PG/MySQL it skips rows another worker holds.
 
 `"*"` polls every non-paused queue in a single global `(priority, job_id)` order. A list of exact
 names / `prefix*` patterns polls the matched queues in order, each by `(priority, job_id)`. Paused
-queues (rows in `firm_pauses`) are always excluded.
+queues (rows in `firm_queue_pauses`) are always excluded.
 
 ## Semaphores
 
@@ -2198,7 +2198,7 @@ for most read-through caches that's a fine deal.
 
 ## The model
 
-One table, `firm_entries`:
+One table, `firm_cache_entries`:
 
 | Column | Purpose |
 |---|---|
@@ -2258,7 +2258,7 @@ from firm.cache import Cache
 cache = Cache(database_url="sqlite:///cache.db")
 ```
 
-By default `Cache(...)` creates the `firm_entries` table if it's missing
+By default `Cache(...)` creates the `firm_cache_entries` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
 `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 
@@ -2530,7 +2530,7 @@ Cache(
     expiry_batch_size=100,        # rows per eviction run; also sets the write-trigger probability
     max_key_bytesize=1024,        # keys longer than this are truncated + hash-suffixed
     size_estimate_samples=10000,  # exact-sum threshold / sample size for the size estimator
-    create_schema=True,           # create firm_entries if missing
+    create_schema=True,           # create firm_cache_entries if missing
     auto_expire=True,             # let writes probabilistically trigger eviction
     background_expiry=False,      # run an eviction loop on a timer
     expiry_interval=60.0,         # seconds between background eviction runs
@@ -2616,7 +2616,7 @@ firm-cache trim
 
 ## Schema
 
-One table, `firm_entries`:
+One table, `firm_cache_entries`:
 
 ```
 id          autoincrement PK, FIFO eviction order
@@ -2682,18 +2682,18 @@ SQLite, PostgreSQL, or MySQL/MariaDB — no Redis, no message broker, no websock
 
 ## The model
 
-A broadcast inserts a row into `firm_messages`. Subscribers register an in-process callback
+A broadcast inserts a row into `firm_channel_messages`. Subscribers register an in-process callback
 per channel; a background **listener** polls the table for rows newer than the last id it has seen
 on those channels and hands each payload to the matching callbacks.
 
 ```
-broadcast("room:42", payload) ──▶ INSERT firm_messages (channel, payload, channel_hash, …)
+broadcast("room:42", payload) ──▶ INSERT firm_channel_messages (channel, payload, channel_hash, …)
 
 listener (every polling_interval):
   SELECT … WHERE channel_hash IN (subscribed) AND id > last_id  ──▶ callback(payload)
 ```
 
-One table, `firm_messages`:
+One table, `firm_channel_messages`:
 
 | Column | Purpose |
 |---|---|
@@ -2753,7 +2753,7 @@ from firm.channel import Channel
 ps = Channel(database_url="sqlite:///channel.db")
 ```
 
-By default `Channel(...)` creates the `firm_messages` table if it's missing
+By default `Channel(...)` creates the `firm_channel_messages` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
 `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 
@@ -2824,7 +2824,7 @@ Channel(
     message_retention=86400.0,# trim messages older than this many seconds (1 day)
     auto_trim=True,            # let broadcasts probabilistically trigger trimming
     trim_batch_size=100,      # rows per trim pass; also sets the trim-trigger rate (~2/N per write)
-    create_schema=True,       # create firm_messages if missing
+    create_schema=True,       # create firm_channel_messages if missing
 )
 ```
 
@@ -2901,7 +2901,7 @@ firm-channel trim --retention 86400 --batch-size 100
 
 ## Schema
 
-One table, `firm_messages`:
+One table, `firm_channel_messages`:
 
 ```
 id            autoincrement PK, the delivery cursor
@@ -2957,14 +2957,14 @@ than waiting out the poll interval.
 
 ## Trimming
 
-`firm_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
+`firm_channel_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
 a ~`2 / trim_batch_size` chance (≈ 2% at the default batch of 100) of submitting a **trim** to a
 single background thread — the same probabilistic trigger the cache uses for eviction. A trim is:
 
 ```sql
-SELECT id FROM firm_messages WHERE created_at < :cutoff
+SELECT id FROM firm_channel_messages WHERE created_at < :cutoff
   FOR UPDATE SKIP LOCKED LIMIT :batch_size;   -- SKIP LOCKED on PG/MySQL; BEGIN IMMEDIATE on SQLite
-DELETE FROM firm_messages WHERE id IN (...);
+DELETE FROM firm_channel_messages WHERE id IN (...);
 ```
 
 `SKIP LOCKED` (via the shared dialect seam) means several processes can trim concurrently without
@@ -3683,8 +3683,8 @@ then `SIGKILL`s after `terminationGracePeriodSeconds` (default **30s**).
   `exec firm-queue …`.
 
 !!! tip "Hard kills are safe"
-    Every process heartbeats into `firm_processes`; when one dies, its in-flight claims are
-    recovered to `firm_ready_executions` and another worker finishes them (at-least-once — keep
+    Every process heartbeats into `firm_queue_processes`; when one dies, its in-flight claims are
+    recovered to `firm_queue_ready_executions` and another worker finishes them (at-least-once — keep
     jobs idempotent). An ungraceful kill is never lost work; graceful shutdown just avoids
     re-running in-flight jobs. See [crash recovery](queue/workers-and-supervisor.md#crash-recovery).
 
@@ -3705,7 +3705,7 @@ its own pool. Multiply by replicas and you can exhaust PostgreSQL's `max_connect
 
 Workers expose **no HTTP endpoint** — if the supervisor exits, the container exits and k8s restarts
 it, so a simple process-liveness probe (`pgrep -f firm-queue`) is enough. For a deeper check,
-assert the pod's row in `firm_processes` has a fresh `last_heartbeat_at`.
+assert the pod's row in `firm_queue_processes` has a fresh `last_heartbeat_at`.
 
 The dashboard *does* serve HTTP, but with Basic auth every request returns **401**, which an
 `httpGet` probe counts as a failure — use a **`tcpSocket`** probe on its port instead.
@@ -3716,7 +3716,7 @@ You often don't need it — idle workers back off their polling, so a right-size
 is a legitimate setup. If you do want it: the built-in **CPU `HorizontalPodAutoscaler`** works with
 no extra components, and to scale on actual backlog instead, point [KEDA](https://keda.sh)'s
 PostgreSQL scaler (or a Prometheus adapter feeding a standard HPA) at
-`SELECT count(*) FROM firm_ready_executions`. Either way, remember the GIL: scale CPU-bound work
+`SELECT count(*) FROM firm_queue_ready_executions`. Either way, remember the GIL: scale CPU-bound work
 with **more replicas (processes)**, not more `--threads`.
 
 ### Recurring tasks

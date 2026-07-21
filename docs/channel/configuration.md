@@ -10,7 +10,7 @@ Channel(
     message_retention=86400.0,# trim messages older than this many seconds (1 day)
     auto_trim=True,            # let broadcasts probabilistically trigger trimming
     trim_batch_size=100,      # rows per trim pass; also sets the trim-trigger rate (~2/N per write)
-    create_schema=True,       # create firm_messages if missing
+    create_schema=True,       # create firm_channel_messages if missing
 )
 ```
 

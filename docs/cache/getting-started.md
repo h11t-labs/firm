@@ -19,7 +19,7 @@ from firm.cache import Cache
 cache = Cache(database_url="sqlite:///cache.db")
 ```
 
-By default `Cache(...)` creates the `firm_entries` table if it's missing
+By default `Cache(...)` creates the `firm_cache_entries` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
 `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 
