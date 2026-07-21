@@ -73,7 +73,7 @@ killed.
 
 ## Heartbeats & crash recovery {#crash-recovery}
 
-Every running process registers a row in `firm_processes` and refreshes `last_heartbeat_at`
+Every running process registers a row in `firm_queue_processes` and refreshes `last_heartbeat_at`
 on a timer. The supervisor:
 
 - **Prunes** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and

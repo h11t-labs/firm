@@ -1,4 +1,4 @@
-"""initial schema (firm_messages)
+"""initial schema (firm_channel_messages)
 
 Revision ID: 0001
 Revises:

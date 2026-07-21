@@ -68,7 +68,7 @@ def _job_fk() -> Column:
     return Column(
         "job_id",
         BigInteger,
-        ForeignKey("firm_jobs.id", ondelete="CASCADE"),
+        ForeignKey("firm_queue_jobs.id", ondelete="CASCADE"),
         nullable=False,
     )
 
@@ -78,7 +78,7 @@ def _created_at() -> Column:
 
 
 jobs = Table(
-    "firm_jobs",
+    "firm_queue_jobs",
     metadata,
     _pk(),
     Column("queue_name", String(255), nullable=False),
@@ -93,43 +93,43 @@ jobs = Table(
     Column("attempts", Integer, nullable=False, server_default="0", default=0),
     Column("created_at", _dt(), nullable=False, default=now_utc),
     Column("updated_at", _dt(), nullable=False, default=now_utc, onupdate=now_utc),
-    Index("index_firm_jobs_on_active_job_id", "active_job_id"),
-    Index("index_firm_jobs_on_class_name", "class_name"),
-    Index("index_firm_jobs_on_finished_at", "finished_at"),
-    Index("index_firm_jobs_for_filtering", "queue_name", "finished_at"),
-    Index("index_firm_jobs_for_alerting", "scheduled_at", "finished_at"),
+    Index("index_firm_queue_jobs_on_active_job_id", "active_job_id"),
+    Index("index_firm_queue_jobs_on_class_name", "class_name"),
+    Index("index_firm_queue_jobs_on_finished_at", "finished_at"),
+    Index("index_firm_queue_jobs_for_filtering", "queue_name", "finished_at"),
+    Index("index_firm_queue_jobs_for_alerting", "scheduled_at", "finished_at"),
 )
 
 ready_executions = Table(
-    "firm_ready_executions",
+    "firm_queue_ready_executions",
     metadata,
     _pk(),
     _job_fk(),
     Column("queue_name", String(255), nullable=False),
     Column("priority", Integer, nullable=False, server_default="0", default=0),
     _created_at(),
-    Index("index_firm_ready_executions_on_job_id", "job_id", unique=True),
-    Index("index_firm_poll_all", "priority", "job_id"),
-    Index("index_firm_poll_by_queue", "queue_name", "priority", "job_id"),
+    Index("index_firm_queue_ready_executions_on_job_id", "job_id", unique=True),
+    Index("index_firm_queue_poll_all", "priority", "job_id"),
+    Index("index_firm_queue_poll_by_queue", "queue_name", "priority", "job_id"),
 )
 
 claimed_executions = Table(
-    "firm_claimed_executions",
+    "firm_queue_claimed_executions",
     metadata,
     _pk(),
     _job_fk(),
     Column("process_id", BigInteger),
     _created_at(),
-    Index("index_firm_claimed_executions_on_job_id", "job_id", unique=True),
+    Index("index_firm_queue_claimed_executions_on_job_id", "job_id", unique=True),
     Index(
-        "index_firm_claimed_executions_on_process_id_and_job_id",
+        "index_firm_queue_claimed_executions_on_process_id_and_job_id",
         "process_id",
         "job_id",
     ),
 )
 
 scheduled_executions = Table(
-    "firm_scheduled_executions",
+    "firm_queue_scheduled_executions",
     metadata,
     _pk(),
     _job_fk(),
@@ -137,12 +137,12 @@ scheduled_executions = Table(
     Column("priority", Integer, nullable=False, server_default="0", default=0),
     Column("scheduled_at", _dt(), nullable=False),
     _created_at(),
-    Index("index_firm_scheduled_executions_on_job_id", "job_id", unique=True),
-    Index("index_firm_dispatch_all", "scheduled_at", "priority", "job_id"),
+    Index("index_firm_queue_scheduled_executions_on_job_id", "job_id", unique=True),
+    Index("index_firm_queue_dispatch_all", "scheduled_at", "priority", "job_id"),
 )
 
 blocked_executions = Table(
-    "firm_blocked_executions",
+    "firm_queue_blocked_executions",
     metadata,
     _pk(),
     _job_fk(),
@@ -152,31 +152,31 @@ blocked_executions = Table(
     Column("expires_at", _dt(), nullable=False),
     _created_at(),
     Index(
-        "index_firm_blocked_executions_for_release",
+        "index_firm_queue_blocked_executions_for_release",
         "concurrency_key",
         "priority",
         "job_id",
     ),
     Index(
-        "index_firm_blocked_executions_for_maintenance",
+        "index_firm_queue_blocked_executions_for_maintenance",
         "expires_at",
         "concurrency_key",
     ),
-    Index("index_firm_blocked_executions_on_job_id", "job_id", unique=True),
+    Index("index_firm_queue_blocked_executions_on_job_id", "job_id", unique=True),
 )
 
 failed_executions = Table(
-    "firm_failed_executions",
+    "firm_queue_failed_executions",
     metadata,
     _pk(),
     _job_fk(),
     Column("error", _long_text()),
     _created_at(),
-    Index("index_firm_failed_executions_on_job_id", "job_id", unique=True),
+    Index("index_firm_queue_failed_executions_on_job_id", "job_id", unique=True),
 )
 
 semaphores = Table(
-    "firm_semaphores",
+    "firm_queue_semaphores",
     metadata,
     _pk(),
     Column("key", String(255), nullable=False),
@@ -184,27 +184,27 @@ semaphores = Table(
     Column("expires_at", _dt(), nullable=False),
     Column("created_at", _dt(), nullable=False, default=now_utc),
     Column("updated_at", _dt(), nullable=False, default=now_utc, onupdate=now_utc),
-    Index("index_firm_semaphores_on_key", "key", unique=True),
-    Index("index_firm_semaphores_on_key_and_value", "key", "value"),
-    Index("index_firm_semaphores_on_expires_at", "expires_at"),
+    Index("index_firm_queue_semaphores_on_key", "key", unique=True),
+    Index("index_firm_queue_semaphores_on_key_and_value", "key", "value"),
+    Index("index_firm_queue_semaphores_on_expires_at", "expires_at"),
 )
 
 pauses = Table(
-    "firm_pauses",
+    "firm_queue_pauses",
     metadata,
     _pk(),
     Column("queue_name", String(255), nullable=False),
     _created_at(),
-    Index("index_firm_pauses_on_queue_name", "queue_name", unique=True),
+    Index("index_firm_queue_pauses_on_queue_name", "queue_name", unique=True),
 )
 
-# firm_processes is core infrastructure (process registration lives in firm._core.process);
+# firm_queue_processes is core infrastructure (process registration lives in firm._core.process);
 # its definition is owned by firm._core.schema and copied here so the queue's create_all and
 # Alembic baseline manage it alongside the queue tables.
 processes = _core_schema.processes.to_metadata(metadata)
 
 recurring_tasks = Table(
-    "firm_recurring_tasks",
+    "firm_queue_recurring_tasks",
     metadata,
     _pk(),
     Column("key", String(255), nullable=False),
@@ -218,21 +218,21 @@ recurring_tasks = Table(
     Column("description", Text),
     Column("created_at", _dt(), nullable=False, default=now_utc),
     Column("updated_at", _dt(), nullable=False, default=now_utc, onupdate=now_utc),
-    Index("index_firm_recurring_tasks_on_key", "key", unique=True),
-    Index("index_firm_recurring_tasks_on_static", "static"),
+    Index("index_firm_queue_recurring_tasks_on_key", "key", unique=True),
+    Index("index_firm_queue_recurring_tasks_on_static", "static"),
 )
 
 recurring_executions = Table(
-    "firm_recurring_executions",
+    "firm_queue_recurring_executions",
     metadata,
     _pk(),
     _job_fk(),
     Column("task_key", String(255), nullable=False),
     Column("run_at", _dt(), nullable=False),
     _created_at(),
-    Index("index_firm_recurring_executions_on_job_id", "job_id", unique=True),
+    Index("index_firm_queue_recurring_executions_on_job_id", "job_id", unique=True),
     Index(
-        "index_firm_recurring_executions_on_task_key_and_run_at",
+        "index_firm_queue_recurring_executions_on_task_key_and_run_at",
         "task_key",
         "run_at",
         unique=True,

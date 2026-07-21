@@ -138,7 +138,7 @@ queue-built HeartbeatPoller failure → `@on_thread_error` hook fires.
 ~:127–150: registers process row, fires hook, starts loops — no try/except).
 **Fix:** wrap loop construction/starts; on failure stop already-started loops, deregister the
 process row, then re-raise. **Test:** make one loop's `on_start` raise → no daemon threads left
-(compare `threading.enumerate()`), no `firm_processes` row.
+(compare `threading.enumerate()`), no `firm_queue_processes` row.
 
 ### 1.9 SIGTERM after SIGQUIT downgrades immediate shutdown — LOW
 **File:** `packages/firm-queue/src/firm/queue/supervisor.py` (`_on_terminate` sets
@@ -191,7 +191,7 @@ default suite runs SQLite; live tests only run when `FIRM_TEST_PG_URL`/`FIRM_TES
 are set, and there are no dedicated concurrency stress tests. Item 2.6 is the highest-leverage
 item in this phase; do it first and the rest become verifiable.*
 
-### 2.1 Joined `FOR UPDATE SKIP LOCKED` over-locks `firm_jobs` — MEDIUM
+### 2.1 Joined `FOR UPDATE SKIP LOCKED` over-locks `firm_queue_jobs` — MEDIUM
 **Files:** `packages/firm-queue/src/firm/queue/dispatcher.py` (dispatch join :54–59 and
 maintenance join :115–120), `packages/firm-queue/src/firm/queue/recovery.py` (:36–46),
 `packages/firm-core/src/firm/_core/dialects/` (the seam).
@@ -203,7 +203,7 @@ execution row to be **skipped** — worst on recovery, where it delays crash rec
 execution table at the three call sites (also check `semaphore.promote_one` — single-table, no
 `of=` needed). MySQL note: `OF` requires MySQL 8.0+ — same floor as SKIP LOCKED itself (2.4).
 **Tests:** extend `tests/queue/test_dialect_compile.py` — compiled PG/MySQL SQL contains
-`FOR UPDATE OF firm_scheduled_executions SKIP LOCKED` (PG spells table name, MySQL alias);
+`FOR UPDATE OF firm_queue_scheduled_executions SKIP LOCKED` (PG spells table name, MySQL alias);
 behavioral coverage arrives with 2.6.
 
 ### 2.2 `_IMMEDIATE_KEY` leaks across pooled SQLite connections — MEDIUM
@@ -323,7 +323,7 @@ deregister process rows). (b) wrap the import: `raise click.UsageError(f"--impor
 failed: {exc}")`.
 **Tests:** `--import nonexistent.module` → clean UsageError, exit code 2, no traceback. SIGTERM:
 spawn `firm-queue work` as a subprocess against a SQLite db, send SIGTERM, assert exit 0 and no
-leftover `firm_processes` row (POSIX-only test, mirror `test_fork.py` guards).
+leftover `firm_queue_processes` row (POSIX-only test, mirror `test_fork.py` guards).
 
 ### 3.5 UI read-only mode — MEDIUM (auth design Phase 3 leftover)
 **Files:** `packages/firm-ui/src/firm/ui/cli.py`, `server.py`, `render.py`, `context.py`.
@@ -334,7 +334,7 @@ computed data, so this is a conditional in the page templates).
 **Tests:** with read-only: POST `/cache/clear` → 403 and cache untouched; GET pages render
 without action buttons; `/settings/refresh` still works.
 
-### 3.6 `firm_recurring_executions` grows unbounded — LOW
+### 3.6 `firm_queue_recurring_executions` grows unbounded — LOW
 **Files:** `packages/firm-queue/src/firm/queue/scheduler.py`, `maintenance.py`.
 **Fix:** piggyback on the existing maintenance: delete recurring_executions rows older than N
 days (default 30, configurable on `SupervisorConfig`), preserving enough history for the
@@ -347,7 +347,7 @@ days (default 30, configurable on `SupervisorConfig`), preserving enough history
 **File:** `packages/firm-channel/src/firm/channel/schema.py`.
 **Problem:** the hot query (`channel_hash IN (...) AND id > :after ORDER BY id`, every 0.1s)
 has only single-column indexes.
-**Fix:** add `Index("index_firm_messages_on_channel_hash_and_id", "channel_hash", "id")` and
+**Fix:** add `Index("index_firm_channel_messages_on_channel_hash_and_id", "channel_hash", "id")` and
 drop the now-redundant single-column `channel_hash` index. Schema is pre-publication: the
 Alembic baseline creates from `schema.metadata`, so editing `schema.py` is the whole change —
 but call out in the commit message that existing dev databases need `drop_all`/recreate or a

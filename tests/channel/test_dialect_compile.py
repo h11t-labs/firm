@@ -13,7 +13,7 @@ from firm.channel import schema
 def test_messages_compiles_for_pg_and_mysql() -> None:
     for dialect in (postgresql.dialect(), mysql.dialect()):
         ddl = str(CreateTable(schema.messages).compile(dialect=dialect))
-        assert "firm_messages" in ddl
+        assert "firm_channel_messages" in ddl
 
 
 def test_mysql_uses_longblob_varbinary_and_datetime6() -> None:

@@ -1,4 +1,4 @@
-"""initial schema (firm_entries)
+"""initial schema (firm_cache_entries)
 
 Revision ID: 0001
 Revises:

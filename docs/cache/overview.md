@@ -12,7 +12,7 @@ for most read-through caches that's a fine deal.
 
 ## The model
 
-One table, `firm_entries`:
+One table, `firm_cache_entries`:
 
 | Column | Purpose |
 |---|---|
