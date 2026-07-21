@@ -15,7 +15,7 @@ from sqlalchemy import select, update
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
-from firm.audit import AuditLog, schema
+from firm.audit import AuditLog, integrity, schema
 from firm.audit.integrity import load_key
 from firm.audit.retention import RetentionLoop
 
@@ -147,6 +147,38 @@ def _age(engine, *, upto_id: int, seconds: float) -> None:
             update(_audits)
             .where(_audits.c.id <= upto_id)
             .values(created_at=now_utc() - timedelta(seconds=seconds))
+        )
+
+
+def _insert_manual_seal(engine, *, seq, from_id, to_id, pairs, row_count, prev_mac, kind="seal"):
+    """Insert a hand-built (still key-signed) seal — for simulating a late commit into a range."""
+    sealed_at = now_utc()
+    rmac = integrity.rows_mac(_KEY, pairs)
+    smac = integrity.seal_mac(
+        _KEY,
+        seq=seq,
+        kind=kind,
+        from_id=from_id,
+        to_id=to_id,
+        row_count=row_count,
+        rows_mac=rmac,
+        prev_mac=prev_mac,
+        sealed_at=sealed_at,
+    )
+    with transaction(engine) as conn:
+        conn.execute(
+            _seals.insert().values(
+                seq=seq,
+                kind=kind,
+                from_id=from_id,
+                to_id=to_id,
+                row_count=row_count,
+                rows_mac=rmac,
+                prev_mac=prev_mac,
+                seal_mac=smac,
+                sealed_at=sealed_at,
+                key_id=_KEY.id,
+            )
         )
 
 
@@ -336,6 +368,82 @@ def test_prune_refuses_a_tampered_sealed_range(db_url: str, at_time) -> None:
         report = audit.verify(full=True)
         assert report.outcome == "tampered"
         assert report.exit_code == 1
+    finally:
+        audit.close()
+
+
+def test_prune_allows_a_valid_mac_late_commit(db_url: str, at_time) -> None:
+    # A transaction that outran `grace` committed a genuine, validly-signed row into an already-
+    # sealed range — verify's amber late-commit WARNING, NOT tampering (design 1A). On a real-
+    # concurrency backend a writer racing the sealer's grace window makes this happen for real, so
+    # retention must PRUNE such a range (aligned with verify's classification), not refuse it
+    # forever. The late row is expired too, so deleting it with the range destroys no evidence.
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            audit.record("first")  # id 1
+            audit.record("late")  # id 2 — modelled as committing AFTER the range was sealed
+            audit.record("third")  # id 3
+        rows = _rows(audit.engine)
+        # A valid-MAC seal over (0, 3] that counted only rows 1 and 3 — row 2 "committed late".
+        pairs = [(rows[0].id, rows[0].row_mac), (rows[2].id, rows[2].row_mac)]
+        _insert_manual_seal(
+            audit.engine,
+            seq=1,
+            from_id=0,
+            to_id=rows[2].id,
+            pairs=pairs,
+            row_count=2,
+            prev_mac="genesis",
+        )
+
+        deleted = audit.retention.run_once()
+        assert deleted == 3  # the whole range pruned, the late row included
+        assert audit.retention.last_refused_tampered == 0  # a late commit is not tampering
+        assert _rows(audit.engine) == []  # no rows survive
+        # The checkpoint advanced past the late-commit range (it did not stop at it).
+        checkpoint = next(s for s in _seals_by_seq(audit.engine) if s.kind == "checkpoint")
+        assert checkpoint.to_id == rows[2].id
+        # And verify is clean across the checkpoint — the late commit was pruned, never laundered.
+        report = audit.verify(full=True)
+        assert report.outcome == "ok"
+        assert report.exit_code == 0
+    finally:
+        audit.close()
+
+
+def test_prune_refuses_an_invalid_extra_row(db_url: str) -> None:
+    # Contrast with the late-commit case: an extra row that is NOT validly signed — a NULL-MAC
+    # forged insert reusing a rollback-gap id inside a sealed range — makes the range diverge
+    # without every present row being valid. That is TAMPERED, so retention must REFUSE it, never
+    # treat it as a benign latecomer (the distinction that keeps a forged insert from being pruned).
+    seen: list[BaseException] = []
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, on_error=seen.append
+    )
+    try:
+        # Four expired rows with a rollback gap at id 3, sealed as a clean range (0, 5], boundary 5.
+        with transaction(audit.engine) as conn:
+            for rid, act in [(1, "L1"), (2, "L2"), (4, "L4"), (5, "L5")]:
+                conn.execute(
+                    _audits.insert().values(
+                        id=rid, action=act, created_at=now_utc() - timedelta(seconds=7200)
+                    )
+                )
+        assert audit.sealer.run_once() == 4  # seq 1 covers (0, 5], row_count 4
+        # A forged NULL-MAC row slips into the gap (id 3) — an extra, invalid row in the range.
+        with transaction(audit.engine) as conn:
+            conn.execute(
+                _audits.insert().values(
+                    id=3, action="FORGED", created_at=now_utc() - timedelta(seconds=7200)
+                )
+            )
+
+        deleted = audit.retention.run_once()
+        assert deleted == 0  # refused — nothing pruned
+        assert audit.retention.last_refused_tampered == 1
+        assert seen and "REFUSED" in str(seen[0])
+        assert len(_rows(audit.engine)) == 5  # evidence preserved, not laundered by deletion
     finally:
         audit.close()
 

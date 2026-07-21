@@ -427,12 +427,24 @@ def test_seal_loop_runs_a_pass(db_url: str) -> None:
     try:
         audit.record("a")
         audit.record("b")
-        for _ in range(100):
-            if _seal_rows(audit.engine):
+        # With grace=0 each row is sealable the instant it commits, so the loop may seal "a" alone
+        # on one tick and "b" on the next — two seals of one row each — or catch both in a single
+        # pass. On a real-concurrency backend (or a loaded CI runner) the loop genuinely races the
+        # two sequential records, so asserting "one seal of two rows" is non-deterministic. Assert
+        # instead the invariant that always holds once the loop has drained the backlog: the chain
+        # covers both rows exactly once, up to the newest id. (The 2-rows-in-1-seal batching is
+        # covered deterministically by ``test_normal_seal_covers_all_rows_from_genesis``.)
+        for _ in range(250):
+            seals = _seal_rows(audit.engine)
+            if seals and sum(s.row_count for s in seals) == 2:
                 break
             time.sleep(0.02)
         seals = _seal_rows(audit.engine)
-        assert len(seals) == 1
-        assert seals[0].row_count == 2
+        assert sum(s.row_count for s in seals) == 2  # the loop sealed both rows (in 1 pass or 2)
+        assert seals[-1].to_id == _max_id(audit.engine)  # the chain reached the newest row
+        for prev, cur in pairwise(seals):  # dense, contiguous, chained regardless of pass count
+            assert cur.seq == prev.seq + 1
+            assert cur.from_id == prev.to_id
+            assert cur.prev_mac == prev.seal_mac
     finally:
         audit.close()

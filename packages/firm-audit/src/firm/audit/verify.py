@@ -124,44 +124,123 @@ def recompute_row_mac(key: Key, row: Any) -> str:
     )
 
 
-def range_is_intact(
-    conn: Connection, seal: Any, keyring: dict[str, Key], seal_keyring: dict[str, Key]
-) -> bool:
-    """Re-verify a sealed range end-to-end — the contract behind "retention only prunes what
-    verifies" (design "Retention integration").
+def _row_verdict(row: Any, boundary: int | None, keyring: dict[str, Key]) -> str:
+    """The Layer-1 verdict for one row — the single source of truth for "is this MAC valid".
+
+    ``"ok"`` is a genuine, validly-signed row; ``"unprotected"`` is a legacy NULL-MAC row at or
+    below the activation ``boundary`` (written before the key existed — not an alarm);
+    ``"tampered"`` is a modified row, or a NULL-MAC row past the boundary. An unknown ``key_id``
+    raises :class:`VerifyError` — verify itself cannot check, distinct from a tampering *finding*.
+    Pure and module-level so the verifier's per-row check, its per-range classifier, and (through
+    :func:`classify_range`) retention's pre-prune gate all decide row validity identically — a
+    divergence would masquerade as tampering."""
+    if row.row_mac is None:
+        if boundary is None or row.id <= boundary:
+            return "unprotected"  # legacy row from before the key existed — not an alarm
+        return "tampered"
+    key = keyring.get(row.key_id)
+    if key is None:
+        raise VerifyError(
+            f"row {row.id} was signed by unknown key_id {row.key_id!r} — add its secret to "
+            "FIRM_AUDIT_KEYS."
+        )
+    if not hmac.compare_digest(recompute_row_mac(key, row), row.row_mac):
+        return "tampered"
+    return "ok"
+
+
+def classify_range(
+    conn: Connection,
+    seal: Any,
+    boundary: int | None,
+    keyring: dict[str, Key],
+    seal_keyring: dict[str, Key],
+) -> tuple[str, list[tuple[Any, str]]]:
+    """Classify a sealed range against its seal — the one classifier verify and retention share.
+
+    Recomputes every row's ``row_mac`` from its content (Layer 1) *and* the range's
+    ``rows_mac``/``row_count`` (Layer 2), then returns ``(verdict, per_row)`` where ``verdict`` is:
+
+    * ``"ok"`` — the recomputed ``rows_mac`` and ``row_count`` still match the seal exactly;
+    * ``"late_commit"`` — the *only* divergence is extra rows that **all** carry valid row MACs
+      (design 1A): a transaction that outran the grace window committed into an already-sealed
+      range. A valid MAC in a sealed range is a latecomer, never an attack — verify reports it as an
+      amber WARNING and retention treats it as prunable (the extras have all expired since the range
+      is past ``max_age``, so deleting them destroys no evidence). Downgrading this to WARNING is
+      deliberate: "false alarms train people to ignore real ones";
+    * ``"tampered"`` — anything else: a deletion, a count-preserving swap, an invalid/missing MAC
+      after the boundary, or an extra row that is *not* a valid-MAC late commit (e.g. a NULL-MAC
+      forged insert — ``_row_verdict`` calls it "unprotected" per-row, but once it makes the range's
+      count/``rows_mac`` diverge it is a forged insert, not a benign latecomer).
+
+    ``per_row`` is ``[(row, row_verdict), …]`` so the verifier can emit granular per-row findings
+    without re-reading. The per-row recompute is load-bearing: an attacker who edits a sealed row's
+    content but leaves its ``row_mac`` column untouched leaves ``rows_mac`` (which hashes the stored
+    MAC strings, not the content) matching — only recomputing each MAC from the content catches it.
 
     ``keyring`` resolves each row's ``row_mac`` (row key); ``seal_keyring`` resolves the seal's
-    ``rows_mac`` (seal key). They differ only in a two-key deployment, where the row key is not a
-    seal signer — so a range whose seal was re-signed with a compromised row key is unverifiable
-    here (its seal ``key_id`` is not in ``seal_keyring``) and therefore never prunable.
-
-    Returns ``True`` only when *every* signed row in ``(seal.from_id, seal.to_id]`` still recomputes
-    its ``row_mac`` **and** the range's ``rows_mac``/``row_count`` still match the seal. The per-row
-    recompute is load-bearing: an attacker who edits a sealed row's content but leaves its
-    ``row_mac`` column untouched leaves ``rows_mac`` (which hashes the stored MAC strings, not the
-    content) matching — only recomputing each MAC from the content catches it. The rows_mac/count
-    check additionally catches deletions and insertions. A NULL-MAC legacy row is folded in with the
-    ``nomac`` marker exactly as the sealer did, so an untampered legacy range still verifies; an
-    unknown ``key_id`` (row or seal) makes the range unverifiable, hence not prunable.
-
-    Any mismatch returns ``False`` so retention refuses to prune (and never checkpoints past) the
-    range — pruning it would erase the evidence instead of surfacing it."""
-    key = seal_keyring.get(seal.key_id)
-    if key is None:
-        return False
+    ``rows_mac`` (seal key). A seal whose ``key_id`` is not a seal key (a two-key deployment's row
+    key, or an unknown key) is unverifiable — :class:`VerifyError`, never a laundered pass."""
+    seal_key = seal_keyring.get(seal.key_id)
+    if seal_key is None:
+        raise VerifyError(
+            f"seal seq {seal.seq} was signed by key_id {seal.key_id!r}, which is not available as "
+            "a seal key — the range cannot be verified (unknown key, or a two-key row key)."
+        )
+    per_row: list[tuple[Any, str]] = []
     pairs: list[tuple[int, str | None]] = []
+    all_ok = True
     for row in _iter_rows(conn, seal.from_id, seal.to_id):
+        verdict = _row_verdict(row, boundary, keyring)
+        per_row.append((row, verdict))
         pairs.append((row.id, row.row_mac))
-        if row.row_mac is not None:
-            row_key = keyring.get(row.key_id)
-            if row_key is None or not hmac.compare_digest(
-                recompute_row_mac(row_key, row), row.row_mac
-            ):
-                return False
-    return (
-        hmac.compare_digest(integrity.rows_mac(key, pairs), seal.rows_mac)
-        and len(pairs) == seal.row_count
-    )
+        if verdict != "ok":
+            all_ok = False
+    if hmac.compare_digest(integrity.rows_mac(seal_key, pairs), seal.rows_mac) and (
+        len(pairs) == seal.row_count
+    ):
+        return "ok", per_row
+    if all_ok and len(pairs) > seal.row_count:
+        return "late_commit", per_row
+    return "tampered", per_row
+
+
+def range_is_prunable(
+    conn: Connection,
+    seal: Any,
+    boundary: int | None,
+    keyring: dict[str, Key],
+    seal_keyring: dict[str, Key],
+) -> bool:
+    """Retention's pre-prune gate — the contract behind "retention only prunes what verifies", now
+    aligned with verify's classification so the two cannot drift (design "Retention integration").
+
+    Returns ``True`` when the range is safe to prune: it either verifies OK, or its only divergence
+    is valid-MAC late commits (:func:`classify_range` ``"late_commit"`` — the extras are all expired
+    and pruning them, together with checkpointing over the range, destroys no evidence). Returns
+    ``False`` only for a ``"tampered"`` range — a deletion, a count-preserving swap, an
+    invalid/missing MAC, or a non-late-commit extra — and for an unverifiable seal (unknown/row-only
+    ``key_id`` → :class:`VerifyError`, caught here). Refusing a tampered range is what keeps
+    retention from erasing evidence instead of surfacing it: pruning stops there, the checkpoint
+    never advances past it, and every later run refuses it again until an operator investigates.
+
+    Refusing *only* what verify would call TAMPERED is the fix for the false refusal a benign late
+    commit used to trigger — on real-concurrency backends a writer that outruns ``grace`` genuinely
+    lands a valid row in a just-sealed range, and that must not block retention forever.
+
+    "TAMPERED" is judged exactly as verify judges the range's contribution to its outcome: the
+    range-level verdict *or* any per-row verdict being ``"tampered"``. The per-row arm is
+    load-bearing — an attacker who edits a sealed row's *content* but leaves its ``row_mac`` column
+    untouched keeps the seal's ``rows_mac`` (which hashes the stored MAC strings) matching, so the
+    range-level verdict is ``"ok"``; only the per-row recompute from content catches the edit, and
+    retention must refuse on it just as verify reports it TAMPERED."""
+    try:
+        verdict, per_row = classify_range(conn, seal, boundary, keyring, seal_keyring)
+    except VerifyError:
+        return False  # unverifiable (unknown or row-only seal key) — never prunable
+    if verdict == "tampered":
+        return False
+    return not any(row_verdict == "tampered" for _, row_verdict in per_row)
 
 
 class VerifyError(Exception):
@@ -670,37 +749,27 @@ class Verifier:
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
-        """Recompute one sealed range: every row's MAC (Layer 1) and the range's ``rows_mac``/count.
+        """Recompute one sealed range and fold its verdict into the report.
 
-        A ``rows_mac``/count mismatch where *every present row is validly signed and there are
-        extra rows* is a late commit (WARNING — the extras landed after the range was sealed,
-        design 1A). Any other mismatch is TAMPERED: a deletion, a count-preserving swap, or an
-        extra row that is *not* a valid-MAC late commit — including a NULL-MAC row slipped into a
-        sealed range (which :meth:`_check_row` calls "unprotected" per-row, since it sits at or
-        below the activation boundary, but which is a forged insert once it makes the range's count
-        or ``rows_mac`` diverge). Requiring every present row to be validly signed keeps that a
-        TAMPERED verdict rather than an amber late-commit WARNING (design 1A: an extra row with a
-        *valid* MAC is a WARNING; anything else is tampering).
+        Delegates the classification to :func:`classify_range` — the *same* classifier retention's
+        pre-prune gate uses, so a range can never be a WARNING to verify and a refusal to retention
+        (or vice versa). ``"ok"`` adds nothing; ``"late_commit"`` (every present row validly signed
+        plus surplus rows — a valid MAC in a sealed range is a latecomer, design 1A) is an amber
+        WARNING; anything else is TAMPERED. The per-row verdicts drive granular findings so the
+        dashboard/CLI can name the exact offending row.
         """
-        pairs: list[tuple[int, str | None]] = []
-        all_signed = True
-        for row in _iter_rows(conn, seal.from_id, seal.to_id):
-            pairs.append((row.id, row.row_mac))
-            if self._check_row(row, boundary, keyring, counters, findings) != "ok":
-                all_signed = False
-
-        # ``rows_mac`` is signed by the seal key (design "two-key split"), so it resolves through
-        # the seal keyring — known already, the chain walk validated this seal's key_id there.
-        key = seal_keyring[seal.key_id]
-        recomputed = integrity.rows_mac(key, pairs)
-        if recomputed == seal.rows_mac and len(pairs) == seal.row_count:
+        verdict, per_row = classify_range(conn, seal, boundary, keyring, seal_keyring)
+        for row, row_verdict in per_row:
+            self._record_row_verdict(row, row_verdict, counters, findings)
+        if verdict == "ok":
             return
-        if all_signed and len(pairs) > seal.row_count:
+        present = len(per_row)
+        if verdict == "late_commit":
             findings.append(
                 Finding(
                     "warning",
-                    f"seal seq {seal.seq} covers {len(pairs)} rows but sealed "
-                    f"{seal.row_count} — {len(pairs) - seal.row_count} valid-MAC late "
+                    f"seal seq {seal.seq} covers {present} rows but sealed "
+                    f"{seal.row_count} — {present - seal.row_count} valid-MAC late "
                     "commit(s). Widen grace or record long jobs via the own-transaction path.",
                     f"seal {seal.seq}",
                 )
@@ -739,7 +808,7 @@ class Verifier:
             count += 1
             if oldest is None or row.created_at < oldest:
                 oldest = row.created_at
-            self._check_row(row, boundary, keyring, counters, findings)
+            self._record_row_verdict(row, _row_verdict(row, boundary, keyring), counters, findings)
         return count, oldest
 
     def _check_tail_liveness(
@@ -767,26 +836,25 @@ class Verifier:
             )
             counters.warning += 1
 
-    def _check_row(
+    def _record_row_verdict(
         self,
         row: Any,
-        boundary: int | None,
-        keyring: dict[str, Key],
+        verdict: str,
         counters: _Counters,
         findings: list[Finding],
-    ) -> str:
-        """Verify one row's Layer-1 MAC and return its per-row verdict.
+    ) -> None:
+        """Fold a per-row verdict from :func:`_row_verdict` into the counters and findings.
 
-        ``"ok"`` is a genuine, validly-signed row; ``"unprotected"`` is a legacy NULL-MAC row at or
-        below the activation boundary (written before the key existed — not an alarm);
-        ``"tampered"`` is a modified row, or a NULL-MAC row past the boundary. The caller folds this
-        into a range's late-commit-vs-tamper decision: only a range whose every present row is
-        ``"ok"`` may carry surplus rows as valid-MAC late commits. Increments the matching counter
-        and appends a finding for a violation."""
-        if row.row_mac is None:
-            if boundary is None or row.id <= boundary:
-                counters.unprotected += 1
-                return "unprotected"  # legacy row from before the key existed — not an alarm
+        The verdict itself is decided by the shared :func:`_row_verdict` (so the tail check, the
+        per-range classifier, and retention's gate all agree on row validity); this only turns it
+        into the report's counters and, for a ``"tampered"`` row, a human finding naming the exact
+        row and how it failed (a missing MAC after the boundary vs a MAC that no longer recomputes).
+        """
+        if verdict == "ok":
+            counters.ok += 1
+        elif verdict == "unprotected":
+            counters.unprotected += 1  # legacy row from before the key existed — not an alarm
+        elif row.row_mac is None:
             findings.append(
                 Finding(
                     "tampered",
@@ -796,16 +864,7 @@ class Verifier:
                 )
             )
             counters.tampered += 1
-            return "tampered"
-
-        key = keyring.get(row.key_id)
-        if key is None:
-            raise VerifyError(
-                f"row {row.id} was signed by unknown key_id {row.key_id!r} — add its secret to "
-                "FIRM_AUDIT_KEYS."
-            )
-        expected = recompute_row_mac(key, row)
-        if not hmac.compare_digest(expected, row.row_mac):
+        else:
             findings.append(
                 Finding(
                     "tampered",
@@ -814,9 +873,6 @@ class Verifier:
                 )
             )
             counters.tampered += 1
-            return "tampered"
-        counters.ok += 1
-        return "ok"
 
     # -- Layer 3: anchor -----------------------------------------------------------------------
 

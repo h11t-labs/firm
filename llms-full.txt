@@ -3535,17 +3535,28 @@ together with **checkpoint seals** (see [Retention & querying](retention-and-que
 
 1. `Retention.run_once` aligns its cutoff to a seal boundary — it deletes only rows in ranges
    **fully covered by seals older than the cutoff**, never partial ranges and never unsealed rows.
-2. **Retention only prunes what verifies.** Before deleting a fully-expired sealed range, it
-   re-verifies the range — recomputing every row's `row_mac` from its content *and* the range's
-   `rows_mac`/`row_count` against the seal, the same check the verifier runs. A range that no
-   longer verifies is **refused**: pruning stops there, the checkpoint never advances past it, the
-   count lands on `Retention.last_refused_tampered`, and the refusal routes through `on_error`. This
-   closes a laundering hole — an attacker who edits an old sealed row with a plain `UPDATE` (no key
-   needed) and waits for it to age past `max_age` cannot get a naive prune to delete the evidence
-   and checkpoint over it. The refusal stops at the first bad range and repeats every run until an
-   operator investigates (`firm-audit verify --full`), so the evidence is preserved, never erased.
-   Trade-off: pre-prune verification **re-reads (keyset-paginated) every row it is about to
-   delete** — a bounded read cost paid once per prune.
+2. **Retention refuses to prune what verify would call `TAMPERED`.** Before deleting a
+   fully-expired sealed range, it classifies the range with the **same classifier the verifier
+   runs** — recomputing every row's `row_mac` from its content *and* the range's
+   `rows_mac`/`row_count` against the seal (one classifier, two callers, so retention and verify can
+   never disagree). A `TAMPERED` range — a deletion, a count-preserving swap, an invalid/missing
+   MAC, an unverifiable seal — is **refused**: pruning stops there, the checkpoint never advances
+   past it, the count lands on `Retention.last_refused_tampered`, and the refusal routes through
+   `on_error`. This closes a laundering hole — an attacker who edits an old sealed row with a plain
+   `UPDATE` (no key needed) and waits for it to age past `max_age` cannot get a naive prune to
+   delete the evidence and checkpoint over it. The refusal stops at the first bad range and repeats
+   every run until an operator investigates (`firm-audit verify --full`), so the evidence is
+   preserved, never erased.
+
+   A range whose only divergence is a **valid-MAC late commit** (a `WARNING`, not `TAMPERED` — see
+   [Sizing the grace window](#sizing-the-grace-window)) is **not** refused. A transaction that
+   outran `grace` and landed a genuine, validly-signed row in an already-sealed range is a latecomer,
+   not an attack — and on real-concurrency backends (Postgres, MySQL) a writer racing the sealer's
+   grace window makes this happen for real. Refusing it would block pruning forever over a benign
+   event; instead the range is pruned (the late row is expired too, so deleting it with the range
+   destroys no evidence). Only an *invalid or missing* MAC in a sealed range stops the prune. Trade-off:
+   pre-prune classification **re-reads (keyset-paginated) every row it is about to delete** — a
+   bounded read cost paid once per prune.
 3. After deleting, it writes a `kind="checkpoint"` seal recording `pruned_through_id` and carries
    the chain forward as usual.
 4. Verify skips row-recomputation at or below the newest checkpoint but still validates the seal

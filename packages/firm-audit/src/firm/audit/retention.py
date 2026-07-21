@@ -14,18 +14,30 @@ across it, and a NULL-MAC/missing row *above* the checkpoint is still a violatio
 seals below the checkpoint are pruned too — the checkpoint's key-signed ``seal_mac`` is what
 authorizes their absence.
 
-**Retention only prunes what verifies.** Before deleting a fully-expired sealed range,
-:meth:`run_once` re-verifies it (:func:`~firm.audit.verify.range_is_intact`: recompute every row's
-``row_mac`` from its content *and* the range's ``rows_mac``/``row_count`` against the seal) — the
-same recompute the verifier runs. A range that no longer verifies is **refused**: pruning stops at
-it, the checkpoint never advances past it, its count lands on
-:attr:`Retention.last_refused_tampered`, and the refusal is routed through ``on_error``. This closes
-the laundering hole where an attacker edits an old sealed row (a plain ``UPDATE``, no key needed)
-and waits for it to age past ``max_age`` so a naive prune would delete the evidence and checkpoint
-over it, after which verify reports OK. Because the boundary stops at the first refused range, the
-tampered rows stay in place and every later run refuses again until an operator intervenes. The
-trade-off is a read cost: pre-prune verification re-reads (keyset-paginated) every row it is about
-to delete. Ranges at or below the checkpoint floor are already pruned and out of scope.
+**Retention refuses to prune what verify would call TAMPERED.** Before deleting a fully-expired
+sealed range, :meth:`run_once` classifies it with :func:`~firm.audit.verify.range_is_prunable`,
+which runs the *same* classifier the verifier runs (:func:`~firm.audit.verify.classify_range`:
+recompute every row's ``row_mac`` from its content *and* the range's ``rows_mac``/``row_count``
+against the seal). One classifier, two callers — so a range can never be a WARNING to verify and a
+refusal to retention. A **TAMPERED** range (a deletion, a count-preserving swap, an invalid/missing
+MAC, or an unverifiable seal) is **refused**: pruning stops at it, the checkpoint never advances
+past it, its count lands on :attr:`Retention.last_refused_tampered`, and the refusal is routed
+through ``on_error``. This closes the laundering hole where an attacker edits an old sealed row (a
+plain ``UPDATE``, no key needed) and waits for it to age past ``max_age`` so a naive prune would
+delete the evidence and checkpoint over it, after which verify reports OK. Because the boundary
+stops at the first refused range, the tampered rows stay in place and every later run refuses again
+until an operator intervenes.
+
+A range whose *only* divergence from its seal is extra rows that **all carry valid row MACs** is a
+**late commit**, not tampering (verify's amber WARNING, design 1A): a transaction that outran the
+``grace`` window committed a genuine row into an already-sealed range. On real-concurrency backends
+that actually happens — a writer racing the sealer's grace window — so retention must **not** refuse
+it: a valid MAC in a sealed range is a latecomer, and refusing it would block pruning forever over a
+benign event ("false alarms train people to ignore real ones"). Such a range is prunable, and the
+late row is expired too (the whole range is past ``max_age``), so deleting it together with the
+range and checkpointing over it destroys no evidence. The trade-off is a read cost: pre-prune
+classification re-reads (keyset-paginated) every row it is about to delete. Ranges at or below the
+checkpoint floor are already pruned and out of scope.
 
 The checkpoint is exported to the anchor like any other seal, so a later ``verify --anchor`` never
 mistakes the pruned-away anchored seal for a tail truncation.
@@ -58,7 +70,7 @@ from .._core.clock import now_utc
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
-from .verify import range_is_intact
+from .verify import range_is_prunable
 
 if TYPE_CHECKING:
     from .log import AuditLog
@@ -137,14 +149,15 @@ class Retention:
                 return total
 
     def _run_aligned(self, cutoff) -> int:
-        """Prune only fully-sealed, fully-expired, *still-verifying* ranges, then checkpoint ahead.
+        """Prune only fully-sealed, fully-expired, *non-tampered* ranges, then checkpoint ahead.
 
-        Finds the highest sealed boundary all of whose ranges predate ``cutoff`` **and still
-        verify against their seal**, deletes through it, writes a checkpoint recording it, and
-        prunes the now-subsumed covering seals below it. A range that no longer verifies is refused
-        (design "Retention integration"): pruning stops there so a tampered-then-expired row is
-        surfaced, never laundered by deletion. Records the expired-but-unsealed rows left behind,
-        and exports the checkpoint to the anchor so a pruned seal is not later read as truncation.
+        Finds the highest sealed boundary all of whose ranges predate ``cutoff`` **and are prunable
+        against their seal** (verify OK, or benign valid-MAC late commits — never TAMPERED), deletes
+        through it, writes a checkpoint recording it, and prunes the now-subsumed covering seals
+        below it. A TAMPERED range is refused (design "Retention integration"): pruning stops there
+        so a tampered-then-expired row is surfaced, never laundered by deletion. Records the
+        expired-but-unsealed rows left behind, and exports the checkpoint to the anchor so a pruned
+        seal is not later read as truncation.
         """
         engine = self.audit.engine
         with engine.connect() as conn:
@@ -164,7 +177,7 @@ class Retention:
 
         floor = max((s.to_id for s in seals if s.kind == "checkpoint"), default=0)
         max_sealed = max((s.to_id for s in seals), default=0)
-        pruned_through = self._highest_prunable_boundary(seals, floor, cutoff)
+        pruned_through = self._highest_prunable_boundary(seals, floor, max_sealed, cutoff)
 
         self.last_skipped_unsealed = self._count_expired_unsealed(max_sealed, cutoff)
         self._alert_if_over_threshold()
@@ -183,19 +196,28 @@ class Retention:
         self.audit.sealer._emit_anchor(seq=seq, seal_mac=seal_mac, sealed_at=sealed_at)
         return deleted
 
-    def _highest_prunable_boundary(self, seals, floor: int, cutoff) -> int:
+    def _highest_prunable_boundary(self, seals, floor: int, boundary: int, cutoff) -> int:
         """The highest covering-seal ``to_id`` such that every range from the floor up to it is both
-        fully older than ``cutoff`` *and* still verifies against its seal.
+        fully older than ``cutoff`` *and* prunable (not tampered) against its seal.
 
         Iterates ranges in id order and stops at the first that either still holds a row newer than
-        ``cutoff`` (young — so a young range never lets an older one past it) or fails
-        re-verification (tampered — a sealed row was edited/deleted/inserted). Re-verification is
-        :func:`~firm.audit.verify.range_is_intact`, the same recompute the verifier runs, so
-        "retention only prunes what verifies." A refused range is counted on
-        :attr:`last_refused_tampered` and routed through ``on_error``; because the boundary stops at
-        it, the checkpoint never advances past it, so the evidence is preserved and every later run
-        refuses it again (it is never laundered by deletion). Ranges at or below ``floor`` are
-        already pruned and out of scope."""
+        ``cutoff`` (young — so a young range never lets an older one past it) or is refused. The
+        prunability test is :func:`~firm.audit.verify.range_is_prunable`, which classifies the range
+        with the *same* classifier the verifier runs (:func:`~firm.audit.verify.classify_range`): a
+        range that verifies OK, or whose only divergence is valid-MAC late commits, is prunable;
+        only a TAMPERED range (a deletion, a count-preserving swap, an invalid/missing MAC, or an
+        unverifiable seal) is refused. Aligning the gate with verify's classification is deliberate:
+        a benign late commit (a writer that outran ``grace`` and landed a valid row in a just-sealed
+        range, which genuinely happens on real-concurrency backends) is a WARNING to verify and must
+        not block retention forever; the late row is expired too (the range is past ``cutoff``), so
+        deleting it with the range destroys no evidence.
+
+        A refused range is counted on :attr:`last_refused_tampered` and routed through ``on_error``;
+        because the boundary stops at it, the checkpoint never advances past it, so the evidence is
+        preserved and every later run refuses it again (it is never laundered by deletion). Ranges
+        at or below ``floor`` are already pruned and out of scope. ``boundary`` is the activation
+        boundary (highest sealed id) the classifier uses to tell a legacy NULL-MAC row from a forged
+        one, matching :meth:`~firm.audit.verify.Verifier._floor_and_boundary`."""
         covering = [s for s in seals if s.kind == "seal" and s.to_id > floor]
         keyring = self.audit.verifier.keyring
         seal_keyring = self.audit.verifier.seal_keyring
@@ -209,7 +231,7 @@ class Retention:
                 ).scalar()
                 if newest is not None and newest >= cutoff:
                     break  # a young range: nothing at or beyond it is prunable yet
-                if not range_is_intact(conn, seal, keyring, seal_keyring):
+                if not range_is_prunable(conn, seal, boundary, keyring, seal_keyring):
                     self._refuse_tampered(seal)
                     break  # refuse to prune tampered evidence; stop so the checkpoint can't skip it
                 pruned_through = seal.to_id
