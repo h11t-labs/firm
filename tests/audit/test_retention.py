@@ -11,7 +11,7 @@ from __future__ import annotations
 import time
 from datetime import timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
@@ -290,6 +290,81 @@ def test_anchor_naming_a_pruned_below_floor_seal_is_not_a_truncation(
         report = audit.verify(anchor_path=str(anchor), full=True)
         assert report.outcome == "ok"
         assert report.exit_code == 0
+    finally:
+        audit.close()
+
+
+def test_truncating_an_anchored_seal_above_a_checkpoint_is_tampered(
+    db_url: str, tmp_path, at_time
+) -> None:
+    # Adversarial finding (HIGH): once a checkpoint exists, the anchor's legitimacy test compared
+    # the anchored seal *seq* to the checkpoint *floor* — but the floor is a row *id*, not a seq.
+    # With 20 pruned rows the floor is 20 while the anchored head seal is seq 5, so ``seq <= floor``
+    # was true and a genuine tail truncation of seq 5 was laundered to OK. The fix judges legitimacy
+    # in seq-space (``seq <= head_seq`` with a checkpoint present), so the truncation is TAMPERED.
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0, anchor_path=str(anchor)
+    )
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            for i in range(20):
+                audit.record(f"old{i}")
+        audit.sealer.run_once()  # seq 1 covers ids (0, 20] — all expired
+        for i in range(3):
+            audit.record(f"mid{i}")
+        audit.sealer.run_once()  # seq 2 (20, 23] — recent, survives the prune
+        for i in range(3):
+            audit.record(f"mid2{i}")
+        audit.sealer.run_once()  # seq 3 (23, 26]
+        audit.retention.run_once()  # checkpoint seq 4 prunes seq 1 → floor = 20 (a row id)
+        for i in range(3):
+            audit.record(f"new{i}")
+        audit.sealer.run_once()  # seq 5 (26, 29], exported to the anchor; seq 5 <= floor 20
+        head_seq = max(s.seq for s in _seals_by_seq(audit.engine))
+        assert audit.verify(anchor_path=str(anchor), full=True).outcome == "ok"  # baseline
+
+        # Attacker truncates the anchored head seal (its rows stay). The surviving chain is dense
+        # (…, checkpoint seq 4, no seq 5), but the anchor still names the vanished seq 5.
+        with transaction(audit.engine) as conn:
+            conn.execute(delete(_seals).where(_seals.c.seq == head_seq))
+        report = audit.verify(anchor_path=str(anchor), full=True)
+        assert report.outcome == "tampered"
+        assert report.exit_code == 1
+        assert any("tail truncation" in f.message for f in report.findings)
+    finally:
+        audit.close()
+
+
+def test_forged_row_below_the_checkpoint_floor_is_tampered(db_url: str, at_time) -> None:
+    # Adversarial finding (HIGH): verify skips everything at/below the checkpoint floor because
+    # retention deleted it, but never checked that the pruned region is actually empty. An attacker
+    # inserts a fabricated row at an id <= floor — a range the checkpoint asserts holds zero rows —
+    # and it was invisible even to ``--full`` while ``history()`` returned it. The bounded
+    # pruned-region-empty probe now flags it, on every run (not just ``--full``).
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            for i in range(5):
+                audit.record(f"old{i}")
+        audit.sealer.run_once()  # seq 1 (0, 5] — expired
+        for i in range(3):
+            audit.record(f"new{i}")
+        audit.sealer.run_once()  # seq 2 (5, 8]
+        audit.retention.run_once()  # checkpoint prunes (0, 5] → floor = 5, rows 1..5 deleted
+        assert audit.verify(full=True).outcome == "ok"  # baseline: pruned region legitimately empty
+
+        # Forge a row at id 3, inside the pruned (0, 5] region.
+        with transaction(audit.engine) as conn:
+            conn.execute(_audits.insert().values(id=3, action="forged", created_at=now_utc()))
+        assert any(r["action"] == "forged" for r in audit.history())  # history() returns it
+
+        # Detected without --full (cheap, always-on) and with --full.
+        rolling = audit.verify(full=False)
+        assert rolling.outcome == "tampered"
+        assert rolling.exit_code == 1
+        assert any("pruned range" in f.message for f in rolling.findings)
+        assert audit.verify(full=True).outcome == "tampered"
     finally:
         audit.close()
 

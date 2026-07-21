@@ -170,6 +170,49 @@ def test_short_key_is_a_hard_error_at_construction(db_url: str) -> None:
     assert len("too-short") < KEY_MIN_LENGTH
 
 
+# -- write-time length guard (MySQL silent-truncation, signed path only) ------------------------
+
+
+def test_over_length_signed_values_raise_at_record_time(db_url: str) -> None:
+    # Adversarial finding (MEDIUM): a value longer than its column (VARCHAR(255) scalars, 64KB TEXT
+    # JSON) is silently truncated under a non-strict MySQL, leaving the stored bytes different from
+    # the signed bytes so the untouched row verifies TAMPERED. Under a key that must fail LOUD at
+    # record() time, before the insert — not be discovered later as a false alarm.
+    log = AuditLog(database_url=db_url, mac_key=_SECRET)
+    try:
+        with pytest.raises(ValueError, match=r"action.*at most 255"):
+            log.record("a" * 256)
+        with pytest.raises(ValueError, match=r"subject_label.*at most 255"):
+            log.record("ok", subject=Ref("T", "id", "n" * 256))
+        with pytest.raises(ValueError, match=r"correlation_id.*at most 255"):
+            log.record("ok", correlation_id="c" * 256)
+        with pytest.raises(ValueError, match=r"data JSON.*65535"):
+            log.record("ok", data={"big": "z" * 70_000})
+        with pytest.raises(ValueError, match=r"context JSON.*65535"):
+            log.record("ok", context={"big": "z" * 70_000})
+        # A boundary-length value (exactly 255) and a normal row still insert fine.
+        log.record("a" * 255, subject=("T", 1), data={"k": "v"})
+        assert len(_raw_rows(log.engine)) == 1
+    finally:
+        log.close()
+
+
+def test_no_key_leaves_over_length_values_lenient(db_url: str, is_sqlite: bool) -> None:
+    # The guard is scoped to the signed path: without a key, firm-audit adds no validation of its
+    # own — the database handles length exactly as before tamper-evidence existed. On a lenient
+    # store (SQLite here; a non-strict MySQL truncates) an over-length row inserts unsigned; a
+    # strict dialect (Postgres) rejects it at the DB, which is also unchanged pre-existing behavior.
+    if not is_sqlite:
+        pytest.skip("leniency is a non-strict-store property; strict dialects reject at the DB")
+    log = AuditLog(database_url=db_url)  # no key
+    try:
+        log.record("a" * 300, subject=("T", "x" * 300), data={"big": "z" * 100_000})
+        (row,) = _raw_rows(log.engine)
+        assert row.row_mac is None  # unsigned — nothing to break
+    finally:
+        log.close()
+
+
 # -- no-key regression invariant ----------------------------------------------------------------
 
 

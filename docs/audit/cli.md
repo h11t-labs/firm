@@ -69,7 +69,9 @@ firm-audit seal --database-url sqlite:///audit.db
 ### `verify` — check the audit trail for tampering
 
 Recomputes row MACs, walks the seal chain, and (with `--anchor`) checks the external anchor. Reads
-the key from `FIRM_AUDIT_KEY`, or a labelled keyring from `FIRM_AUDIT_KEYS` for rotation. Read-only.
+the key from `FIRM_AUDIT_KEY`; during a rotation it also reads the retired-key archives
+`FIRM_AUDIT_RETIRED_KEYS` (retired row keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired seal keys).
+Read-only.
 
 ```bash
 firm-audit verify --database-url sqlite:///audit.db --anchor /var/lib/firm/audit.anchor

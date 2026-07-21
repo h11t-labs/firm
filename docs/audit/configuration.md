@@ -44,8 +44,9 @@ picture. Without a key, none of these have any effect and the schema behaves exa
 | `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file the seal-chain head is written to (Layer 3). |
 | `on_anchor` | `None` | Callback `(seq, seal_mac, sealed_at)` for shipping the anchor off-host (S3, a second DB, a webhook). Failures route to `on_error`, never crash the seal. |
 
-Rotation uses a separate **`FIRM_AUDIT_KEYS`** env var (`"label=secret,label2=secret2"`) read by
-verify only — see [Key rotation](tamper-evidence.md#rotation).
+Rotation uses two verify-only archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
+**row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
+`"label=secret,label2=secret2"` — see [Key rotation](tamper-evidence.md#rotation).
 
 ### Environment variables
 
@@ -53,7 +54,8 @@ verify only — see [Key rotation](tamper-evidence.md#rotation).
 |---|---|---|
 | `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret — the **row key** (≥ 32 chars). |
 | `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals + checkpoints; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
-| `FIRM_AUDIT_KEYS` | verify | Labelled keyring for rotation: `"id1=old,id2=new"`. |
+| `FIRM_AUDIT_RETIRED_KEYS` | verify | Retired **row** keys (rotation): `"id1=old,…"`. Eligible for row-MAC verification only — **never** to validate a seal, in any mode. |
+| `FIRM_AUDIT_RETIRED_SEAL_KEYS` | verify | Retired **seal** keys (rotation): `"id1=old,…"`. Eligible for seal verification *and* row verification (a seal key is higher-privilege). A single-key deployment retires its key here. |
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
 | `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 

@@ -153,6 +153,27 @@ def _make_key(secret: bytes) -> Key:
     return Key(secret=secret, id=key_id(secret))
 
 
+def add_key(ring: dict[str, Key], key: Key, *, source: str) -> None:
+    """Insert ``key`` into a ``key_id``-keyed ``ring``, raising on a genuine collision.
+
+    A keyring is indexed by :attr:`Key.id` (the 8-hex ``key_id``), so two **distinct** secrets that
+    hash to the same ``key_id`` would silently overwrite one another — collapsing two identities
+    into one and making every row/seal signed by the shadowed key verify as a false TAMPERED (for a
+    row-vs-seal collision, downgrading the two-key split). A collision is astronomically unlikely,
+    but it is a *configuration* error, not tampering, so it is surfaced loudly rather than left to
+    masquerade. Re-adding the *same* secret under its id is idempotent (the current seal key is also
+    row-eligible in single-key mode, so it is legitimately added to the row ring twice)."""
+    existing = ring.get(key.id)
+    if existing is not None and not hmac.compare_digest(existing.secret, key.secret):
+        raise ValueError(
+            f"two configured audit keys share key_id {key.id!r} but have different secrets "
+            f"(seen via {source}); indexed by key_id they collide and one would shadow the other, "
+            "making objects signed by the shadowed key verify as TAMPERED. Change one of the keys "
+            "so their key_ids differ."
+        )
+    ring[key.id] = key
+
+
 def _validate_key_length(value: str, *, source: str) -> None:
     if len(value) < KEY_MIN_LENGTH:
         raise ValueError(
@@ -174,15 +195,28 @@ def load_key(raw: str | None) -> Key | None:
     return _make_key(raw.encode("utf-8"))
 
 
-def parse_keyring(raw: str | None) -> dict[str, Key]:
-    """Parse a verification keyring: ``"id1=secret,id2=secret"`` → ``{label: Key}``.
+def parse_keyring(raw: str | None, *, source: str = "FIRM_AUDIT_RETIRED_KEYS") -> dict[str, Key]:
+    """Parse a retired-key archive: ``"id1=secret,id2=secret"`` → ``{label: Key}``.
 
-    Entries are comma-separated; each splits on its **first** ``=`` so a secret may itself
-    contain ``=``. A secret must not contain a comma — the format is comma-delimited, so a
-    comma inside a secret shows up as a fragment with no ``=`` and is rejected with a pointed
-    error rather than silently splitting the key. Empty input yields an empty keyring; every
-    label must be non-empty and unique, and every secret is length-validated exactly like
-    :func:`load_key` so writer and verifier never disagree on what a valid key is.
+    Used for both retired-key env vars (:data:`FIRM_AUDIT_RETIRED_KEYS`,
+    :data:`FIRM_AUDIT_RETIRED_SEAL_KEYS`); ``source`` names the one being parsed so every error
+    points at the right variable. Entries are comma-separated and each splits on its **first** ``=``
+    (so a secret may itself contain ``=``). Empty input yields an empty keyring; every label must be
+    non-empty and unique, and every secret is length-validated exactly like :func:`load_key` so
+    writer and verifier never disagree on what a valid key is.
+
+    **A comma is *always* an entry delimiter — a secret cannot contain one.** The comma-delimited
+    format is inherently ambiguous about a comma inside a secret: ``id1=A,id2=B`` is two keys, and a
+    single key whose secret were literally ``A,id2=B`` would be byte-identical input, so the two
+    cannot be told apart. Rather than pretend otherwise, the rule is simple and enforced as far
+    can be: a comma that yields a **malformed** fragment — no ``=``, an empty label, or a too-short
+    secret — is a pointed :class:`ValueError` (this is the common accidental case, e.g. a raw comma
+    in a secret whose tail is not itself a ``label=secret``); a comma followed by a **well-formed**
+    ``label=secret`` is taken as a separate key, exactly as the multi-key form intends. The
+    invariant callers can rely on either way is *fail-closed*: parsing never silently merges two
+    distinct secrets into one identity, and a genuine ``key_id`` collision between the results
+    is caught downstream by :func:`add_key`. **Do not put a comma in a secret** — use a longer
+    comma-free random secret.
 
     The label is the human mnemonic from the config (``id1``/``id2`` during a rotation); the
     authoritative match at verify time is by :attr:`Key.id`, not by this label.
@@ -193,17 +227,17 @@ def parse_keyring(raw: str | None) -> dict[str, Key]:
     for entry in raw.split(","):
         if "=" not in entry:
             raise ValueError(
-                f"FIRM_AUDIT_KEYS entry {entry!r} has no '='; expected 'label=secret'. "
+                f"{source} entry {entry!r} has no '='; expected 'label=secret'. "
                 "Secrets must not contain a comma (the keyring is comma-delimited)."
             )
         label, secret = entry.split("=", 1)
         if not label:
             raise ValueError(
-                f"FIRM_AUDIT_KEYS entry {entry!r} has an empty label; expected 'label=secret'."
+                f"{source} entry {entry!r} has an empty label; expected 'label=secret'."
             )
         if label in keyring:
-            raise ValueError(f"FIRM_AUDIT_KEYS has a duplicate label {label!r}.")
-        _validate_key_length(secret, source=f"FIRM_AUDIT_KEYS[{label}]")
+            raise ValueError(f"{source} has a duplicate label {label!r}.")
+        _validate_key_length(secret, source=f"{source}[{label}]")
         keyring[label] = _make_key(secret.encode("utf-8"))
     return keyring
 

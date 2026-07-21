@@ -16,6 +16,7 @@ from firm.audit import integrity
 from firm.audit.integrity import (
     KEY_MIN_LENGTH,
     Key,
+    add_key,
     canonical_created_at,
     key_id,
     load_key,
@@ -218,10 +219,38 @@ def test_parse_keyring_splits_on_first_equals_only() -> None:
 
 
 def test_parse_keyring_comma_in_secret_is_rejected() -> None:
-    """A comma inside a secret surfaces as a fragment with no '=' and is rejected pointedly."""
+    """A comma that yields a malformed fragment (no '=') is rejected pointedly — the common
+    accidental case of a raw comma in a secret whose tail is not itself a ``label=secret``."""
     # As if the intended secret were "aaaa…,bbbb…": the tail after the comma has no '='.
     with pytest.raises(ValueError, match="comma"):
         parse_keyring(f"id1={'a' * 40},{'b' * 40}")
+
+
+def test_parse_keyring_comma_before_wellformed_entry_is_two_keys_not_rejected() -> None:
+    """Adversarial finding (LOW): a comma is *always* an entry delimiter — a secret cannot contain
+    one. ``id1=A,id2=B`` is two keys and is byte-identical to a lone key whose secret were
+    ``A,id2=B``, so the two cannot be told apart; the well-formed tail is parsed as a separate key,
+    exactly as the multi-key form intends (the docstring no longer over-promises a rejection here).
+    The invariant is fail-closed: two *distinct* secrets are never merged into one identity."""
+    ring = parse_keyring(f"id1={'a' * 40},id2={'b' * 40}")
+    assert set(ring) == {"id1", "id2"}
+    assert ring["id1"].secret == b"a" * 40
+    assert ring["id2"].secret == b"b" * 40
+
+
+def test_add_key_rejects_a_key_id_collision_between_distinct_secrets() -> None:
+    # Adversarial finding (LOW): a keyring is indexed by the 8-hex key_id, so two DISTINCT secrets
+    # that share a key_id would silently overwrite one another — collapsing two identities into one
+    # and making the shadowed key's objects verify as a false TAMPERED. add_key surfaces the
+    # collision loudly instead. (Re-adding the SAME secret under its id stays idempotent.)
+    a = Key(secret=b"a" * 40, id="deadbeef")
+    b = Key(secret=b"b" * 40, id="deadbeef")  # same id, different secret
+    ring: dict[str, Key] = {}
+    add_key(ring, a, source="FIRM_AUDIT_RETIRED_KEYS")
+    add_key(ring, a, source="FIRM_AUDIT_RETIRED_KEYS")  # idempotent: same secret, no error
+    assert len(ring) == 1
+    with pytest.raises(ValueError, match="share key_id"):
+        add_key(ring, b, source="FIRM_AUDIT_RETIRED_KEYS")
 
 
 def test_parse_keyring_short_secret_hard_errors() -> None:

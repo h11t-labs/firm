@@ -33,9 +33,22 @@ week's data would stay invisible. So each default run verifies the unsealed tail
 range, *and a rotating slice of older ranges* sized so every range is recomputed at least once
 per ``verify_cycle`` runs. The rotation cursor is **advisory only**: it reorders work, never
 suppresses a verdict. The seal chain (cheap, seals-table only) is walked in full every run
-regardless, and ``--full`` recomputes every range from the genesis/checkpoint floor. An attacker
-who rewrites the cursor (or the whole state) only changes *which* range is recomputed first, never
-*whether* tampering is eventually found.
+regardless, ``--full`` recomputes every range from the genesis/checkpoint floor, and the
+always-on checks (chain walk, pruned-region-empty probe, unsealed tail, anchor) do not depend on
+the cursor at all.
+
+**Only ``--full`` guarantees coverage of every sealed range.** The rotation cursor is persisted to
+an ordinary state file (or held in memory) — *not* under a MAC — so an attacker with write access
+to it can **pin** it: rewriting it to the same value before every non-``--full`` run keeps one
+chosen older range out of the rotating slice indefinitely, deferring recomputation of an edit in
+that range for as long as they keep pinning. The rolling slice is therefore a *freshness
+optimization for an honest operator*, not a security guarantee against a cursor-tampering attacker.
+What the attacker cannot defer is a periodic ``firm-audit verify --full`` (which ignores the cursor
+and recomputes every range) and the always-on checks above. Run ``--full`` on a schedule —
+especially when the verify state and the database share a host — and treat the rolling cursor as an
+accelerator, never as proof that an old range was recently recomputed. Verify emits a warning
+whenever a non-``--full`` run does a partial slice it cannot prove will rotate (see
+:meth:`Verifier._select_ranges`).
 
 Verdicts (design review 1A/5A): ``OK`` · ``WARNING`` (a valid-MAC late commit, or a stalled-sealer
 liveness signal — never an alarm) · ``UNPROTECTED`` (legacy NULL-MAC rows at/below activation) ·
@@ -74,6 +87,15 @@ _status = schema.verify_status
 
 #: The synthetic ``prev_mac`` of the very first seal — mirrors :data:`.sealing._GENESIS`.
 _GENESIS = "genesis"
+
+#: Verify-only archives of *retired* keys, read only here (never by a writer or sealer). They are
+#: role-scoped so a retired key can only validate what its role signed: ``RETIRED_KEYS`` holds
+#: retired **row** keys (eligible for row-MAC verification only — never a seal), and
+#: ``RETIRED_SEAL_KEYS`` holds retired **seal** keys (eligible for seal verification *and*, as the
+#: higher-privilege key, row verification). Keeping retired row keys out of the seal ring in every
+#: mode is what stops a stolen row key, once rotated out, from becoming a seal-capable key.
+_RETIRED_KEYS_ENV = "FIRM_AUDIT_RETIRED_KEYS"
+_RETIRED_SEAL_KEYS_ENV = "FIRM_AUDIT_RETIRED_SEAL_KEYS"
 
 #: Rows read per keyset page when recomputing Layer-1 MACs (bounded memory on a large table).
 _PAGE = 1000
@@ -142,7 +164,8 @@ def _row_verdict(row: Any, boundary: int | None, keyring: dict[str, Key]) -> str
     if key is None:
         raise VerifyError(
             f"row {row.id} was signed by unknown key_id {row.key_id!r} — add its secret to "
-            "FIRM_AUDIT_KEYS."
+            "FIRM_AUDIT_RETIRED_KEYS (retired row keys) or FIRM_AUDIT_RETIRED_SEAL_KEYS "
+            "(retired seal keys)."
         )
     if not hmac.compare_digest(recompute_row_mac(key, row), row.row_mac):
         return "tampered"
@@ -345,37 +368,67 @@ class Verifier:
 
     @property
     def keyring(self) -> dict[str, Key]:
-        """All keys a *row* MAC may be checked against, indexed by ``key_id``: the writer key, the
-        seal key (a two-key deployment configures both, labelled), and any rotation keys in
-        ``FIRM_AUDIT_KEYS``. Empty when the feature is off. In single-key mode the seal key *is* the
-        row key, so this is byte-identical to the pre-split keyring."""
+        """All keys a *row* MAC may be checked against, indexed by ``key_id``: the current row key,
+        the current seal key (a two-key deployment configures both; the seal key stays row-eligible
+        so a history that *migrated* single→split still verifies the rows the now-seal key signed),
+        and both retired archives — retired row keys (``FIRM_AUDIT_RETIRED_KEYS``) and retired seal
+        keys (``FIRM_AUDIT_RETIRED_SEAL_KEYS``, higher-privilege, so row-eligible too). Empty when
+        the feature is off. In single-key mode the seal key *is* the row key, so the current-key
+        part is byte-identical to the pre-split keyring."""
         ring: dict[str, Key] = {}
         if self.audit._key is not None:
-            ring[self.audit._key.id] = self.audit._key
+            self._ring_add(ring, self.audit._key, source="FIRM_AUDIT_KEY")
         if self.audit._seal_key is not None:
-            ring[self.audit._seal_key.id] = self.audit._seal_key
-        for extra in parse_keyring(os.environ.get("FIRM_AUDIT_KEYS")).values():
-            ring[extra.id] = extra
+            self._ring_add(ring, self.audit._seal_key, source="FIRM_AUDIT_SEAL_KEY")
+        for env in (_RETIRED_KEYS_ENV, _RETIRED_SEAL_KEYS_ENV):
+            for extra in parse_keyring(os.environ.get(env), source=env).values():
+                self._ring_add(ring, extra, source=env)
         return ring
+
+    @staticmethod
+    def _ring_add(ring: dict[str, Key], key: Key, *, source: str) -> None:
+        """Merge one key into a key_id-keyed ring, turning a collision into a :class:`VerifyError`.
+
+        Wraps :func:`~firm.audit.integrity.add_key` (which raises ``ValueError`` on two distinct
+        secrets sharing a ``key_id``) so the failure is verify's own error class — caught by
+        :meth:`run` and persisted as the ``error`` outcome (D24), never a silent overwrite that
+        would flag the shadowed key's objects as TAMPERED."""
+        try:
+            integrity.add_key(ring, key, source=source)
+        except ValueError as exc:
+            raise VerifyError(str(exc)) from exc
 
     @property
     def seal_keyring(self) -> dict[str, Key]:
         """The keys eligible to have signed a *seal* (``rows_mac`` + ``seal_mac``), indexed by
-        ``key_id``.
+        ``key_id``: the current seal key, and retired seal keys (``FIRM_AUDIT_RETIRED_SEAL_KEYS``).
 
-        In single-key mode this is the full :attr:`keyring` — byte-identical to before the split, so
-        seals signed by the one key still verify. In a two-key deployment (a distinct
-        ``FIRM_AUDIT_SEAL_KEY``) the **row key is removed**: a compromised app instance holds only
-        the row key, so refusing it as a seal signer here is what keeps the seal chain out of a
-        row-key attacker's reach. An attacker who re-signs a seal with the row key and relabels its
-        ``key_id`` to the row key's therefore lands on an id that is not in this ring — an
-        unverifiable seal, never a laundered OK (see :meth:`_walk_chain`). Old rotation keys in
-        ``FIRM_AUDIT_KEYS`` stay in the ring because they live only on the verifier, not on any
-        instance an attacker could compromise."""
-        ring = dict(self.keyring)
-        if self.audit._seal_key_split:
-            assert self.audit._key is not None  # split implies both keys exist
-            ring.pop(self.audit._key.id, None)
+        The current **row** key is a seal signer **only in single-key mode** — where the one key
+        signs both rows and seals. In a two-key deployment (a distinct ``FIRM_AUDIT_SEAL_KEY``) it
+        is excluded: a compromised app instance holds only the row key, so refusing it as a seal
+        signer is what keeps the seal chain out of a row-key attacker's reach. An attacker who
+        re-signs a seal with the row key and relabels its ``key_id`` to the row key's therefore
+        lands on an id not in this ring — an unverifiable seal, never a laundered OK (see
+        :meth:`_walk_chain`).
+
+        Retired **row** keys (``FIRM_AUDIT_RETIRED_KEYS``) are **never** in this ring, in any mode:
+        role-scoping the archive is the whole point of splitting the retired vars. A row key stolen
+        from an app instance and later rotated out into ``FIRM_AUDIT_RETIRED_KEYS`` can validate the
+        rows it signed, but can never be promoted into a seal-capable key — so the same relabel
+        attack with a *retired* row key is just as unverifiable as with the current one. Retired
+        seal keys stay eligible because they live only on the verifier, not on any instance an
+        attacker could compromise."""
+        ring: dict[str, Key] = {}
+        if self.audit._seal_key is not None:
+            self._ring_add(ring, self.audit._seal_key, source="FIRM_AUDIT_SEAL_KEY")
+        # The current row key signs seals only in single-key mode (there it *is* the seal key). In a
+        # split deployment it never signs a seal, so it is not a seal signer here.
+        if self.audit._key is not None and not self.audit._seal_key_split:
+            self._ring_add(ring, self.audit._key, source="FIRM_AUDIT_KEY")
+        for extra in parse_keyring(
+            os.environ.get(_RETIRED_SEAL_KEYS_ENV), source=_RETIRED_SEAL_KEYS_ENV
+        ).values():
+            self._ring_add(ring, extra, source=_RETIRED_SEAL_KEYS_ENV)
         return ring
 
     # -- rolling state (advisory) --------------------------------------------------------------
@@ -388,9 +441,12 @@ class Verifier:
             with open(path, encoding="utf-8") as handle:
                 return max(0, int(handle.read().strip()))
         except (OSError, ValueError):
-            # Missing or attacker-corrupted state simply restarts the rotation from 0; it can never
-            # cause a range to be *skipped forever* (the chain walk is always full, and the cursor
-            # only reorders which older range is recomputed first).
+            # Missing or corrupted state simply restarts the rotation from 0. The cursor is
+            # advisory: it only reorders which older range a *non-``--full``* run recomputes first,
+            # and the always-full chain walk / anchor / pruned-region / tail checks never depend on
+            # it. It is *not* MAC-protected, so an attacker who pins it can defer recomputation of
+            # a chosen range across non-``--full`` runs forever — which is why coverage of every
+            # sealed range is guaranteed only by a periodic ``--full`` (see the module docstring).
             return 0
 
     def _save_cursor(self, value: int) -> None:
@@ -431,8 +487,9 @@ class Verifier:
         keyring = self.keyring
         if not keyring:
             raise VerifyError(
-                "audit verification needs a key — set FIRM_AUDIT_KEY (or FIRM_AUDIT_KEYS for a "
-                "rotation) before running verify."
+                "audit verification needs a key — set FIRM_AUDIT_KEY (and, during a rotation, the "
+                "retired archives FIRM_AUDIT_RETIRED_KEYS / FIRM_AUDIT_RETIRED_SEAL_KEYS) before "
+                "running verify."
             )
         # Seals (rows_mac + seal_mac) are checked against the seal keyring; rows against the full
         # keyring. The two differ only in a two-key deployment, where the row key is not a seal
@@ -452,6 +509,13 @@ class Verifier:
             # Layer 2, part 1: the seal chain itself (dense seq, prev_mac linkage, seal_mac
             # recompute) — cheap, always walked in full so seal tampering never depends on rotation.
             self._walk_chain(seals, keyring, seal_keyring, counters, findings)
+
+            # The pruned region (ids at/below the checkpoint floor) must be empty — retention
+            # deleted every row through the floor, so any surviving row there is a forged insert
+            # into a range the checkpoint asserts holds zero rows. Verify skips recomputation
+            # at/below the floor, so without this bounded probe such a row would be invisible even
+            # to ``--full`` (design "row present in a pruned range").
+            self._check_pruned_region_empty(conn, floor, counters, findings)
 
             # Anti-replay backstop: the unique index rejects duplicate entry_ids at insert, but if
             # it was dropped, verify still reports them (design "Layer 1", replay).
@@ -563,18 +627,21 @@ class Verifier:
             key = seal_keyring.get(seal.key_id)
             if key is None:
                 if seal.key_id in keyring:
-                    # Known as a row key but not eligible to sign seals: either a two-key verifier
-                    # is missing its seal key, or an attacker re-signed the seal with the row key
-                    # (which they hold) and relabeled ``key_id`` to match. Both are unverifiable —
-                    # never a laundered OK — and both are fixed the same way, so say so precisely.
+                    # Known as a row key (current or retired) but not eligible to sign seals — a row
+                    # key can never validate a seal. Either a two-key verifier is missing its seal
+                    # key, or an attacker re-signed the seal with a row key they hold (a current
+                    # one, or a rotated-out row key from FIRM_AUDIT_RETIRED_KEYS) and relabeled
+                    # ``key_id`` to match. Both are unverifiable — never a laundered OK.
                     raise VerifyError(
                         f"seal seq {seal.seq} is signed by key_id {seal.key_id!r}, which is a "
-                        "configured row key but not a seal key — seal key missing from keyring, is "
-                        "this a two-key deployment? Add the seal key (FIRM_AUDIT_SEAL_KEY)."
+                        "known row key but not a seal key — a row key cannot validate a seal. "
+                        "Either this two-key verifier is missing its seal key (add "
+                        "FIRM_AUDIT_SEAL_KEY / FIRM_AUDIT_RETIRED_SEAL_KEYS), or a "
+                        "current-or-retired row key was used to forge the seal (tampering)."
                     )
                 raise VerifyError(
                     f"seal seq {seal.seq} was signed by unknown key_id {seal.key_id!r} — "
-                    "add its secret to FIRM_AUDIT_KEYS (or FIRM_AUDIT_SEAL_KEY)."
+                    "add its secret to FIRM_AUDIT_RETIRED_SEAL_KEYS (or FIRM_AUDIT_SEAL_KEY)."
                 )
             if not hmac.compare_digest(
                 integrity.seal_mac(
@@ -653,6 +720,35 @@ class Verifier:
             )
             counters.tampered += 1
 
+    def _check_pruned_region_empty(
+        self, conn: Connection, floor: int, counters: _Counters, findings: list[Finding]
+    ) -> None:
+        """Assert the pruned region (``id <= floor``) is empty — a forged insert there is TAMPERED.
+
+        A checkpoint records ``row_count = 0`` over the range it pruned and verify skips recomputing
+        anything at or below the floor (the rows are legitimately gone), so a row inserted at a low,
+        already-pruned id would otherwise never be looked at — invisible even to ``--full`` while
+        ``history()`` still returns it. Retention deletes *every* row through the floor, so after a
+        prune there are legitimately none; a single bounded ``LIMIT``ed probe (never a full scan)
+        turns any survivor into a tampering finding. Inert when nothing was pruned (floor 0)."""
+        if floor <= 0:
+            return
+        stragglers = conn.execute(
+            select(_audits.c.id).where(_audits.c.id <= floor).order_by(_audits.c.id).limit(5)
+        ).all()
+        if not stragglers:
+            return
+        ids = ", ".join(str(row.id) for row in stragglers)
+        findings.append(
+            Finding(
+                "tampered",
+                f"row(s) {ids} are present at or below the checkpoint floor {floor}, a pruned "
+                "range the checkpoint asserts is empty (forged insert into pruned history)",
+                f"rows <= {floor}",
+            )
+        )
+        counters.tampered += 1
+
     # -- Layer 2 + Layer 1: sealed ranges ------------------------------------------------------
 
     def _verify_ranges(
@@ -709,7 +805,11 @@ class Verifier:
 
         ``full`` → all of them; ``from_seq`` → every range at or after that seq; otherwise the
         rotating slice: the newest range always, plus ``ceil(n / verify_cycle)`` older ranges from
-        the advisory cursor, so a full sweep completes within ``verify_cycle`` runs.
+        the advisory cursor, so a full sweep completes within ``verify_cycle`` runs **for an honest
+        operator**. The cursor is not MAC-protected, so a run that does a partial slice cannot
+        *prove* it will rotate (a pinning attacker can hold it fixed); only a periodic ``--full``
+        guarantees every range is recomputed. A warning fires whenever a non-``--full`` run does a
+        partial slice, so the reliance on ``--full`` is never silent.
         """
         if full:
             return covering
@@ -723,14 +823,18 @@ class Verifier:
             # persisted state path the cursor lives only in this process. A fresh per-run
             # ``firm-audit verify`` (the documented cron deployment, D12) then always restarts the
             # rotation at 0, re-checking the same newest ranges every run and never reaching the
-            # middle ones, so an edit in an old range stays invisible until a manual ``--full``.
-            # Make that silent gap loud rather than shipping a coverage guarantee that quietly
-            # does not hold (D12; the seal chain and anchor are still walked in full every run).
+            # middle ones, so an edit in an old range stays invisible until a ``--full``. This is
+            # the hard, always-true version of the coverage gap; make it loud rather than ship a
+            # guarantee that does not hold. (Even *with* a persisted state the cursor is advisory
+            # and attacker-pinnable — see the module docstring — so ``--full`` is the only real
+            # coverage guarantee; the seal chain, anchor, pruned-region and tail checks are walked
+            # in full every run regardless.)
             warnings.warn(
                 "audit verify is doing rolling (non-full) coverage without a persisted rotation "
                 "state — set verify_state_path / FIRM_AUDIT_VERIFY_STATE so a per-run cron rotates "
-                "through old ranges, or run `firm-audit verify --full` periodically. Otherwise "
-                "each fresh run re-checks only the newest ranges, never older ones (D12).",
+                "through old ranges, and run `firm-audit verify --full` periodically (only --full "
+                "guarantees every sealed range is recomputed; the rotation cursor is advisory and "
+                "not MAC-protected). Otherwise each fresh run re-checks only newest ranges (D12).",
                 stacklevel=2,
             )
         start = self._cursor % n
@@ -894,13 +998,19 @@ class Verifier:
         thing only the anchor guards.
 
         The one benign way an anchored seal can be absent from the chain is retention: a
-        ``checkpoint`` seal legitimately prunes the seals (and rows) at or below its ``to_id``, so
-        an anchored seq at or below the checkpoint **floor** was pruned away, not truncated. That is
-        safe to accept because the floor is set only by a key-signed checkpoint the chain walk
-        already re-verified — an attacker without the key cannot raise the floor over a real
-        anchored seal, and a wholesale drop-and-recreate leaves no surviving checkpoint (floor 0).
-        Retention also exports the checkpoint to the anchor, so the newest anchor normally names the
-        checkpoint itself; this clause only covers the residual case where that write was lost.
+        ``checkpoint`` seal legitimately prunes the seals (and rows) below it. Pruning and
+        truncation are told apart **in seq-space**: a pruned seal sits below the checkpoint that
+        subsumed it, so its ``seq`` is at or below the surviving head; a tail-truncated seal *is*
+        the old head, so its ``seq`` is above the surviving head. So an anchored seq that is absent
+        but at or below ``head_seq`` — with a checkpoint present to authorize a prune — was pruned,
+        not truncated. (An earlier version compared the anchored ``seq`` to the checkpoint floor,
+        a *row id*; the unit mismatch meant that once any checkpoint existed the test passed for
+        almost any seq and laundered a real tail truncation to OK.) Accepting this is safe because a
+        checkpoint's ``seal_mac`` is key-signed and re-verified by the chain walk — an attacker
+        without the key cannot manufacture one, and a wholesale drop-and-recreate leaves no
+        surviving checkpoint. Retention also exports the checkpoint to the anchor, so the newest
+        anchor normally names the checkpoint itself; the ``seq <= head_seq`` clause only covers the
+        residual case where that write was lost and the newest anchor still names a pruned seal.
         """
         if anchor_path is None:
             return None, False, False
@@ -921,8 +1031,18 @@ class Verifier:
         seq, seal_mac, sealed_at = anchor
         by_seq = {s.seq: s for s in seals}
         head_seq = max((s.seq for s in seals), default=0)
+        has_checkpoint = any(s.kind == "checkpoint" for s in seals)
         matched = by_seq.get(seq)
-        legitimately_pruned = matched is None and seq <= floor
+        # An anchored seal legitimately absent from the chain was *pruned* by a checkpoint, never
+        # *truncated* from the tail. The two are told apart in seq-space: a pruned seal sits BELOW
+        # the checkpoint that subsumed it, so its ``seq`` is at or below the surviving head; a
+        # tail-truncated seal is (was) the head, so its ``seq`` is ABOVE the surviving head. The old
+        # test compared the anchored ``seq`` to the checkpoint ``floor`` — a *row id*, not a seq —
+        # so once any checkpoint existed ``seq <= floor`` was almost always true and a genuine tail
+        # truncation was laundered to OK. Gate on the seq-space head instead, and only when a
+        # checkpoint actually authorizes a prune (its key-signed seal_mac is re-verified by the
+        # chain walk, so an attacker without the key cannot manufacture one).
+        legitimately_pruned = matched is None and has_checkpoint and seq <= head_seq
         if not legitimately_pruned and (
             matched is None or not hmac.compare_digest(matched.seal_mac, seal_mac) or head_seq < seq
         ):

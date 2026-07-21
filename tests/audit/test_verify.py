@@ -32,7 +32,8 @@ _status = schema.verify_status
 def _no_ambient_config(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "FIRM_AUDIT_KEY",
-        "FIRM_AUDIT_KEYS",
+        "FIRM_AUDIT_RETIRED_KEYS",
+        "FIRM_AUDIT_RETIRED_SEAL_KEYS",
         "FIRM_AUDIT_ANCHOR_PATH",
         "FIRM_AUDIT_VERIFY_STATE",
     ):
@@ -555,8 +556,11 @@ def test_unknown_key_id_is_a_hard_error(db_url: str) -> None:
 
 
 def test_rotation_key_in_keyring_verifies_ok(db_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    # Rows signed with the current key; verify with a *different* writer key but the old key present
-    # in FIRM_AUDIT_KEYS — the row's key_id resolves and it verifies.
+    # Single-key rotation: the old key signed both the rows AND the seal, so it retires into
+    # FIRM_AUDIT_RETIRED_SEAL_KEYS (the higher-privilege archive, eligible for rows *and* seals).
+    # Verify runs under a *different* current key; the old key's key_id resolves and everything
+    # verifies. (Retiring it into FIRM_AUDIT_RETIRED_KEYS instead would leave the seal it signed
+    # unverifiable — that is the deliberate role split; see the two-key suite.)
     audit = _make(db_url)
     try:
         audit.record("a")
@@ -565,7 +569,7 @@ def test_rotation_key_in_keyring_verifies_ok(db_url: str, monkeypatch: pytest.Mo
         audit.close()
 
     other = "another-secret-key-padding-0123456789ab"
-    monkeypatch.setenv("FIRM_AUDIT_KEYS", f"old={_SECRET}")
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", f"old={_SECRET}")
     verifier = AuditLog(database_url=db_url, mac_key=other, create_schema=False)
     try:
         report = verifier.verify(full=True)
@@ -703,6 +707,50 @@ def test_corrupted_state_file_cannot_suppress_detection(db_url: str, tmp_path) -
             conn.execute(update(_audits).where(_audits.c.id == victim).values(action="HACKED"))
         outcomes = [audit.verify().outcome for _ in range(3)]  # non-full, rolling
         assert "tampered" in outcomes
+    finally:
+        audit.close()
+
+
+def test_pinned_cursor_defers_a_range_from_non_full_runs_but_full_catches_it(
+    db_url: str, tmp_path
+) -> None:
+    # Adversarial finding (MEDIUM): the rotation cursor is not MAC-protected, so an attacker who
+    # *pins* it — rewriting it to the same value before every non-``--full`` run — keeps one chosen
+    # range out of the rolling slice indefinitely. This codifies the honest contract the docstring
+    # now states: only ``--full`` guarantees coverage of every sealed range; the rolling cursor is a
+    # freshness optimization, not a security guarantee against a cursor-tampering attacker.
+    state = tmp_path / "verify.state"
+    audit = _make(db_url, seal_batch_size=1, verify_cycle=3, verify_state_path=str(state))
+    try:
+        for i in range(4):
+            audit.record(f"e{i}")
+        audit.sealer.run_once()  # 4 covering seals (indices 0..3); per_run = ceil(4/3) = 2
+        # per_run=2 with cursor pinned to 0 selects covering indices {0, 1} plus the newest {3};
+        # index 2 is the range the pin permanently skips. seal_batch_size=1 → seal k covers row k,
+        # so row index 2 lives in covering[2].
+        victim = _rows(audit.engine)[2].id
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).where(_audits.c.id == victim).values(action="HACKED"))
+        # Each non-full run is a fresh per-run cron process that reloads the cursor from the
+        # (pinned) state file. The attacker re-pins it to 0 before every run, so the tampered middle
+        # range is never in the rolling slice and rolling verify keeps returning non-tampered.
+        pinned = []
+        for _ in range(5):
+            state.write_text("0", encoding="utf-8")
+            run = _make(
+                db_url,
+                seal_batch_size=1,
+                verify_cycle=3,
+                verify_state_path=str(state),
+                create_schema=False,
+            )
+            try:
+                pinned.append(run.verify().outcome)
+            finally:
+                run.close()
+        assert "tampered" not in pinned  # the pin defers detection on the rolling path
+        # ...but --full ignores the cursor and recomputes every range, so it catches it.
+        assert audit.verify(full=True).outcome == "tampered"
     finally:
         audit.close()
 

@@ -3419,7 +3419,22 @@ off: columns stay NULL and everything behaves as it did before tamper-evidence e
   startup**, not a warning — a weak key silently voids all three layers, so it fails loudly
   instead. Empty or absent means the feature is simply off, logged as one clear line.
 - `key_id` — the first 8 hex chars of `SHA-256(key)` — is stored on every row and seal so a
-  verifier knows which key to check under. It is not the key and reveals nothing about it.
+  verifier knows which key to check under. It is not the key and reveals nothing about it. Two
+  *distinct* configured keys that happen to share a `key_id` (astronomically unlikely, but it would
+  otherwise let one key shadow the other in the key_id-indexed keyring and flag the shadowed key's
+  objects as a false `TAMPERED`) is a **hard error** — at startup for the row/seal pair, at verify
+  time for a colliding retired key. Change one of the keys so their `key_id`s differ.
+
+### Field length limits (signed path)
+
+Under a key, over-length values fail **loudly at `record()` time** rather than being silently
+truncated later. A non-strict MySQL truncates a value longer than its column — a `VARCHAR(255)`
+scalar (`action`, the subject/actor type/id/label, `correlation_id`) or a `TEXT` JSON payload
+(`data`/`changes`/`context`, max 65535 bytes) — which would leave the *stored* bytes different from
+the *signed* bytes and make an untouched row verify as `TAMPERED`. So a value that would be clipped
+raises a `ValueError` before the insert (put large detail in `data=`, and keep it under the TEXT
+limit). Without a key the write path is unchanged — the database handles length exactly as it did
+before tamper-evidence existed.
 
 ```python
 # Explicit key (overrides the environment). Pass "" to force the feature off.
@@ -3429,22 +3444,62 @@ audit = AuditLog(engine=app_engine, mac_key="a-32-char-or-longer-secret-here!!")
 ### Rotation
 
 Rotate without re-signing — re-signing would require an `UPDATE`, which the append-only contract
-forbids. New writes use the new key; verify is given a **keyring** so old rows stay verifiable:
+forbids. New writes use the new key; the **retired** key stays on the verifier so its old objects
+still verify. Retired keys live in two **verify-only, role-scoped** archives — read only by
+`firm-audit verify`, never by a writer or sealer:
+
+- **`FIRM_AUDIT_RETIRED_KEYS`** — retired **row** keys. Eligible to validate row MACs only, and
+  **never** a seal, in any mode.
+- **`FIRM_AUDIT_RETIRED_SEAL_KEYS`** — retired **seal** keys. Eligible to validate seals *and* rows
+  (a seal key is the higher-privilege key). A single-key deployment retires its one key here,
+  because that key signed both its rows and its seals.
+
+The archives never hold the *new* key — writers pick that up from `FIRM_AUDIT_KEY` /
+`FIRM_AUDIT_SEAL_KEY` alone. Where the **old** key goes depends on what it signed:
+
+| Deployment | Key you rotate | New key → | Retire the old key into | Its old objects that still verify |
+|---|---|---|---|---|
+| Single-key | the one key | `FIRM_AUDIT_KEY` (every writer) | `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its rows **and** seals |
+| Two-key split | row key | `FIRM_AUDIT_KEY` (every instance) | `FIRM_AUDIT_RETIRED_KEYS` | its rows (seals untouched) |
+| Two-key split | seal key | `FIRM_AUDIT_SEAL_KEY` (sealer/verifier hosts) | `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its seals (rows untouched) |
 
 ```bash
-# Writers carry the new key:
-export FIRM_AUDIT_KEY="the-new-32-char-or-longer-secret-value!!"
+# Split deployment, rotating the ROW key. Instances carry the new row key:
+export FIRM_AUDIT_KEY="the-new-32-char-or-longer-row-secret!!!!"
 
-# Verify is given both, labelled — split on the FIRST '=' (commas inside keys are rejected):
-export FIRM_AUDIT_KEYS="2025=the-old-secret...,2026=the-new-32-char-or-longer-secret-value!!"
+# The verifier holds the new keys plus the retired row key, labelled — split on the FIRST '='
+# (a comma is always an entry delimiter; never put one in a secret):
+export FIRM_AUDIT_SEAL_KEY="the-unchanged-32-char-or-longer-seal-key"
+export FIRM_AUDIT_RETIRED_KEYS="2025=the-old-32-char-or-longer-row-secret"
 firm-audit verify --anchor /var/lib/firm/audit.anchor
 ```
 
-`FIRM_AUDIT_KEYS` entries split on the **first** `=`, so a key value may itself contain `=`; a
-comma inside a key value is rejected at parse time with a pointed error (use the keyring form, not
-raw commas). Writer and verifier parse with the same function — a parse divergence would
-masquerade as tampering. Verify **hard-fails on an unknown `key_id`**: a forged row cannot invent a
-`key_id`, because it still needs a valid MAC under a known key.
+**Why the row archive is role-scoped.** A row key lives on every app instance, so an attacker who
+compromises one holds it. If a rotated-out row key were still eligible to validate *seals*, that
+attacker could wait for the rotation, then re-sign a sealed range under the stolen key and relabel
+its `key_id` — laundering a rewrite of sealed history. `FIRM_AUDIT_RETIRED_KEYS` is therefore
+row-only in **every** mode: a retired row key validates the rows it signed and nothing more. A seal
+signed by a key that is not a *seal* key (current or retired) is unverifiable — a hard failure, never
+a laundered OK.
+
+Both archives split each entry on the **first** `=`, so a secret may itself contain `=`. A comma is
+**always an entry delimiter** — a secret cannot contain one: `id1=A,id2=B` is two keys and is
+byte-identical to a lone key whose secret were `A,id2=B`, so the two cannot be distinguished. A
+comma that yields a malformed fragment (no `=`, empty label, or a too-short secret — the common
+accidental case) is rejected with a pointed error; a comma followed by a well-formed `label=secret`
+is taken as a separate key. Either way parsing is **fail-closed** — it never silently merges two
+distinct secrets into one identity, and a genuine `key_id` collision between the parsed keys is a
+hard error. **Do not put a comma in a secret;** use a longer comma-free random value. Writer and
+verifier parse secrets with the same function — a parse divergence would masquerade as tampering.
+Verify **hard-fails on an unknown `key_id`**: a forged row cannot invent a `key_id`, because it
+still needs a valid MAC under a known key.
+
+> **A leaked key is not a retired key.** The archives are for keys aged out on schedule, still
+> trusted. A key that was **leaked or compromised** does **not** belong in any archive: adding it
+> tells verify to trust MACs the attacker can now forge. Every row and seal it signed is no longer
+> trustworthy — treat those objects as suspect and lean on the seals and anchors made under keys the
+> attacker never held. Rotate the compromised key out of `FIRM_AUDIT_KEY` / `FIRM_AUDIT_SEAL_KEY`
+> immediately, and do not archive it.
 
 ### Two-key split: a separate seal key (optional hardening)
 
@@ -3471,8 +3526,10 @@ export FIRM_AUDIT_SEAL_KEY="a-different-32-char-or-longer-seal-secret"
 
 The verifier needs **both** keys (rows are checked under the row key, seals under the seal key);
 configure `mac_key`/`FIRM_AUDIT_KEY` *and* `seal_key`/`FIRM_AUDIT_SEAL_KEY` on it. If verify meets a
-seal signed by a key it does not hold as a seal key, it hard-fails and names the likely cause:
-*"seal key missing from keyring — is this a two-key deployment?"*.
+seal signed by a key it holds only as a *row* key — the current row key, or a retired one from
+`FIRM_AUDIT_RETIRED_KEYS` — it hard-fails and names both possible causes: *a two-key verifier
+missing its seal key (add `FIRM_AUDIT_SEAL_KEY` / `FIRM_AUDIT_RETIRED_SEAL_KEYS`), or a
+current-or-retired row key used to forge the seal (tampering)*.
 
 **This is opt-in and the default is unchanged.** Leave `FIRM_AUDIT_SEAL_KEY` unset (or set it equal
 to `FIRM_AUDIT_KEY`) and the seal key *is* the row key: every instance may seal, one key signs
@@ -3516,13 +3573,19 @@ Re-reading every sealed range on every run is expensive; only ever reading the t
 edit in last week's data hide until someone remembers to run `--full`. The default run threads the
 needle: it verifies the **unsealed tail and the newest seals, plus a rotating slice of older sealed
 ranges**, sized so every range is recomputed at least once every `verify_cycle` runs (default 7 —
-a nightly cron gives full coverage weekly). An edit in an old range is therefore caught by the
-*default* run within a bounded, documented delay — not only by a manual `--full`.
+a nightly cron gives full coverage weekly). For an **honest operator** an edit in an old range is
+therefore caught by the *default* run within a bounded, documented delay.
 
 The rotation state is **advisory only**: it schedules work but is never trusted for a verdict — the
-seal chain and anchor are the sole authority. An attacker who rewrites the state file only reorders
-which ranges are checked first; they cannot suppress detection. When verify state and the database
-share a host, run a from-genesis `--full` pass periodically anyway.
+seal chain, the anchor, the pruned-region-empty probe, and the unsealed tail are all walked in full
+*every* run regardless. But the cursor is **not** MAC-protected, so it is not a coverage guarantee
+against a *cursor-tampering* attacker: one who can write the state file can **pin** it — rewriting
+it to the same value before every non-`--full` run — and keep one chosen older range out of the
+rolling slice indefinitely, deferring recomputation of an edit there. **Only a periodic `--full`
+guarantees every sealed range is recomputed** (it ignores the cursor); treat the rolling slice as an
+accelerator for an honest operator, not proof that an old range was recently checked. Run a
+from-genesis `--full` on a schedule — especially when the verify state and the database share a
+host — and heed the warning verify emits whenever a non-`--full` run does a partial slice.
 
 > **Green is honestly scoped.** The dashboard's integrity strip states the age of the last
 > *full-coverage* pass, not just the last run — "green" never silently means "only the tail was
@@ -3560,7 +3623,11 @@ together with **checkpoint seals** (see [Retention & querying](retention-and-que
 3. After deleting, it writes a `kind="checkpoint"` seal recording `pruned_through_id` and carries
    the chain forward as usual.
 4. Verify skips row-recomputation at or below the newest checkpoint but still validates the seal
-   chain across it. Rows *above* the checkpoint that go missing remain violations.
+   chain across it. Rows *above* the checkpoint that go missing remain violations. It also asserts
+   the pruned region is **empty**: retention deleted every row through the floor, so *any* surviving
+   row at an id at or below the floor is a forged insert into a range the checkpoint records as
+   holding zero rows — `TAMPERED`, caught by a bounded probe on *every* run (not just `--full`),
+   never invisible just because verify skips recomputation there.
 
 This gives retention a hidden dependency on **sealer liveness**: with a stalled sealer, nothing
 past the last seal is prunable, so the table can grow past `max_age`. That failure is **loud, not
@@ -3698,8 +3765,9 @@ picture. Without a key, none of these have any effect and the schema behaves exa
 | `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file the seal-chain head is written to (Layer 3). |
 | `on_anchor` | `None` | Callback `(seq, seal_mac, sealed_at)` for shipping the anchor off-host (S3, a second DB, a webhook). Failures route to `on_error`, never crash the seal. |
 
-Rotation uses a separate **`FIRM_AUDIT_KEYS`** env var (`"label=secret,label2=secret2"`) read by
-verify only — see [Key rotation](tamper-evidence.md#rotation).
+Rotation uses two verify-only archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
+**row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
+`"label=secret,label2=secret2"` — see [Key rotation](tamper-evidence.md#rotation).
 
 ### Environment variables
 
@@ -3707,7 +3775,8 @@ verify only — see [Key rotation](tamper-evidence.md#rotation).
 |---|---|---|
 | `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret — the **row key** (≥ 32 chars). |
 | `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals + checkpoints; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
-| `FIRM_AUDIT_KEYS` | verify | Labelled keyring for rotation: `"id1=old,id2=new"`. |
+| `FIRM_AUDIT_RETIRED_KEYS` | verify | Retired **row** keys (rotation): `"id1=old,…"`. Eligible for row-MAC verification only — **never** to validate a seal, in any mode. |
+| `FIRM_AUDIT_RETIRED_SEAL_KEYS` | verify | Retired **seal** keys (rotation): `"id1=old,…"`. Eligible for seal verification *and* row verification (a seal key is higher-privilege). A single-key deployment retires its key here. |
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
 | `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 
@@ -3825,7 +3894,9 @@ firm-audit seal --database-url sqlite:///audit.db
 ### `verify` — check the audit trail for tampering
 
 Recomputes row MACs, walks the seal chain, and (with `--anchor`) checks the external anchor. Reads
-the key from `FIRM_AUDIT_KEY`, or a labelled keyring from `FIRM_AUDIT_KEYS` for rotation. Read-only.
+the key from `FIRM_AUDIT_KEY`; during a rotation it also reads the retired-key archives
+`FIRM_AUDIT_RETIRED_KEYS` (retired row keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired seal keys).
+Read-only.
 
 ```bash
 firm-audit verify --database-url sqlite:///audit.db --anchor /var/lib/firm/audit.anchor

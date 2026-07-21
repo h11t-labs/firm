@@ -23,9 +23,14 @@ from firm.audit.verify import VerifyError
 
 _ROW_SECRET = "row-key-secret-padding-0123456789abcdef"  # noqa: S105  (>= 32 chars, throwaway)
 _SEAL_SECRET = "seal-key-secret-padding-0123456789abcd"  # noqa: S105  (>= 32 chars, throwaway)
+_ROW2_SECRET = "row-key-two-secret-padding-0123456789ab"  # noqa: S105  (rotated-in row key)
+_SEAL2_SECRET = "seal-key-two-secret-padding-0123456789a"  # noqa: S105  (rotated-in seal key)
 _ROW = load_key(_ROW_SECRET)
 _SEAL = load_key(_SEAL_SECRET)
+_ROW2 = load_key(_ROW2_SECRET)
+_SEAL2 = load_key(_SEAL2_SECRET)
 assert _ROW is not None and _SEAL is not None and _ROW.id != _SEAL.id
+assert _ROW2 is not None and _SEAL2 is not None
 
 _audits = schema.audit_events
 _seals = schema.seals
@@ -36,7 +41,8 @@ def _no_ambient_config(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "FIRM_AUDIT_KEY",
         "FIRM_AUDIT_SEAL_KEY",
-        "FIRM_AUDIT_KEYS",
+        "FIRM_AUDIT_RETIRED_KEYS",
+        "FIRM_AUDIT_RETIRED_SEAL_KEYS",
         "FIRM_AUDIT_ANCHOR_PATH",
         "FIRM_AUDIT_VERIFY_STATE",
     ):
@@ -286,6 +292,170 @@ def test_retention_without_the_seal_key_refuses_loudly(db_url: str, at_time) -> 
         sealer.close()
 
 
+# -- retired-key archives are role-scoped -------------------------------------------------------
+
+
+def _resign_seal(engine, seal, key, *, relabel: bool) -> None:
+    """Re-sign ``seal`` under ``key`` over the range's current rows — the attacker's move once they
+    hold a key. With ``relabel`` the seal's ``key_id`` is rewritten to ``key``'s own id."""
+    with transaction(engine) as conn:
+        pairs = [
+            (r.id, r.row_mac)
+            for r in conn.execute(
+                select(_audits)
+                .where(_audits.c.id > seal.from_id, _audits.c.id <= seal.to_id)
+                .order_by(_audits.c.id)
+            ).all()
+        ]
+        forged_rows_mac = rows_mac(key, pairs)
+        values = {
+            "rows_mac": forged_rows_mac,
+            "seal_mac": seal_mac(
+                key,
+                seq=seal.seq,
+                kind=seal.kind,
+                from_id=seal.from_id,
+                to_id=seal.to_id,
+                row_count=seal.row_count,
+                rows_mac=forged_rows_mac,
+                prev_mac=seal.prev_mac,
+                sealed_at=seal.sealed_at,
+            ),
+        }
+        if relabel:
+            values["key_id"] = key.id
+        conn.execute(update(_seals).where(_seals.c.seq == seal.seq).values(**values))
+
+
+def test_retired_row_key_cannot_be_promoted_to_a_seal_signer(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The motivating regression. A split deployment rotates its row key R1 → R2, retiring R1 into
+    FIRM_AUDIT_RETIRED_KEYS. An attacker who kept R1 (stolen from an app instance before rotation)
+    re-signs a seal under R1 and relabels its ``key_id`` to R1's own id. Because RETIRED_KEYS is a
+    *row-only* archive — never eligible to sign seals, in any mode — the seal's key_id resolves as a
+    row key but not a seal key, so verify hard-fails (unverifiable), never a laundered OK. The old
+    flat archive would have promoted R1 into a seal-capable key here."""
+    sealer = _split(db_url)  # writes under R1, seals under S
+    try:
+        for i in range(2):
+            sealer.record(f"e{i}")
+        sealer.sealer.run_once()
+        seal = _seal_all(sealer.engine)[0]
+        # Attacker holds only R1 (the now-rotated-out row key) and re-signs the seal under it.
+        _resign_seal(sealer.engine, seal, _ROW, relabel=True)
+    finally:
+        sealer.close()
+
+    # Rotated verifier: current row key R2, seal key S, and R1 retired into the ROW archive.
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", f"r1={_ROW_SECRET}")
+    verifier = AuditLog(
+        database_url=db_url,
+        create_schema=False,
+        mac_key=_ROW2_SECRET,
+        seal_key=_SEAL_SECRET,
+    )
+    try:
+        assert _ROW.id in verifier.verifier.keyring  # R1 is a valid *row* key
+        assert _ROW.id not in verifier.verifier.seal_keyring  # but never a seal key
+        with pytest.raises(VerifyError, match=r"not a seal key|forge"):
+            verifier.verify(full=True)
+    finally:
+        verifier.close()
+
+
+def test_split_rotate_row_key_old_rows_verify_seals_unaffected(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Split-mode row-key rotation: R1 → R2, old R1 retires into FIRM_AUDIT_RETIRED_KEYS. Rows
+    signed by R1 still verify (RETIRED_KEYS is in the row ring); the seal — signed by the unchanged
+    seal key S — is untouched by the row rotation."""
+    original = _split(db_url)
+    try:
+        for i in range(3):
+            original.record(f"e{i}")
+        original.sealer.run_once()
+    finally:
+        original.close()
+
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", f"r1={_ROW_SECRET}")
+    verifier = AuditLog(
+        database_url=db_url,
+        create_schema=False,
+        mac_key=_ROW2_SECRET,
+        seal_key=_SEAL_SECRET,
+    )
+    try:
+        report = verifier.verify(full=True)
+        assert report.outcome == "ok"
+        assert report.ok_count == 3
+    finally:
+        verifier.close()
+
+
+def test_split_rotate_seal_key_old_seals_verify(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Split-mode seal-key rotation: S1 → S2, old S1 retires into FIRM_AUDIT_RETIRED_SEAL_KEYS.
+    Seals signed by S1 still verify (that archive is the seal ring); the row key R is unchanged."""
+    original = _split(db_url)
+    try:
+        for i in range(3):
+            original.record(f"e{i}")
+        original.sealer.run_once()
+    finally:
+        original.close()
+
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", f"s1={_SEAL_SECRET}")
+    verifier = AuditLog(
+        database_url=db_url,
+        create_schema=False,
+        mac_key=_ROW_SECRET,
+        seal_key=_SEAL2_SECRET,
+    )
+    try:
+        assert _SEAL.id in verifier.verifier.seal_keyring
+        report = verifier.verify(full=True)
+        assert report.outcome == "ok"
+        assert report.ok_count == 3
+    finally:
+        verifier.close()
+
+
+def test_single_key_rotate_retires_into_the_seal_archive(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-key rotation: the one key K signs both rows and seals, so on rotation it retires into
+    FIRM_AUDIT_RETIRED_SEAL_KEYS (rows *and* seals eligible). Old rows and old seals both verify
+    under the new current key. Retiring into the row-only FIRM_AUDIT_RETIRED_KEYS instead would
+    leave K's seals unverifiable — the deliberate contract, asserted here as the negative."""
+    original = AuditLog(database_url=db_url, mac_key=_ROW_SECRET, grace=0.0)
+    try:
+        for i in range(3):
+            original.record(f"e{i}")
+        original.sealer.run_once()
+    finally:
+        original.close()
+
+    # Correct archive: old key into RETIRED_SEAL_KEYS → rows and seals verify.
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", f"k={_ROW_SECRET}")
+    verifier = AuditLog(database_url=db_url, create_schema=False, mac_key=_ROW2_SECRET)
+    try:
+        assert verifier.verify(full=True).outcome == "ok"
+    finally:
+        verifier.close()
+
+    # Wrong archive: old key into the row-only RETIRED_KEYS → its seal is unverifiable.
+    monkeypatch.delenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", raising=False)
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", f"k={_ROW_SECRET}")
+    wrong = AuditLog(database_url=db_url, create_schema=False, mac_key=_ROW2_SECRET)
+    try:
+        with pytest.raises(VerifyError, match=r"not a seal key|unknown key_id"):
+            wrong.verify(full=True)
+    finally:
+        wrong.close()
+
+
 # -- single-key mode stays byte-identical -------------------------------------------------------
 
 
@@ -310,5 +480,57 @@ def test_no_seal_key_seals_with_the_row_key(db_url: str) -> None:
         audit.sealer.run_once()
         assert _seal_all(audit.engine)[0].key_id == _ROW.id
         assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+
+# -- key_id collision / secret-based split (adversarial finding, LOW) ---------------------------
+
+
+def test_row_and_seal_key_id_collision_is_a_hard_startup_error(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Adversarial finding: the key_id (8 hex) was used as full key identity. Two DISTINCT secrets
+    # that collide on key_id would (a) collapse the split — ``_seal_key_split`` compared ``.id``, so
+    # a collision read as single-key and mis-scoped the seal keyring — and (b) collide in the
+    # key_id-indexed keyrings, a false TAMPERED. Force a collision and require a loud startup error.
+    monkeypatch.setattr("firm.audit.integrity.key_id", lambda secret: "deadbeef")
+    with pytest.raises(ValueError, match="share key_id"):
+        AuditLog(database_url=db_url, mac_key=_ROW_SECRET, seal_key=_SEAL_SECRET, grace=0.0)
+
+
+def test_split_is_decided_by_the_secret_not_the_key_id(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With distinct real key_ids the split is recognised; the fix bases ``_seal_key_split`` on the
+    # secret (constant-time compare), so a hypothetical id collision could never silently downgrade
+    # a genuine split to single-key. Here (distinct ids) it is simply a normal split.
+    audit = AuditLog(database_url=db_url, mac_key=_ROW_SECRET, seal_key=_SEAL_SECRET, grace=0.0)
+    try:
+        assert audit._seal_key_split is True
+        # Same secret for both → not a split (single-key mode), decided by secret equality.
+        same = AuditLog(
+            database_url=db_url,
+            mac_key=_ROW_SECRET,
+            seal_key=_ROW_SECRET,
+            grace=0.0,
+            create_schema=False,
+        )
+        assert same._seal_key_split is False
+    finally:
+        audit.close()
+
+
+def test_verify_keyring_collision_via_retired_key_is_a_hard_error(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A retired key sharing a key_id with the current key (distinct secrets) must not silently
+    # overwrite it in the verify keyring — verify raises rather than shadow one key with the other.
+    monkeypatch.setattr("firm.audit.integrity.key_id", lambda secret: "deadbeef")
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", f"old={_SEAL_SECRET}")
+    audit = AuditLog(database_url=db_url, mac_key=_ROW_SECRET, grace=0.0)  # single-key row A
+    try:
+        with pytest.raises(VerifyError, match="share key_id"):
+            _ = audit.verifier.keyring
     finally:
         audit.close()

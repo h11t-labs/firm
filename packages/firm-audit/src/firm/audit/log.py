@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import os
 import warnings
 from collections.abc import Callable
@@ -125,10 +126,26 @@ class AuditLog:
         _seal_raw = seal_key if seal_key is not None else os.environ.get("FIRM_AUDIT_SEAL_KEY")
         _loaded_seal = load_key(_seal_raw)  # None if unset/empty; hard-fails a too-short secret
         self._seal_key = _loaded_seal if _loaded_seal is not None else self._key
+        # Whether a *distinct* seal key is in force is decided by the secret, not ``key_id``: two
+        # different secrets that collide on the 8-hex key_id must still count as a split (comparing
+        # ``.id`` would silently downgrade them to single-key and mis-scope the seal keyring). A
+        # collision between the row and seal keys is a config error, surfaced loudly at startup —
+        # left unchecked it would shadow one key by the other and flag its objects as TAMPERED.
+        if (
+            self._key is not None
+            and self._seal_key is not None
+            and self._key.id == self._seal_key.id
+            and not hmac.compare_digest(self._key.secret, self._seal_key.secret)
+        ):
+            raise ValueError(
+                f"the audit row key and seal key share key_id {self._key.id!r} but have different "
+                "secrets; indexed by key_id they collide, one shadowing the other. Change one "
+                "of FIRM_AUDIT_KEY / FIRM_AUDIT_SEAL_KEY so their key_ids differ."
+            )
         self._seal_key_split = (
             self._key is not None
             and self._seal_key is not None
-            and self._seal_key.id != self._key.id
+            and not hmac.compare_digest(self._seal_key.secret, self._key.secret)
         )
 
         # Sealing config (Layer 2). ``grace`` must exceed the longest audit-recording transaction
