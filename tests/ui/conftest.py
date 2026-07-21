@@ -172,7 +172,10 @@ class Seeder:
         actor_label: str | None = None,
         correlation_id: str | None = None,
         data: str | None = None,
+        row_mac: str | None = None,
     ) -> int:
+        """``row_mac`` left None mimics a legacy/pre-key row (renders "unprotected"); pass hex to
+        mimic a signed row (renders sealed/unsealed depending on the seal range)."""
         with self.engine.begin() as conn:
             return conn.execute(
                 insert(audit_schema.audit_events).values(
@@ -185,6 +188,7 @@ class Seeder:
                     actor_label=actor_label,
                     correlation_id=correlation_id,
                     data=data,
+                    row_mac=row_mac,
                     created_at=now_utc(),
                 )
             ).inserted_primary_key[0]

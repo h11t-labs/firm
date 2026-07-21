@@ -14,6 +14,7 @@ unit-tested without a database; the presentation (prose, links, colours) stays i
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -65,6 +66,9 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         "correlation_id": row.correlation_id,
         "data": load_json(row.data),
         "created_at": row.created_at,
+        # Layer-1 signature — present once a key is configured, NULL on legacy/pre-key rows. Read
+        # by :func:`row_status` to tell "sealed/signed" apart from "unprotected".
+        "row_mac": row.row_mac,
     }
 
 
@@ -150,7 +154,76 @@ def audit_search(
 
 
 def audit_detail(conn: Connection, event_id: int) -> dict[str, Any] | None:
-    return events.get(conn, event_id)
+    event = events.get(conn, event_id)
+    if event is None:
+        return None
+    # ``events.get`` maps the display columns but not ``row_mac``; add it here (single-row, cheap)
+    # so :func:`row_status` can classify the detail page without reaching back into firm-audit.
+    event["row_mac"] = conn.execute(
+        select(_audits.c.row_mac).where(_audits.c.id == event_id)
+    ).scalar_one_or_none()
+    return event
+
+
+# -- per-row tamper-evidence status ------------------------------------------------------------
+# The integrity *panel* (above) reports the deployment-wide verdict; this pair reports the status
+# of one audit row for the events table / detail page, so a row reads as sealed / signed-not-sealed
+# / unprotected / tampered at a glance. :func:`row_integrity_context` gathers the two cheap signals
+# once per page; :func:`row_status` is pure over a single row + that context, so the priority table
+# is unit-testable without a database.
+
+
+def _tampered_row_ids(raw: str | None) -> set[int]:
+    """The integer row ids the latest verify run flagged as tampered, from its
+    ``affected_identifiers`` JSON. Parses defensively — malformed/absent data yields an empty set,
+    never an exception (booleans are excluded even though ``bool`` is an ``int`` subclass)."""
+    if not raw:
+        return set()
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError):
+        return set()
+    if not isinstance(items, list):
+        return set()
+    ids: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict) or item.get("verdict") != "tampered":
+            continue
+        id_ = item.get("id")
+        if isinstance(id_, int) and not isinstance(id_, bool):
+            ids.add(id_)
+    return ids
+
+
+def row_integrity_context(conn: Connection) -> dict[str, Any]:
+    """The signals :func:`row_status` needs, gathered once per page: whether tamper-evidence is in
+    use at all (``active`` — any seal exists or a verify run has happened), the newest sealed
+    ``to_id`` (``max_sealed_to_id``, 0 when nothing is sealed), and the set of row ids the latest
+    verify flagged tampered (``tampered_ids``). When ``active`` is False the table adds no status
+    column at all, so a plain audit log looks exactly as it did before tamper-evidence existed."""
+    max_to = conn.execute(select(func.max(_seals.c.to_id))).scalar()
+    status = verify_status_row(conn)
+    return {
+        "active": max_to is not None or status is not None,
+        "max_sealed_to_id": max_to or 0,
+        "tampered_ids": _tampered_row_ids(status["affected_identifiers"]) if status else set(),
+    }
+
+
+def row_status(row: dict[str, Any], ctx: dict[str, Any]) -> str | None:
+    """One row's tamper-evidence status, or ``None`` when tamper-evidence is not in use (so the
+    caller renders nothing). Priority, top wins: ``tampered`` (verify flagged this row id) >
+    ``unprotected`` (no signature — a legacy pre-key row) > ``unsealed`` (signed but past the newest
+    seal — the grace-window tail) > ``sealed`` (signed and within a seal)."""
+    if not ctx["active"]:
+        return None
+    if row["id"] in ctx["tampered_ids"]:
+        return "tampered"
+    if row["row_mac"] is None:
+        return "unprotected"
+    if row["id"] > ctx["max_sealed_to_id"]:
+        return "unsealed"
+    return "sealed"
 
 
 # -- integrity (tamper-evidence) panel ---------------------------------------------------------

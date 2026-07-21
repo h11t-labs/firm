@@ -23,7 +23,7 @@ from markupsafe import Markup, escape
 
 from firm._core.clock import now_utc
 
-from .audit_queries import IntegrityState
+from .audit_queries import IntegrityState, row_status
 from .queries import STATES
 
 _PART_NAV = {
@@ -878,7 +878,7 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         "cause_lines": [],
         "headline": "",
         "meaning": "",
-        "affected": None,
+        "findings": [],
         "next_step": None,
     }
 
@@ -912,18 +912,14 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
             "Sealed audit data no longer matches its signatures — it was modified, deleted, or "
             "inserted after being recorded."
         )
-        cells = _affected_cells(s["affected_identifiers"])
-        # The specific what/why: each finding's own message, itemized (deduped, order-preserved).
-        # Rendered through the same ``integrity-items`` list the WARNING/ERROR strips use. Absent
-        # when the status row carries no per-finding messages (legacy / degraded data) — the generic
-        # ``meaning`` above then stands alone as the fallback.
-        view["cause_lines"] = list(dict.fromkeys(c["message"] for c in cells if c["message"]))
-        # Which records: each affected identifier as a chip, linking into the audit table when the
-        # verifier recorded a row id.
-        if cells:
-            view["affected"] = Markup(" ").join(
-                Markup('<span class="integrity-chip">{}</span>').format(c["chip"]) for c in cells
-            )
+        # One line per finding: the affected record (a chip linking into /audit/<id> when the
+        # verifier named a row id) next to its plain-language reason. A single list, so nothing is
+        # said twice — no separate pill row echoing the same labels. Absent per-finding data leaves
+        # the generic ``meaning`` above to stand alone.
+        view["findings"] = [
+            {"ref": c["chip"], "why": c["message"]}
+            for c in _affected_cells(s["affected_identifiers"])
+        ]
         # What to do: verify it yourself, and don't disturb the evidence.
         view["next_step"] = Markup(
             '<span class="integrity-verify">Verify it yourself: '
@@ -966,6 +962,39 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
     return view
 
 
+# -- per-row tamper-evidence status ------------------------------------------------------------
+# :func:`audit_queries.row_status` decides a row's status token; this maps it to the small tinted
+# shield the events table / detail page shows. Icon shape + tooltip word both carry the meaning, so
+# it never rides on colour alone. Tone classes reuse the table's --ok/--warn/--danger/--text-3.
+_ROW_STATUS = {
+    #  token          icon            tone      word
+    "sealed": ("shield-check", "ok", "Sealed & verified"),
+    "unsealed": ("shield-alert", "warn", "Signed, not yet sealed"),
+    "unprotected": ("shield", "muted", "Unprotected — recorded before tamper-evidence"),
+    "tampered": ("shield-x", "danger", "Tampered — failed verification"),
+}
+# Shorter words for the detail page's integrity cell, where the icon already sits beside a label.
+_ROW_STATUS_WORD = {
+    "sealed": "Sealed & verified",
+    "unsealed": "Signed, not yet sealed",
+    "unprotected": "Unprotected",
+    "tampered": "Tampered",
+}
+
+
+def _row_status_icon(status: str) -> Markup:
+    """The bare tinted shield for a table cell — its ``title`` carries the verdict word."""
+    icon, tone, tooltip = _ROW_STATUS[status]
+    return Markup('<span class="row-status {}" title="{}">{}</span>').format(
+        tone, tooltip, Markup(_ICONS[icon])
+    )
+
+
+def _row_status_cell(status: str) -> Markup:
+    """The detail page's integrity value: the tinted shield followed by its word."""
+    return Markup("{} {}").format(_row_status_icon(status), _ROW_STATUS_WORD[status])
+
+
 def audit_page(
     parts: list[str],
     stats: dict[str, Any],
@@ -973,6 +1002,7 @@ def audit_page(
     filters: dict[str, str],
     *,
     integrity: IntegrityState | None = None,
+    row_ctx: dict[str, Any] | None = None,
     total: int = 0,
     page: int = 1,
     per_page: int = AUDIT_DEFAULT_PER_PAGE,
@@ -987,11 +1017,17 @@ def audit_page(
         _card("actions", _num(stats["actions"])),
         _card("last event", _reltime(stats["last_event_at"])),
     ]
+    # The per-row status column only appears when tamper-evidence is actually in use; a plain
+    # audit log adds no column, no icon (audit_queries.row_status returns None when inactive).
+    integrity_active = bool(row_ctx and row_ctx["active"])
     for r in rows:
         r["subject_display"] = _ref_display(r["subject_type"], r["subject_id"], r["subject_label"])
         r["subject_filter"] = _ref_filter(r["subject_type"], r["subject_id"])
         r["actor_display"] = _ref_display(r["actor_type"], r["actor_id"], r["actor_label"])
         r["actor_filter"] = _ref_filter(r["actor_type"], r["actor_id"])
+        if row_ctx is not None and row_ctx["active"]:
+            status = row_status(r, row_ctx)  # never None here (row_ctx active)
+            r["status_icon"] = _row_status_icon(status) if status else Markup("")
     return _render(
         "audit.html",
         title="Audit",
@@ -1001,6 +1037,7 @@ def audit_page(
         request_path=request_path,
         theme=theme,
         integrity_view=_integrity_view(integrity),
+        integrity_active=integrity_active,
         cards=cards,
         rows=rows,
         filters=filters,
@@ -1021,7 +1058,12 @@ def audit_page(
 
 
 def audit_detail_page(
-    parts: list[str], event: dict[str, Any], *, theme: str = "system", request_path: str = ""
+    parts: list[str],
+    event: dict[str, Any],
+    *,
+    row_ctx: dict[str, Any] | None = None,
+    theme: str = "system",
+    request_path: str = "",
 ) -> str:
     subject = _ref_display(event["subject_type"], event["subject_id"], event["subject_label"])
     actor = _ref_display(event["actor_type"], event["actor_id"], event["actor_label"])
@@ -1032,6 +1074,11 @@ def audit_detail_page(
         ("correlation id", event["correlation_id"] if event["correlation_id"] else _dash()),
         ("recorded", _when(event["created_at"])),
     ]
+    # The integrity cell only appears when tamper-evidence is in use (same gate as the table).
+    if row_ctx is not None and row_ctx["active"]:
+        status = row_status(event, row_ctx)
+        if status is not None:
+            cells.append(("integrity", _row_status_cell(status)))
     return _render(
         "audit_detail.html",
         title=f"Event #{event['id']}",

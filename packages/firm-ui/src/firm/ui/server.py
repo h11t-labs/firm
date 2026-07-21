@@ -525,6 +525,7 @@ class Handler(BaseHTTPRequestHandler):
                     "correlation_id": correlation_id or "",
                 },
                 integrity=self._integrity(conn),
+                row_ctx=audit_queries.row_integrity_context(conn),
                 total=total,
                 page=page,
                 per_page=per_page_n,
@@ -541,12 +542,17 @@ class Handler(BaseHTTPRequestHandler):
         assert dash.audit is not None
         with dash.audit.connect() as conn:
             event = audit_queries.audit_detail(conn, event_id)
+            row_ctx = audit_queries.row_integrity_context(conn) if event is not None else None
         if event is None:
             self._not_found()
         else:
             self._html(
                 render.audit_detail_page(
-                    dash.parts, event, theme=self._theme(), request_path=self.path
+                    dash.parts,
+                    event,
+                    row_ctx=row_ctx,
+                    theme=self._theme(),
+                    request_path=self.path,
                 )
             )
 

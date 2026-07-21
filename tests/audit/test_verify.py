@@ -795,9 +795,9 @@ def test_status_row_records_affected_identifiers_on_tampering(db_url: str) -> No
         assert isinstance(items, list) and items
         finding = next(i for i in items if i["kind"] == "row")
         assert finding["id"] == 1  # links the chip into /audit/1
-        assert finding["label"] == "row 1"
+        assert finding["label"].startswith("#1 ")  # "#<id> <action>", a meaningful identity
         assert finding["verdict"] == "tampered"
-        assert "does not recompute" in finding["message"]  # the real per-finding "what/why"
+        assert "modified after it was sealed" in finding["message"]  # plain-language what/why
     finally:
         audit.close()
 
@@ -821,7 +821,7 @@ def test_on_finding_fires_critical_alert_on_tampering(db_url: str) -> None:
     assert alert.severity == "critical"
     assert alert.outcome == "tampered"
     assert alert.tampered_count >= 1
-    assert any("row 1" in a for a in alert.affected)
+    assert any(a.startswith("#1 ") for a in alert.affected)
 
 
 def test_on_finding_silent_on_ok_verify(db_url: str) -> None:
@@ -879,7 +879,7 @@ def test_default_sink_writes_one_stderr_line_on_tampering(db_url: str, capsys) -
     lines = [ln for ln in err.splitlines() if ln.startswith("firm-audit:")]
     assert len(lines) == 1  # exactly one high-severity line
     assert "CRITICAL tamper detected" in lines[0]
-    assert "row 1" in lines[0]
+    assert "#1 " in lines[0]
 
 
 def test_failing_on_finding_callback_routes_to_on_error(db_url: str) -> None:

@@ -256,10 +256,11 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
     # message) and a seal-level finding (a message, no link).
     affected = (
         "["
-        '{"kind": "row", "label": "row 42", "id": 42, '
-        '"message": "row 42 row_mac does not recompute (modified)", "verdict": "tampered"},'
-        '{"kind": "seal", "label": "seal 12", '
-        '"message": "seal seq 12 range no longer matches its rows_mac/row_count", '
+        '{"kind": "row", "label": "#42 invoice.paid", "id": 42, '
+        '"message": "modified after it was sealed (signature no longer matches)", '
+        '"verdict": "tampered"},'
+        '{"kind": "seal", "label": "sealed range #12", '
+        '"message": "records deleted, inserted, or swapped in this sealed range", '
         '"verdict": "tampered"}'
         "]"
     )
@@ -271,13 +272,14 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
     assert "TAMPERED" in body
     assert "2 findings" in body
     assert "no longer matches its signatures" in body  # plain-language framing (the lead)
-    # The real per-finding "what/why" is surfaced, not just the generic sentence.
-    assert "row 42 row_mac does not recompute (modified)" in body
-    assert "seal seq 12 range no longer matches its rows_mac/row_count" in body
-    assert 'class="integrity-items"' in body
-    assert "Affected" in body
+    # One findings list: each affected record's identity + its plain-language reason, no separate
+    # pill row echoing the same labels.
+    assert 'class="integrity-findings"' in body
+    assert "#42 invoice.paid" in body  # the record's real identity, not "row 42"
+    assert "modified after it was sealed (signature no longer matches)" in body
+    assert "sealed range #12" in body
     assert 'href="/audit/42"' in body  # the row-level finding links into the audit table
-    assert 'class="integrity-chip"' in body
+    assert 'class="finding-ref"' in body
     assert "firm-audit verify --full" in body  # the verify command
     assert render._TAMPER_DOCS_URL in body  # runbook link
 
@@ -311,7 +313,7 @@ def test_mobile_wrap_contract_is_present(runtime) -> None:
     affected = '[{"kind": "seal", "label": "#12", "id": 4041}]'
     tampered = _status(outcome="tampered", tampered_count=1, affected_identifiers=affected)
     tampered_body = _audit_html(_state(tampered))
-    assert 'class="integrity-affected"' in tampered_body
+    assert 'class="integrity-findings"' in tampered_body
     assert 'class="integrity-next' in tampered_body
 
 

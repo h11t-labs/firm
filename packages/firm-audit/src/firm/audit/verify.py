@@ -382,11 +382,12 @@ def default_on_finding(alert: IntegrityAlert) -> None:
 def _affected_json(findings: Sequence[Finding]) -> str | None:
     """Serialize the tampered findings the dashboard links from into the ``affected_identifiers``
     JSON list — ``[{"kind","label","id"?,"message","verdict"}, …]`` — which ``_affected_cells`` (in
-    :mod:`firm.ui.render`) parses into linked chips + the per-finding "what/why". ``kind`` is the
-    label's leading token (``"row"``, ``"seal"``) so the chip carries a category; ``id`` (when
-    present) is the numeric audit-event id the chip links to. Bounded to :data:`_MAX_AFFECTED`; a
-    longer run appends one ``kind="more"`` marker naming the overflow. ``None`` when nothing
-    tampered, so a clean run leaves the column NULL exactly as before."""
+    :mod:`firm.ui.render`) parses into linked chips + the per-finding "what/why". ``kind`` is
+    ``"row"`` for a row-level finding (it carries a numeric ``id`` the chip links to) or ``"seal"``
+    for a seal/chain-level one; the ``label`` is the display identity (e.g. ``"#3 invoice.paid"`` /
+    ``"sealed range #1"``). Bounded to :data:`_MAX_AFFECTED`; a longer run appends one
+    ``kind="more"`` marker naming the overflow. ``None`` when nothing tampered, so a clean run
+    leaves the column NULL exactly as before."""
     tampered = [f for f in findings if f.verdict == "tampered" and f.identifier]
     if not tampered:
         return None
@@ -394,7 +395,7 @@ def _affected_json(findings: Sequence[Finding]) -> str | None:
     for f in tampered[:_MAX_AFFECTED]:
         assert f.identifier is not None  # guarded by the comprehension above
         item: dict[str, Any] = {
-            "kind": f.identifier.split()[0],
+            "kind": "row" if f.id is not None else "seal",
             "label": f.identifier,
             "message": f.message,
             "verdict": f.verdict,
@@ -996,9 +997,9 @@ class Verifier:
             findings.append(
                 Finding(
                     "tampered",
-                    f"seal seq {seal.seq} range ({seal.from_id}, {seal.to_id}] no longer "
-                    "matches its rows_mac/row_count (rows deleted, inserted, or swapped)",
-                    f"seal {seal.seq} ids {seal.from_id + 1}..{seal.to_id}",
+                    "records deleted, inserted, or swapped in this sealed range "
+                    f"(rows {seal.from_id + 1}-{seal.to_id})",
+                    f"sealed range #{seal.seq}",
                 )
             )
             counters.tampered += 1
@@ -1075,9 +1076,8 @@ class Verifier:
             findings.append(
                 Finding(
                     "tampered",
-                    f"row {row.id} has no row_mac but is after the activation "
-                    "boundary (forged insert, or an instance writing without the key)",
-                    f"row {row.id}",
+                    "unsigned record inserted after sealing (no signature, forged insert)",
+                    f"#{row.id} {row.action}",
                     id=row.id,
                 )
             )
@@ -1086,8 +1086,8 @@ class Verifier:
             findings.append(
                 Finding(
                     "tampered",
-                    f"row {row.id} row_mac does not recompute (modified)",
-                    f"row {row.id}",
+                    "modified after it was sealed (signature no longer matches its contents)",
+                    f"#{row.id} {row.action}",
                     id=row.id,
                 )
             )

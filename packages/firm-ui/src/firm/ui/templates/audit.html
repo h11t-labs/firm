@@ -19,11 +19,12 @@
 <Section title="Events"><PageSize current={{ per_page }} options={{ pagesize }} /></Section>
 {% if rows %}
 <div class="tw"><table><tr>
+{% if integrity_active %}<th class="row-status-th" title="Tamper-evidence">{{ icons.shield }}</th>{% endif %}
 {% for col in columns %}<SortTh label={{ col.label }} url={{ col.url }} active={{ col.active }} arrow={{ col.arrow }} />{% endfor %}<th>Data</th>
 </tr>
 {% for r in rows %}
 {% set payload = r.data | json_preview %}
-<tr><td class="mono"><a href="/audit/{{ r.id }}">#{{ r.id }}</a></td>
+<tr>{% if integrity_active %}<td class="row-status-cell">{{ r.status_icon }}</td>{% endif %}<td class="mono"><a href="/audit/{{ r.id }}">#{{ r.id }}</a></td>
 <td class="secondary"><When value={{ r.created_at }} /></td>
 <td class="mono"><a href="{{ audit_href({'action': r.action}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.action }}</a></td>
 <td class="mono">{% if r.subject_display %}<a href="{{ audit_href({'subject': r.subject_filter}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.subject_display }}</a>{% else %}<Dash />{% endif %}</td>
