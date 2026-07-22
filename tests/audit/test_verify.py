@@ -178,14 +178,16 @@ def test_null_mac_row_above_activation_is_tampered(db_url: str) -> None:
         audit.close()
 
 
-def test_pre_activation_straggler_without_key_is_unprotected(db_url: str) -> None:
+def test_interleaved_pre_activation_straggler_leaves_only_earlier_keyed_row_unsealed(
+    db_url: str,
+) -> None:
     audit = _make(db_url, activate=False)
     try:
         audit.record("keyed.a")
         with transaction(audit.engine) as conn:
             conn.execute(_audits.insert().values(action="straggler", created_at=now_utc()))
         audit.record("keyed.b")
-        assert audit.sealer.run_once() == 0
+        assert audit.sealer.run_once() == 1
         report = audit.verify(full=True)
         assert report.outcome == "ok"
         assert report.unprotected_count == 1

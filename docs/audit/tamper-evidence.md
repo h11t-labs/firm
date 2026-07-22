@@ -68,8 +68,9 @@ Any instance may run the loop — the unique `from_id` constraint arbitrates rac
 election is needed.
 
 The first sealer pass also writes one signed `kind="activation"` record. Its boundary is the
-highest event id already outside the grace window: rows at or below it are the legacy prefix and
-are never sealed; younger rows remain above it and are sealed on a later pass. Retention later
+highest NULL-MAC event id already outside the grace window (or zero when there are none):
+pre-key rows at or below it are the legacy prefix and are never sealed, while every keyed row is
+above the boundary and is sealed, including keyed rows written before activation. Retention later
 records the pruned prefix with signed
 `kind="floor"` advances. Activation, seals, and floors use the seal key.
 
@@ -104,8 +105,8 @@ is never atomic across a fleet.
    is harmless — it is not yet an alarm.
 2. **Phase 2 — enable sealing**, once every writer carries the key: `background_sealing=True` (or
    run `firm-audit seal`). The first sealer pass writes an explicit signed **activation marker**
-   whose boundary is the highest pre-existing row id outside the grace window. From then on, a row
-   *above* the boundary
+   whose boundary is the highest pre-key (NULL-MAC) row id outside the grace window, or zero when
+   there are none. From then on, a row *above* the boundary
    with no MAC is `TAMPERED` (a configured writer never produces one), while rows at or below it
    are the legacy `UNPROTECTED` set.
 
@@ -123,11 +124,13 @@ is settled well before its range is eligible. The window also absorbs ordinary s
 clock skew between instances.
 
 If you deliberately pass `conn=` (or call module-level `record(conn, ...)`) for same-transaction
-atomicity, **`grace` must exceed that caller transaction plus clock skew**. There is no late-commit
+atomicity, **`grace` must exceed the longest audit-recording transaction plus expected
+inter-instance clock skew**. There is no late-commit
 exception: a row that appears inside an already sealed range changes the exact signed membership
-and is `TAMPERED`, even when its row MAC is valid. Each range is exactly the rows its
-`row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification. `AuditLog`
-emits a startup hint restating this when sealing is enabled.
+and is permanently `TAMPERED`, even when its row MAC is valid. It is stranded below the seal high
+water mark: no later sealer pass and no `verify --full` run can self-heal it. Each range is exactly
+the rows its `row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification.
+`AuditLog` emits a startup hint restating this when sealing is enabled.
 
 ### Long jobs: record on their own transaction
 
@@ -306,10 +309,12 @@ attacker-controlled content cannot freeze the dashboard's last status at `OK`. A
 `key_id` becomes `VerifyError` only when no tampered finding exists; otherwise tampering takes
 precedence and `on_finding` still fires.
 
-> **Nullable-row caveat.** A NULL `row_mac` is `UNPROTECTED` at or below the activation boundary
-> (and everywhere in a Layer-1-only deployment). An attacker who nulls a MAC there erases Layer-1
-> evidence. Sealing confines that hole to the explicit legacy prefix: above the boundary, NULL is
-> `TAMPERED`.
+> **Activation-boundary caveat.** The boundary is the highest settled NULL-MAC row id, not the
+> highest id overall. This keeps every keyed row — including rows written before activation —
+> above the boundary and eligible for sealing. A NULL `row_mac` at or below the boundary remains
+> `UNPROTECTED`; above it, NULL is `TAMPERED`. If unkeyed and keyed writers interleave during
+> rollout, a keyed row whose id falls below a later straggler NULL-MAC row can still land in the
+> unprotected prefix. Phase 2 must therefore start only after every writer carries the row key.
 
 ### Exit codes
 
@@ -323,10 +328,11 @@ precedence and `on_finding` still fires.
   sealer pass; floor writes are a hard pre-prune gate.
 
 The evidence scan is read-only and runs anywhere the key is available; persisting
-`firm_audit_verify_status` requires a write grant. It opens the **snapshot transaction before
-reading the anchor** (`REPEATABLE READ` on Postgres/MySQL, a WAL snapshot on SQLite), so a
-concurrent legitimate prune committing between its reads cannot make it compare stale seals to
-already-pruned rows and report a false `TAMPERED`.
+`firm_audit_verify_status` requires a write grant. Inside the snapshot transaction it reads the
+seal side table first, which actually acquires the `REPEATABLE READ` snapshot on Postgres/MySQL
+(and the WAL snapshot on SQLite), and only then reads the external anchor. A concurrent legitimate
+prune therefore cannot make verification compare an anchor view with a not-yet-acquired database
+snapshot and report a false `TAMPERED`.
 
 ### Stateless partial coverage
 

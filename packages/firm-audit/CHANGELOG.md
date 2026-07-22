@@ -33,8 +33,12 @@ pre-1.0 (breaking changes bump the minor version).
 - Unknown Layer-2 signers are tampered findings, including row-key-signed forgeries. An unknown row
   key raises `VerifyError` only when it is the sole obstacle; co-occurring tampering still returns
   `tampered` and fires `on_finding`.
-- Activation uses the same grace cutoff as sealing, so in-flight rows are not stranded below the
-  boundary. Verification opens its database snapshot before reading the anchor.
+- Activation uses the highest settled NULL-MAC row as its boundary, so pre-activation keyed rows
+  remain sealable. Verification acquires its database snapshot with the first side-table query,
+  then reads the anchor; retention uses the same ordering.
+- Anchor scans retain the newest bounded window, keeping live seals in the completeness check.
+  A wiped no-anchor side table now produces a tampered verdict when prior full coverage proves
+  activation, or a forced-nonzero warning when the settled pre-activation state is ambiguous.
 - Retention refuses when an old seal key is unavailable, or when a key is configured but no
   activation exists. Aligned pruning retries serialization/deadlock failures and fsyncs the FLOOR
   anchor append before the database commit.

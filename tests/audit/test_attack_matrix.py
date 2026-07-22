@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select, update
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
-from firm.audit import AuditLog, integrity, schema
+from firm.audit import AuditLog, integrity, schema, verify
 from firm.audit.verify import IntegrityAlert, VerifyError
 
 _SINGLE_KEY = "attack-single-key-current-0123456789abcdef"
@@ -85,6 +85,8 @@ def _mutation_applies(lifecycle: Lifecycle, mutation: str) -> bool:
         "forge-activation",
     }:
         return True
+    if mutation == "delete-all-seal-records":
+        return lifecycle.stage != "fresh" and not lifecycle.anchor
     if mutation in _ROW_MUTATIONS or mutation in _SEAL_MUTATIONS:
         return lifecycle.stage != "fresh"
     if mutation in _FLOOR_MUTATIONS:
@@ -104,6 +106,7 @@ def _attack_params() -> list[pytest.ParameterSet]:
         *_ACTIVATION_MUTATIONS,
         *_ANCHOR_MUTATIONS,
         "drop-seals-table",
+        "delete-all-seal-records",
     )
     return [
         pytest.param(
@@ -430,6 +433,12 @@ def _apply_mutation(built: BuiltLog, mutation: str) -> tuple[int, ...]:
         return _mutate_activation(built, mutation)
     if mutation in _ANCHOR_MUTATIONS:
         return _mutate_anchor(built, mutation)
+    if mutation == "delete-all-seal-records":
+        victim = built.target_row_ids[0]
+        with transaction(built.audit.engine) as conn:
+            conn.execute(delete(_audits).where(_audits.c.id == victim))
+            conn.execute(delete(_seals))
+        return built.target_row_ids
     with transaction(built.audit.engine) as conn:
         conn.exec_driver_sql("DROP TABLE firm_audit_seals")
     return ()
@@ -505,6 +514,8 @@ def test_attack_matrix(
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, lifecycle)
     try:
+        if mutation == "delete-all-seal-records":
+            assert built.audit.verify(full=True).outcome == "ok"
         protected_ids = _apply_mutation(built, mutation)
         _assert_verify_outcome(built, expected)
         _assert_retention_does_not_launder(built, protected_ids, mutation)
@@ -600,6 +611,64 @@ def test_corrupted_non_final_anchor_line_is_tampered(
     try:
         _mutate_anchor(built, "corrupt-anchor-line")
         assert built.audit.verify(full=True).outcome == "tampered"
+    finally:
+        built.audit.close()
+
+
+@pytest.mark.parametrize(
+    "delete_newest,expected",
+    [pytest.param(False, "warning", id="clean"), pytest.param(True, "tampered", id="truncated")],
+)
+def test_anchor_cap_keeps_newest_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delete_newest: bool,
+    expected: str,
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
+    try:
+        _record_old(built.audit, "beyond-cap", 4)
+        _seal_old(built.audit)
+        monkeypatch.setattr(verify, "_MAX_ANCHOR_ITEMS", 3)
+
+        if delete_newest:
+            newest = _range_seals(built.audit)[-1]
+            with transaction(built.audit.engine) as conn:
+                conn.execute(
+                    delete(_audits).where(
+                        _audits.c.id > newest.from_id, _audits.c.id <= newest.to_id
+                    )
+                )
+                conn.execute(delete(_seals).where(_seals.c.id == newest.id))
+
+        assert built.audit.verify(full=True).outcome == expected
+    finally:
+        built.audit.close()
+
+
+def test_verify_acquires_database_snapshot_before_reading_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
+    order: list[str] = []
+    original_load = verify.load_seal_records
+    original_read = verify._read_anchor
+
+    def load_first(conn):
+        order.append("database")
+        return original_load(conn)
+
+    def read_second(path):
+        order.append("anchor")
+        return original_read(path)
+
+    try:
+        with (
+            patch("firm.audit.verify.load_seal_records", load_first),
+            patch("firm.audit.verify._read_anchor", read_second),
+        ):
+            assert built.audit.verify(full=True).outcome == "ok"
+        assert order[:2] == ["database", "anchor"]
     finally:
         built.audit.close()
 
@@ -796,6 +865,39 @@ def test_null_row_mac_is_unprotected_at_boundary_but_tampered_in_tail(tmp_path: 
         audit.close()
 
 
+def test_activation_on_populated_keyed_table_seals_existing_rows_and_detects_deletion(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'activation-populated-keyed.db'}"
+    audit = AuditLog(database_url=database_url, mac_key=_SINGLE_KEY, grace=0.0)
+    try:
+        row_ids = _record_old(audit, "before-activation", 3)
+
+        assert audit.sealer.run_once() == 3
+        activation = next(record for record in _records(audit) if record.kind == "activation")
+        first_seal = _range_seals(audit)[0]
+        assert activation.to_id == 0
+        assert first_seal.from_id == 0
+        assert first_seal.to_id == row_ids[-1]
+        assert audit.verify(full=True).outcome == "ok"
+
+        with transaction(audit.engine) as conn:
+            conn.execute(delete(_audits).where(_audits.c.id == row_ids[0]))
+        assert audit.verify(full=True).outcome == "tampered"
+    finally:
+        audit.close()
+
+
+def test_genuinely_never_sealed_keyed_log_verifies_ok(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'never-sealed-keyed.db'}"
+    audit = AuditLog(database_url=database_url, mac_key=_SINGLE_KEY, grace=60.0)
+    try:
+        audit.record("pre-activation")
+        assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+
 def test_activation_boundary_uses_grace_cutoff_and_young_row_is_later_sealed(
     tmp_path: Path,
 ) -> None:
@@ -803,8 +905,8 @@ def test_activation_boundary_uses_grace_cutoff_and_young_row_is_later_sealed(
     audit = AuditLog(database_url=database_url, mac_key=_SINGLE_KEY, grace=3600.0)
     try:
         old = now_utc() - timedelta(hours=2)
-        with patch("firm.audit.events.now_utc", lambda: old):
-            audit.record("old")
+        with transaction(audit.engine) as conn:
+            conn.execute(_audits.insert().values(action="old-legacy", created_at=old))
         audit.record("young")
         assert audit.sealer.run_once() == 0
         activation = next(record for record in _records(audit) if record.kind == "activation")

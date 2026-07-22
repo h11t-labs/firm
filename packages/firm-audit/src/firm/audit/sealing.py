@@ -5,10 +5,15 @@ that gap with independent seals over settled id ranges. Each seal signs only its
 ``(id, row_mac)`` pairs inside it; ordering comes from id-contiguity and deletion memory comes from
 the optional append-only anchor, not from a predecessor chain.
 
-The first sealer pass writes one signed ``activation`` record whose boundary is the highest event
-id already outside the grace window. Younger rows stay above the boundary and are sealed later.
-Racing sealers choose the same ``from_id``; the unique index on that coordinate is the portable
-arbiter.
+The first sealer pass writes one signed ``activation`` record whose boundary is the highest
+NULL-MAC event id already outside the grace window. Keyed rows stay above the boundary and are
+sealed, including rows written before activation. Racing sealers choose the same ``from_id``; the
+unique index on that coordinate is the portable arbiter.
+
+Grace must exceed the longest audit-recording transaction plus expected inter-instance clock
+skew. If clock skew lets a young row be skipped while a higher id is sealed, that row is stranded
+inside an already-sealed range: verification reports permanent TAMPERED, and neither a later
+sealer pass nor ``verify(full=True)`` can self-heal it.
 """
 
 from __future__ import annotations
@@ -166,7 +171,9 @@ class Sealer:
             cutoff = at - timedelta(seconds=self.audit.grace)
             boundary = (
                 conn.execute(
-                    select(func.max(_audits.c.id)).where(_audits.c.created_at <= cutoff)
+                    select(func.max(_audits.c.id)).where(
+                        _audits.c.row_mac.is_(None), _audits.c.created_at <= cutoff
+                    )
                 ).scalar_one()
                 or 0
             )

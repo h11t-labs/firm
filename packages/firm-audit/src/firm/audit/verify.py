@@ -23,9 +23,10 @@ import os
 import sys
 import time
 from bisect import bisect_right
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
@@ -483,20 +484,16 @@ def _read_anchor(path: str) -> AnchorData:
 
 
 def _parse_anchor_stream(lines: Iterator[str]) -> AnchorData:
-    """Parse a streamed anchor while retaining only bounded evidence."""
-    events: list[AnchorEvent] = []
-    malformed: list[MalformedAnchorLine] = []
+    """Parse a streamed anchor while retaining only the newest bounded evidence."""
+    retained: deque[AnchorEvent | MalformedAnchorLine] = deque(maxlen=_MAX_ANCHOR_ITEMS)
     pending_malformed: MalformedAnchorLine | None = None
     capped = False
 
     def retain(item: AnchorEvent | MalformedAnchorLine) -> None:
         nonlocal capped
-        if len(events) + len(malformed) >= _MAX_ANCHOR_ITEMS:
+        if len(retained) == _MAX_ANCHOR_ITEMS:
             capped = True
-        elif isinstance(item, AnchorEvent):
-            events.append(item)
-        else:
-            malformed.append(item)
+        retained.append(item)
 
     for line_number, raw_line in enumerate(lines, start=1):
         line = raw_line.rstrip("\r\n")
@@ -525,7 +522,9 @@ def _parse_anchor_stream(lines: Iterator[str]) -> AnchorData:
             pending_malformed = MalformedAnchorLine(
                 line_number, line, f"anchor line {line_number} is malformed"
             )
-    return AnchorData(True, tuple(events), tuple(malformed), pending_malformed, capped)
+    events = tuple(item for item in retained if isinstance(item, AnchorEvent))
+    malformed = tuple(item for item in retained if isinstance(item, MalformedAnchorLine))
+    return AnchorData(True, events, malformed, pending_malformed, capped)
 
 
 def _bounded_anchor_lines(handle: Any) -> Iterator[str]:
@@ -737,8 +736,10 @@ class Verifier:
         unresolved_rows: dict[int, str] = {}
 
         with snapshot_transaction(self.audit.engine) as conn:
-            anchor = _read_anchor(anchor_path) if anchor_path is not None else None
+            # The first SQL read acquires the PG/MySQL snapshot. Read the external anchor only
+            # afterward so both verify and retention compare it with an already-fixed DB view.
             records = load_seal_records(conn)
+            anchor = _read_anchor(anchor_path) if anchor_path is not None else None
             if records.capped:
                 findings.append(
                     Finding(
@@ -751,6 +752,9 @@ class Verifier:
             intact = self._check_records(records, keyring, seal_keyring, counters, findings)
             floor = self._resolve_floor(records, intact, anchor, counters, findings)
             boundary = self._resolve_activation(records, intact, anchor, counters, findings)
+            missing_activation_force_nonzero = self._check_missing_activation_guard(
+                conn, records, anchor, now, counters, findings
+            )
 
             self._check_pruned_region_empty(conn, floor, counters, findings)
             self._check_duplicates(conn, counters, findings)
@@ -795,7 +799,7 @@ class Verifier:
                 counters,
                 findings,
             )
-            newest_anchor_at, force_nonzero = self._check_anchor(
+            newest_anchor_at, anchor_force_nonzero = self._check_anchor(
                 anchor,
                 records,
                 intact,
@@ -821,7 +825,7 @@ class Verifier:
             tail_oldest=tail_oldest,
             newest_anchor_at=newest_anchor_at,
             anchor_configured=anchor_path is not None,
-            force_nonzero=force_nonzero,
+            force_nonzero=missing_activation_force_nonzero or anchor_force_nonzero,
         )
 
     def _check_records(
@@ -954,6 +958,72 @@ class Verifier:
                 )
                 counters.tampered += 1
         return marker.to_id
+
+    def _check_missing_activation_guard(
+        self,
+        conn: Connection,
+        records: Sequence[SealRecord],
+        anchor: AnchorData | None,
+        now: datetime,
+        counters: _Counters,
+        findings: list[Finding],
+    ) -> bool:
+        """Fail closed when an activated log's entire side table may have been wiped.
+
+        A fresh keyed log is legitimately record-free until its first sealer pass. Rows still
+        inside the grace window are therefore a clean pre-activation state. Once settled rows
+        exist, a prior full run that demonstrably covered surviving events distinguishes a wiped
+        activated log; without that history the state is ambiguous and warns with a forced
+        non-zero exit.
+        """
+        anchor_empty = anchor is None or not anchor.exists or not anchor.events
+        if self.audit._seal_key is None or records or not anchor_empty:
+            return False
+        event_state = conn.execute(
+            select(func.min(_audits.c.created_at).label("oldest"), func.count().label("count"))
+        ).one()
+        oldest = event_state.oldest
+        if oldest is None:
+            return False
+        prior = conn.execute(
+            select(
+                _status.c.ran_at,
+                _status.c.last_full_coverage_at,
+                _status.c.unsealed_tail_count,
+            ).where(_status.c.id == _STATUS_ID)
+        ).first()
+        previously_activated = (
+            prior is not None
+            and prior.last_full_coverage_at is not None
+            and prior.unsealed_tail_count < event_state.count
+            and oldest <= prior.ran_at
+        )
+        oldest_keyed = conn.execute(
+            select(func.min(_audits.c.created_at)).where(_audits.c.row_mac.is_not(None))
+        ).scalar_one()
+        if not previously_activated and (
+            oldest_keyed is None or oldest_keyed > now - timedelta(seconds=self.audit.grace)
+        ):
+            return False
+        verdict = "tampered" if previously_activated else "warning"
+        qualifier = (
+            " after a prior full run covered surviving events"
+            if previously_activated
+            else "; sealing may never have activated"
+        )
+        findings.append(
+            Finding(
+                verdict,
+                "audit events exist but the activation and all other tamper-evidence records "
+                f"are missing{qualifier}",
+                "activation",
+            )
+        )
+        if previously_activated:
+            counters.tampered += 1
+            return False
+        counters.warning += 1
+        return True
 
     def _check_contiguity(
         self,
@@ -1269,6 +1339,9 @@ class Verifier:
 
         anchor_events = _anchor_index(anchor)
         record_index: dict[tuple[str, int], list[SealRecord]] = {}
+        oldest_retained_at = (
+            min(event.at for event in anchor.events) if anchor.capped and anchor.events else None
+        )
         for record in records:
             record_index.setdefault((record.kind, record.to_id or 0), []).append(record)
 
@@ -1366,6 +1439,8 @@ class Verifier:
             if anchored:
                 continue
             assert record.sealed_at is not None
+            if oldest_retained_at is not None and record.sealed_at <= oldest_retained_at:
+                continue
             age = (now - record.sealed_at).total_seconds()
             if record.kind == "floor" or age > self.audit._anchor_max_age:
                 findings.append(

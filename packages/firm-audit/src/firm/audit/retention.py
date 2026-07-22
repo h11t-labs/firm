@@ -123,6 +123,7 @@ class Retention:
 
         deleted = 0
         with snapshot_transaction(self.audit.engine, write=True) as conn:
+            # Acquire the database snapshot before reading the external anchor, matching verify.
             records = load_seal_records(conn)
             if records.capped:
                 self._refuse_tampered(None)
