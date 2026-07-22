@@ -71,7 +71,7 @@ from .._core.database import snapshot_transaction
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
-from .verify import range_is_prunable
+from .verify import range_is_prunable, seal_is_intact
 
 if TYPE_CHECKING:
     from .log import AuditLog
@@ -198,20 +198,22 @@ class Retention:
         checkpoint = self._prune_aligned_atomic(seals, floor, max_sealed, cutoff)
         if checkpoint is None:
             return 0  # nothing new is both sealed, fully expired, and still verifying
-        deleted, seq, seal_mac, sealed_at = checkpoint
+        deleted, seq, to_id, seal_mac, sealed_at = checkpoint
         # Advance the external anchor to the checkpoint (best-effort, same sink as the sealer): the
         # checkpoint prunes the seals below it, so an anchor still naming a pruned seq would read as
         # tail truncation on the next ``verify --anchor``. Reusing the sealer's emit keeps the
         # on_error routing and the "a broken sink never fails the operation" contract (review 3A).
-        self.audit.sealer._emit_anchor(seq=seq, seal_mac=seal_mac, sealed_at=sealed_at)
+        # The checkpoint's ``to_id`` is its ``pruned_through`` (== the floor it records), so it
+        # never raises the anchor's max-coverage watermark past a still-present covering seal.
+        self.audit.sealer._emit_anchor(seq=seq, to_id=to_id, seal_mac=seal_mac, sealed_at=sealed_at)
         return deleted
 
     def _prune_aligned_atomic(
         self, seals, floor: int, boundary: int, cutoff
-    ) -> tuple[int, int, str, datetime] | None:
+    ) -> tuple[int, int, int, str, datetime] | None:
         """One transaction: re-verify the prunable boundary, delete through it, and write the
         checkpoint — the atomic core of :meth:`_run_aligned` (Bug #4). Returns
-        ``(deleted, seq, seal_mac, sealed_at)`` for the checkpoint written, or ``None`` when
+        ``(deleted, seq, to_id, seal_mac, sealed_at)`` for the checkpoint written, or ``None`` when
         nothing is prunable (no delete, no checkpoint).
 
         Iterates ranges in id order and stops at the first that either still holds a row newer than
@@ -226,6 +228,8 @@ class Retention:
         activation boundary (highest sealed id) the classifier uses to tell a legacy NULL-MAC row
         from a forged one, matching :meth:`~firm.audit.verify.Verifier._floor_and_boundary`."""
         covering = [s for s in seals if s.kind == "seal" and s.to_id > floor]
+        by_seq = {s.seq: s for s in seals}
+        has_checkpoint = any(s.kind == "checkpoint" for s in seals)
         keyring = self.audit.verifier.keyring
         seal_keyring = self.audit.verifier.seal_keyring
         seal_key = self.audit._seal_key
@@ -240,7 +244,15 @@ class Retention:
                 ).scalar()
                 if newest is not None and newest >= cutoff:
                     break  # a young range: nothing at or beyond it is prunable yet
-                if not range_is_prunable(conn, seal, boundary, keyring, seal_keyring):
+                # The seal's OWN integrity (its ``seal_mac`` + ``prev_mac`` chain linkage), then the
+                # rows under it. Checking the seal first (cheap, seals-table only) is what stops a
+                # tampered ``seal_mac`` from being laundered by a prune while its rows still
+                # reproduce ``rows_mac`` — :func:`range_is_prunable` alone never re-checks the seal
+                # (Bug A). Either failing is TAMPERED: refuse, so the checkpoint never advances past
+                # the evidence and every later run refuses it again until an operator investigates.
+                if not seal_is_intact(
+                    seal, by_seq.get(seal.seq - 1), has_checkpoint, seal_keyring
+                ) or not range_is_prunable(conn, seal, boundary, keyring, seal_keyring):
                     self._refuse_tampered(seal)
                     break  # refuse to prune tampered evidence; stop so the checkpoint can't skip it
                 pruned_through = seal.to_id
@@ -252,7 +264,7 @@ class Retention:
             seq, seal_mac, sealed_at = self._append_checkpoint(
                 conn, seal_key, from_id=floor, to_id=pruned_through
             )
-        return deleted, seq, seal_mac, sealed_at
+        return deleted, seq, pruned_through, seal_mac, sealed_at
 
     def _append_checkpoint(
         self, conn, key, *, from_id: int, to_id: int
@@ -325,9 +337,10 @@ class Retention:
         self.audit.on_error(
             RuntimeError(
                 f"audit retention REFUSED to prune sealed range ({seal.from_id}, {seal.to_id}] "
-                f"(seal seq {seal.seq}): it no longer verifies against its seal — a sealed row was "
-                "edited, deleted, or inserted. Retention will not delete tampered evidence; "
-                "preserve the database and run `firm-audit verify --full` to investigate."
+                f"(seal seq {seal.seq}): it no longer verifies — a sealed row or the seal itself "
+                "(its seal_mac / prev_mac chain link) was edited, deleted, or inserted. Retention "
+                "will not delete tampered evidence; preserve the database and run "
+                "`firm-audit verify --full` to investigate."
             )
         )
 

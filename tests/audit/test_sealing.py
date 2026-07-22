@@ -329,9 +329,10 @@ def test_anchor_file_is_appended_per_seal(db_url: str, tmp_path) -> None:
         assert len(lines) == len(seals) == 2
         for line, seal in zip(lines, seals, strict=True):
             parts = line.split()
-            assert len(parts) == 3  # "<sealed_at> <seq> <seal_mac>"
+            assert len(parts) == 4  # "<sealed_at> <seq> <to_id> <seal_mac>"
             assert parts[1] == str(seal.seq)
-            assert parts[2] == seal.seal_mac
+            assert parts[2] == str(seal.to_id)
+            assert parts[3] == seal.seal_mac
     finally:
         audit.close()
 

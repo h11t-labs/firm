@@ -415,6 +415,108 @@ def test_truncating_an_anchored_seal_above_a_checkpoint_is_tampered(
         audit.close()
 
 
+def test_retention_refuses_to_prune_a_seal_with_a_tampered_seal_mac(db_url: str, at_time) -> None:
+    # Bug A (CRITICAL): retention's pre-prune gate re-checked only the ROWS under a seal
+    # (``rows_mac``/``row_count``), never the seal's OWN ``seal_mac`` or ``prev_mac`` chain link. A
+    # seal whose ``seal_mac`` was edited (a plain UPDATE, no key) still classified as prunable, so
+    # retention deleted its rows and checkpointed over it — laundering the tampered seal to OK on
+    # the next verify. The gate now also recomputes the seal's own ``seal_mac``/``prev_mac`` (via
+    # :func:`~firm.audit.verify.seal_is_intact`), so a tampered seal is refused, the evidence kept.
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            audit.record("old1")
+            audit.record("old2")
+        audit.sealer.run_once()  # seq 1, fully expired
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_seals).values(seal_mac="0" * 64))
+        assert audit.verify(full=True).outcome == "tampered"  # baseline: the seal_mac is broken
+        assert audit.retention.run_once() == 0  # refused — nothing pruned
+        assert audit.retention.last_refused_tampered == 1
+        assert len(_rows(audit.engine)) == 2  # evidence preserved, not laundered by deletion
+        assert audit.verify(full=True).outcome == "tampered"  # still tampered, not laundered
+    finally:
+        audit.close()
+
+
+def test_deleting_a_covering_seal_below_the_checkpoint_is_tampered(
+    db_url: str, tmp_path, at_time
+) -> None:
+    # Bug B (CRITICAL): retention writes the checkpoint at the HEAD (highest seq) but covering the
+    # LOWEST range, so a real seal it leaves behind sits at a LOWER seq than the checkpoint (a
+    # seq/coverage inversion). An attacker who deletes that still-present covering seal AND its rows
+    # leaves a chain that is dense and self-consistent by seq, with the tail starting empty above
+    # the now-lowered max ``to_id`` — nothing remembers those ids were ever sealed. The anchor does:
+    # every seal exported its ``to_id``, so verify flags the vanished coverage above the floor.
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        max_age=3600.0,
+        seal_batch_size=10,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+    )
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            audit.record("old1")
+            audit.record("old2")
+        audit.sealer.run_once()  # seq 1 (0, 2] — expired
+        audit.record("young1")
+        audit.record("young2")
+        audit.sealer.run_once()  # seq 2 (2, 4] — recent, survives the prune
+        audit.retention.run_once()  # prune seq 1 → checkpoint seq 3 (0, 2]; seq 2 stays (2, 4]
+        assert audit.verify(anchor_path=str(anchor), full=True).outcome == "ok"  # baseline
+
+        # Attacker deletes the still-present covering seal seq 2 AND its rows (2, 4].
+        with transaction(audit.engine) as conn:
+            live = next(s for s in _seals_by_seq(audit.engine) if s.kind == "seal")
+            conn.execute(
+                delete(_audits).where(_audits.c.id > live.from_id, _audits.c.id <= live.to_id)
+            )
+            conn.execute(delete(_seals).where(_seals.c.seq == live.seq))
+        report = audit.verify(anchor_path=str(anchor), full=True)
+        assert report.outcome == "tampered"
+        assert report.exit_code == 1
+        assert any("truncated" in f.message for f in report.findings)
+    finally:
+        audit.close()
+
+
+def test_partial_prune_then_a_genuine_new_seal_still_verifies(
+    db_url: str, tmp_path, at_time
+) -> None:
+    # Companion to Bug B: the anchor coverage watermark must not false-TAMPER a clean partial-prune
+    # log, nor a genuine seal written after it (coverage legitimately grows past the checkpoint).
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        max_age=3600.0,
+        seal_batch_size=10,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+    )
+    try:
+        with at_time(now_utc() - timedelta(seconds=7200)):
+            audit.record("old1")
+            audit.record("old2")
+        audit.sealer.run_once()  # seq 1 (0, 2] — expired
+        audit.record("young1")
+        audit.record("young2")
+        audit.sealer.run_once()  # seq 2 (2, 4] — recent
+        audit.retention.run_once()  # checkpoint seq 3 (0, 2]; seq 2 stays
+        assert audit.verify(anchor_path=str(anchor), full=True).outcome == "ok"
+        audit.record("new1")
+        audit.record("new2")
+        audit.sealer.run_once()  # seq 4 (4, 6] — a genuine later seal above the checkpoint
+        assert audit.verify(anchor_path=str(anchor), full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+
 def test_forged_row_below_the_checkpoint_floor_is_tampered(db_url: str, at_time) -> None:
     # Adversarial finding (HIGH): verify skips everything at/below the checkpoint floor because
     # retention deleted it, but never checked that the pruned region is actually empty. An attacker

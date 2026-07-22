@@ -46,6 +46,27 @@ pre-1.0 (breaking changes bump the minor version).
 
 ### Security (pre-release hardening of the unreleased tamper-evidence layer)
 
+- **Retention no longer launders a tampered *seal*.** The pre-prune gate re-checked only the rows
+  under a seal (`rows_mac`/`row_count`), never the seal's own `seal_mac` or `prev_mac` chain link —
+  so a seal whose `seal_mac` was edited (a plain `UPDATE`, no key) still classified as prunable, and
+  retention deleted its rows and checkpointed over it, laundering the tampered seal to `OK`. The gate
+  now also recomputes the seal's own `seal_mac` and confirms its chain linkage; a tampered seal is
+  **refused** (routed through `on_error`, counted on `last_refused_tampered`), preserving the
+  evidence. No schema change.
+- **Post-prune tail truncation via the seq/coverage inversion is caught by the anchor** (anchor-file
+  format change). Retention writes its checkpoint at the *head* (highest `seq`) but covering the
+  *lowest* range, so a real seal it leaves behind has a **lower** `seq` than the checkpoint. Deleting
+  that seal *and* its rows left a chain that was dense and self-consistent by `seq` — the truncated
+  range above the checkpoint floor was laundered to `OK`, since nothing in the database remembered
+  those ids were sealed. The anchor line now carries the seal's `to_id`
+  (`<sealed_at> <seq> <to_id> <seal_mac>`), and verify flags any coverage the anchor recorded that
+  the stored chain no longer presents as `TAMPERED` (tail truncation). The `on_anchor` callback
+  signature is unchanged.
+- **A malformed seal field is `TAMPERED`, never a crash that freezes the dashboard.** An unparseable
+  `gap_ranges` made `parse_gaps` raise `ValueError` out of the whole verify run, so the run never
+  persisted a status and the dashboard's last row stayed frozen at `OK` while the database was
+  tampered. Verify now classifies a seal with an unparseable attacker-controlled field as `TAMPERED`
+  and persists it, instead of raising.
 - **Anchor tail-truncation is no longer laundered by a checkpoint.** The `verify --anchor` test for
   a legitimately-pruned anchored seal compared a seal *seq* to the checkpoint *floor* (a row id);
   the unit mismatch meant that once any checkpoint existed, deleting the anchored head seal (real

@@ -69,8 +69,14 @@ Any instance may run the loop — the unique `seq` constraint arbitrates races, 
 is needed.
 
 **Layer 3 — anchor.** After each seal, the chain head leaves the database — appended to a local
-file and/or handed to a callback (ship it to S3, a second database, a Slack webhook). Verification
-checks that a seal matches the newest anchor and that the recorded chain extends it. This is what
+file (`<sealed_at> <seq> <to_id> <seal_mac>`) and/or handed to a callback (ship it to S3, a second
+database, a Slack webhook). Verification checks that a seal matches the newest anchor, that the
+recorded chain extends it, and that the highest coverage the anchor ever recorded (`max(to_id)`
+across every line) is still present in the chain. The last check closes a subtle truncation:
+retention writes its checkpoint at the *head* (highest `seq`) but covering the *lowest* range, so a
+real seal it leaves behind has a **lower** `seq` than the checkpoint; deleting that seal *and* its
+rows leaves a chain that is dense and self-consistent by `seq`, with nothing in the database
+remembering those ids were ever sealed — only the anchor's exported `to_id` does. This is what
 closes tail-truncation and table-reset, which are otherwise invisible from inside the database.
 
 ## Rolling it out — key first, then sealing
@@ -281,7 +287,12 @@ finding carries one of four **verdict classes**:
 | `OK` | chain, seals, rows, and anchor all consistent |
 | `WARNING` | a valid-MAC row in a sealed range (late commit — tune `grace` or use the long-job pattern), or an unsealed tail older than a threshold (sealer liveness) |
 | `UNPROTECTED` | NULL-MAC rows at or below the activation boundary — written before the key existed |
-| `TAMPERED` | invalid/missing MAC after activation, `row_count`/`rows_mac` mismatch, a broken seal chain, or an anchor contradiction |
+| `TAMPERED` | invalid/missing MAC after activation, `row_count`/`rows_mac` mismatch, a broken seal chain, an unparseable seal field (e.g. a corrupted `gap_ranges`), or an anchor contradiction |
+
+A seal field an attacker can edit but not re-sign (a garbage `gap_ranges`, say) is treated as a
+tampering **finding**, never an uncaught exception: verify persists `TAMPERED` and returns rather
+than raising, so a malformed field can't freeze the dashboard's last status at `OK` while the
+database is tampered.
 
 ### Exit codes
 
@@ -370,11 +381,14 @@ together with **checkpoint seals** (see [Retention & querying](retention-and-que
 1. `Retention.run_once` aligns its cutoff to a seal boundary — it deletes only rows in ranges
    **fully covered by seals older than the cutoff**, never partial ranges and never unsealed rows.
 2. **Retention refuses to prune what verify would call `TAMPERED`.** Before deleting a
-   fully-expired sealed range, it classifies the range with the **same classifier the verifier
-   runs** — recomputing every row's `row_mac` from its content *and* the range's
-   `rows_mac`/`row_count` against the seal (one classifier, two callers, so retention and verify can
-   never disagree). A `TAMPERED` range — a deletion, a count-preserving swap, an invalid/missing
-   MAC, an unverifiable seal — is **refused**: pruning stops there, the checkpoint never advances
+   fully-expired sealed range, it re-checks both the **seal itself** — recomputing its `seal_mac`
+   and confirming its `prev_mac` chain linkage (so an edited `seal_mac` is never laundered by a
+   prune while its rows still reproduce `rows_mac`) — and the **rows under it**, using the **same
+   classifier the verifier runs**: recomputing every row's `row_mac` from its content *and* the
+   range's `rows_mac`/`row_count` against the seal (one classifier, two callers, so retention and
+   verify can never disagree). A `TAMPERED` range — a deletion, a count-preserving swap, an
+   invalid/missing MAC, an edited seal, an unverifiable seal — is **refused**: pruning stops there,
+   the checkpoint never advances
    past it, the count lands on `Retention.last_refused_tampered`, and the refusal routes through
    `on_error`. This closes a laundering hole — an attacker who edits an old sealed row with a plain
    `UPDATE` (no key needed) and waits for it to age past `max_age` cannot get a naive prune to

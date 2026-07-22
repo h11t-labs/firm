@@ -270,7 +270,17 @@ def classify_range(
     # — i.e. no covered row was deleted or swapped; the surplus all sits in ids the seal recorded as
     # gaps. Anything short of that (a covered id missing, a covered row's MAC changed, an extra that
     # is not in a recorded gap, or an invalid/missing MAC) falls through to TAMPERED.
-    gaps = integrity.parse_gaps(seal.gap_ranges)
+    try:
+        gaps = integrity.parse_gaps(seal.gap_ranges)
+    except ValueError:
+        # A seal whose ``gap_ranges`` is unparseable is TAMPERED, never an uncaught crash (Bug C).
+        # ``gap_ranges`` is signed into ``seal_mac``, so a malformed value can only appear after an
+        # attacker edited the column without the key — the chain walk already flags the resulting
+        # ``seal_mac`` mismatch; classifying the range TAMPERED here (rather than letting
+        # :func:`~firm.audit.integrity.parse_gaps` raise out of the whole run) is what keeps verify
+        # from propagating the ValueError, skipping persistence, and freezing the dashboard's last
+        # status at ``ok`` while the database is tampered.
+        return "tampered", per_row
     covered = [(rid, mac) for rid, mac in pairs if not integrity.id_in_gaps(rid, gaps)]
     if (
         all_ok
@@ -318,6 +328,58 @@ def range_is_prunable(
     if verdict == "tampered":
         return False
     return not any(row_verdict == "tampered" for _, row_verdict in per_row)
+
+
+def recompute_seal_mac(key: Key, seal: Any) -> str:
+    """Recompute one seal's ``seal_mac`` from its stored fields — the single place the seal's
+    canonical field list is spelled out for recomputation, shared by the verifier's chain walk and
+    :func:`seal_is_intact` (retention's pre-prune gate) so the two can never disagree about what a
+    seal's MAC should be (a divergence would masquerade as tampering)."""
+    return integrity.seal_mac(
+        key,
+        seq=seal.seq,
+        kind=seal.kind,
+        from_id=seal.from_id,
+        to_id=seal.to_id,
+        row_count=seal.row_count,
+        rows_mac=seal.rows_mac,
+        prev_mac=seal.prev_mac,
+        sealed_at=seal.sealed_at,
+        gaps=seal.gap_ranges or "",
+    )
+
+
+def seal_is_intact(
+    seal: Any,
+    predecessor: Any | None,
+    has_checkpoint: bool,
+    seal_keyring: dict[str, Key],
+) -> bool:
+    """Whether a seal's **own** integrity holds — the seal-level counterpart to
+    :func:`classify_range`'s row-level check, used by retention's pre-prune gate (Bug A).
+
+    :func:`classify_range` only proves the *rows* under a seal still reproduce its ``rows_mac`` /
+    ``row_count``; it never re-checks the seal's own ``seal_mac`` or its ``prev_mac`` chain linkage.
+    So a seal whose ``seal_mac`` was edited (or whose ``prev_mac`` no longer links to its
+    predecessor) still classified as prunable — retention would delete its rows and checkpoint over
+    it, laundering the tampered seal to OK on the next verify. This gate closes that: the seal's key
+    must be a seal key, its ``seal_mac`` must recompute, and its ``prev_mac`` must chain to the
+    predecessor (``"genesis"`` for ``seq 1``). A seal with a missing predecessor is intact only when
+    a checkpoint authorizes the pruned front — mirroring :meth:`Verifier._walk_chain`, so a range is
+    never prunable to retention while its seal reads TAMPERED to verify."""
+    key = seal_keyring.get(seal.key_id)
+    if key is None:
+        return False  # unverifiable seal key (unknown, or a two-key row key) — never intact
+    if not hmac.compare_digest(recompute_seal_mac(key, seal), seal.seal_mac):
+        return False
+    if seal.seq == 1:
+        return hmac.compare_digest(seal.prev_mac, _GENESIS)
+    if predecessor is not None:
+        return hmac.compare_digest(seal.prev_mac, predecessor.seal_mac)
+    # No predecessor present: the earlier seals were pruned. Legitimate only when a key-signed
+    # checkpoint authorizes the missing front (the chain walk re-verifies that checkpoint's own
+    # seal_mac); otherwise it is a front truncation and the seal is not intact.
+    return has_checkpoint
 
 
 class VerifyError(Exception):
@@ -465,9 +527,11 @@ def _affected_json(findings: Sequence[Finding], total_tampered: int) -> str | No
 
 
 def _read_newest_anchor(path: str) -> tuple[int, str, datetime] | None:
-    """Parse the newest ``"<sealed_at> <seq> <seal_mac>"`` line, or ``None`` if the file is
+    """Parse the newest ``"<sealed_at> <seq> <to_id> <seal_mac>"`` line, or ``None`` if the file is
     missing/empty. ``sealed_at`` is the :func:`~.integrity.canonical_created_at` ISO string (no
-    embedded spaces), so a plain whitespace split yields exactly three fields."""
+    embedded spaces), so a plain whitespace split yields exactly four fields. ``to_id`` is skipped
+    here (the newest line drives the seq/staleness checks); the maximum coverage across *all* lines
+    is read separately by :func:`_read_anchor_max_to_id` for the truncation guard (Bug B)."""
     try:
         with open(path, encoding="utf-8") as handle:
             lines = [line for line in handle.read().splitlines() if line.strip()]
@@ -477,9 +541,36 @@ def _read_newest_anchor(path: str) -> tuple[int, str, datetime] | None:
         return None
     parts = lines[-1].split()
     seq = int(parts[1])
-    seal_mac = parts[2]
+    seal_mac = parts[3]
     sealed_at = datetime.fromisoformat(parts[0])
     return seq, seal_mac, sealed_at
+
+
+def _read_anchor_max_to_id(path: str) -> int:
+    """The maximum ``to_id`` (coverage) across **every** anchor line — the highest id the anchor
+    ever recorded as sealed. ``0`` when the file is missing/empty or holds no parseable coverage.
+
+    This is the external memory Bug B needs: an attacker who deletes a real seal *and* its rows
+    leaves nothing in the database that ids above the checkpoint floor were ever sealed, but each
+    seal's ``to_id`` was exported to the anchor when it was written. Comparing this high-water mark
+    to the maximum coverage still present in the chain surfaces a truncated range (see
+    :meth:`Verifier._check_anchor`). A malformed line is skipped rather than raised on — the anchor
+    is an append-only external file, and one corrupt line must not crash verify (Bug C spirit)."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = [line for line in handle.read().splitlines() if line.strip()]
+    except FileNotFoundError:
+        return 0
+    best = 0
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            best = max(best, int(parts[2]))
+        except ValueError:
+            continue
+    return best
 
 
 # --- the verifier ----------------------------------------------------------------------------
@@ -1203,6 +1294,33 @@ class Verifier:
         by_seq = {s.seq: s for s in seals}
         head_seq = max((s.seq for s in seals), default=0)
         has_checkpoint = any(s.kind == "checkpoint" for s in seals)
+
+        # Coverage watermark (Bug B). Retention writes the checkpoint at the *head* (highest seq)
+        # but covering the *lowest* range, so a real seal it leaves behind sits at a LOWER seq than
+        # the checkpoint. An attacker who deletes that seal AND its rows leaves a chain that is
+        # dense and self-consistent by seq — the checkpoint's front-truncation excuse hides the
+        # dangling link, no covering seal remains to fail a rows_mac check, and the tail starts
+        # empty above the now-lowered max ``to_id``. Nothing in the database remembers those ids
+        # were sealed. The anchor does: every seal exported its ``to_id``. If the highest coverage
+        # the anchor ever recorded exceeds the highest coverage still present in the chain, a sealed
+        # range above the floor was truncated — the newest-seq test below cannot see it because the
+        # deleted seal was never the anchored head. A legitimately pruned seal only ever covered ids
+        # at or below the checkpoint floor (subsumption deletes ``to_id <= checkpoint.to_id``), and
+        # that floor is itself a present seal, so a benign prune never makes the watermark exceed
+        # the present max — no false TAMPERED on a clean post-prune log or a genuine later seal.
+        max_present_to_id = max((s.to_id for s in seals), default=0)
+        max_anchored_to_id = _read_anchor_max_to_id(anchor_path)
+        if max_anchored_to_id > max_present_to_id:
+            findings.append(
+                Finding(
+                    "tampered",
+                    f"the anchor recorded coverage through id {max_anchored_to_id}, but the stored "
+                    f"chain now covers only through id {max_present_to_id} — a sealed range above "
+                    "the checkpoint floor was truncated (its seal and rows both deleted).",
+                    f"coverage <= {max_present_to_id}",
+                )
+            )
+            counters.tampered += 1
         matched = by_seq.get(seq)
         # An anchored seal legitimately absent from the chain was *pruned* by a checkpoint, never
         # *truncated* from the tail. The two are told apart in seq-space: a pruned seal sits BELOW

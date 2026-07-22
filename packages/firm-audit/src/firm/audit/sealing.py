@@ -102,21 +102,21 @@ class Sealer:
                 return total
             if sealed is None:
                 return total
-            seq, seal_mac, sealed_at, row_count = sealed
-            self._emit_anchor(seq=seq, seal_mac=seal_mac, sealed_at=sealed_at)
+            seq, to_id, seal_mac, sealed_at, row_count = sealed
+            self._emit_anchor(seq=seq, to_id=to_id, seal_mac=seal_mac, sealed_at=sealed_at)
             total += row_count
             if row_count < batch_size:
                 return total
 
-    def _seal_next_batch(self, key: Key) -> tuple[int, str, datetime, int] | None:
+    def _seal_next_batch(self, key: Key) -> tuple[int, int, str, datetime, int] | None:
         """Seal one batch in a single short transaction; ``None`` when there is nothing to seal.
 
         Reads the high-water mark (the latest seal's ``to_id``, or 0 for the very first seal —
         which therefore starts at the beginning of the table, sealing pre-existing legacy rows),
         selects up to ``seal_batch_size`` eligible rows in id order, and inserts the chained
         seal. Raises :class:`IntegrityError` when the chosen ``seq`` was already taken by a racing
-        sealer. Returns ``(seq, seal_mac, sealed_at, row_count)`` on success so the caller can
-        emit the anchor *after* the seal has committed.
+        sealer. Returns ``(seq, to_id, seal_mac, sealed_at, row_count)`` on success so the caller
+        can emit the anchor *after* the seal has committed.
         """
         cutoff = now_utc() - timedelta(seconds=self.audit.grace)
         engine = self.audit.engine
@@ -169,8 +169,9 @@ class Sealer:
         rows: list[tuple[int, str | None]],
         prev_mac: str,
         kind: str = "seal",
-    ) -> tuple[int, str, datetime, int]:
-        """Compute ``rows_mac``/``seal_mac`` and insert one seal row; return its identity.
+    ) -> tuple[int, int, str, datetime, int]:
+        """Compute ``rows_mac``/``seal_mac`` and insert one seal row; return its identity as
+        ``(seq, to_id, seal_mac, sealed_at, row_count)``.
 
         ``rows`` are the ``(id, row_mac)`` pairs actually present in ``(from_id, to_id]`` in id
         order — rollback id-gaps are harmless because the seal hashes what exists rather than
@@ -215,13 +216,18 @@ class Sealer:
                 gap_ranges=gaps or None,
             )
         )
-        return seq, seal_mac, sealed_at, row_count
+        return seq, to_id, seal_mac, sealed_at, row_count
 
-    def _emit_anchor(self, *, seq: int, seal_mac: str, sealed_at: datetime) -> None:
+    def _emit_anchor(self, *, seq: int, to_id: int, seal_mac: str, sealed_at: datetime) -> None:
         """Ship the freshly committed chain head to the external anchor sink — best effort.
 
-        Appends ``"<sealed_at> <seq> <seal_mac>"`` to the anchor file (if a path is configured)
-        and/or hands the same tuple to the ``on_anchor`` callback (design Layer 3). This runs
+        Appends ``"<sealed_at> <seq> <to_id> <seal_mac>"`` to the anchor file (if a path is
+        configured) and/or hands ``(seq, seal_mac, sealed_at)`` to the ``on_anchor`` callback
+        (design Layer 3). The ``to_id`` (the seal's highest covered id) is what lets a later
+        ``verify --anchor`` remember the maximum coverage ever exported: a seal whose rows *and*
+        seal row were both deleted leaves no trace in the database, but the anchor still records
+        that ids through its ``to_id`` were once sealed, so verify can catch the truncation of a
+        real range above the checkpoint floor (Bug B). This runs
         *after* the seal has committed, and every sink is wrapped so a failure — disk full, a
         vanished path, a callback that raises — routes to ``on_error`` and never crashes or rolls
         back the seal (review 3A). A stalled sink stays visible: verify reports the newest
@@ -230,7 +236,7 @@ class Sealer:
         path = self.audit._anchor_path
         if path is not None:
             try:
-                line = f"{canonical_created_at(sealed_at)} {seq} {seal_mac}\n"
+                line = f"{canonical_created_at(sealed_at)} {seq} {to_id} {seal_mac}\n"
                 with open(path, "a", encoding="utf-8") as handle:
                     handle.write(line)
             except Exception as exc:  # best-effort: a broken sink must not lose the seal

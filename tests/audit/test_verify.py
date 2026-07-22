@@ -865,6 +865,27 @@ def test_status_row_records_affected_identifiers_on_tampering(db_url: str) -> No
         audit.close()
 
 
+def test_malformed_gap_ranges_is_tampered_not_a_crash(db_url: str) -> None:
+    # Bug C (HIGH): a seal whose ``gap_ranges`` is unparseable made ``integrity.parse_gaps`` raise
+    # ValueError, which propagated out of the whole verify run — the run never persisted a status,
+    # so the dashboard's last row stayed frozen at OK while the database was tampered. verify must
+    # instead classify such a seal TAMPERED and persist it, never raise-and-freeze.
+    audit = _make(db_url)
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        audit.verify(full=True)  # seeds a clean "ok" status row first
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_seals).values(row_count=99, gap_ranges="not-an-interval"))
+        # verify returns a verdict rather than raising the ValueError out of the run …
+        report = audit.verify(full=True)
+        assert report.outcome == "tampered"
+        # … and the frozen "ok" status row was overwritten with the tampered outcome.
+        assert _status_row(audit.engine).outcome == "tampered"
+    finally:
+        audit.close()
+
+
 def test_mass_tamper_keeps_findings_bounded_but_persists_tampered(db_url: str) -> None:
     # Bug #6. Verify used to append one Finding per tampered row, capping only at serialize time — a
     # mass tamper could grow the in-memory list without bound and OOM verify BEFORE it persisted the
