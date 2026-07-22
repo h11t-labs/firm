@@ -527,23 +527,35 @@ def _affected_json(findings: Sequence[Finding], total_tampered: int) -> str | No
 
 
 def _read_newest_anchor(path: str) -> tuple[int, str, datetime] | None:
-    """Parse the newest ``"<sealed_at> <seq> <to_id> <seal_mac>"`` line, or ``None`` if the file is
-    missing/empty. ``sealed_at`` is the :func:`~.integrity.canonical_created_at` ISO string (no
-    embedded spaces), so a plain whitespace split yields exactly four fields. ``to_id`` is skipped
-    here (the newest line drives the seq/staleness checks); the maximum coverage across *all* lines
-    is read separately by :func:`_read_anchor_max_to_id` for the truncation guard (Bug B)."""
+    """Parse the newest parseable ``"<sealed_at> <seq> <to_id> <seal_mac>"`` line, or ``None`` if
+    the file is missing/empty/unparseable. ``sealed_at`` is the
+    :func:`~.integrity.canonical_created_at` ISO string (no embedded spaces), so a whitespace split
+    yields the fields positionally. ``to_id`` is skipped here (the newest line drives the
+    seq/staleness checks); the maximum coverage across *all* lines is read separately by
+    :func:`_read_anchor_max_to_id` for the truncation guard (Bug B).
+
+    A malformed or truncated line is skipped, not raised on (Bug C): the anchor is an append-only
+    external file whose last append is best-effort, so a partial final line — or a legacy 3-field
+    ``"<sealed_at> <seq> <seal_mac>"`` line from before the ``to_id`` column — must never crash
+    verify and freeze its status. Legacy 3-field lines still carry a valid seq/seal_mac/sealed_at,
+    so they are read (``seal_mac`` from the last field) rather than discarded."""
     try:
         with open(path, encoding="utf-8") as handle:
             lines = [line for line in handle.read().splitlines() if line.strip()]
     except FileNotFoundError:
         return None
-    if not lines:
-        return None
-    parts = lines[-1].split()
-    seq = int(parts[1])
-    seal_mac = parts[3]
-    sealed_at = datetime.fromisoformat(parts[0])
-    return seq, seal_mac, sealed_at
+    for line in reversed(lines):
+        parts = line.split()
+        if len(parts) < 3:  # need at least sealed_at, seq, seal_mac
+            continue
+        try:
+            seq = int(parts[1])
+            sealed_at = datetime.fromisoformat(parts[0])
+        except ValueError:
+            continue
+        seal_mac = parts[3] if len(parts) >= 4 else parts[2]  # 4-field new vs 3-field legacy
+        return seq, seal_mac, sealed_at
+    return None
 
 
 def _read_anchor_max_to_id(path: str) -> int:
@@ -606,9 +618,20 @@ class Verifier:
         if self.audit._seal_key is not None:
             self._ring_add(ring, self.audit._seal_key, source="FIRM_AUDIT_SEAL_KEY")
         for env in (_RETIRED_KEYS_ENV, _RETIRED_SEAL_KEYS_ENV):
-            for extra in parse_keyring(os.environ.get(env), source=env).values():
+            for extra in self._parse_ring_env(env).values():
                 self._ring_add(ring, extra, source=env)
         return ring
+
+    @staticmethod
+    def _parse_ring_env(env: str) -> dict[str, Key]:
+        """Parse a retired-keyring env var, raising :class:`VerifyError` (not a bare ``ValueError``)
+        on a malformed value — so an operator's typo in ``FIRM_AUDIT_RETIRED_KEYS`` surfaces as
+        verify's ``error`` outcome (D24), never an uncaught crash that freezes the dashboard at its
+        last status."""
+        try:
+            return parse_keyring(os.environ.get(env), source=env)
+        except ValueError as exc:
+            raise VerifyError(str(exc)) from exc
 
     @staticmethod
     def _ring_add(ring: dict[str, Key], key: Key, *, source: str) -> None:
@@ -650,9 +673,7 @@ class Verifier:
         # split deployment it never signs a seal, so it is not a seal signer here.
         if self.audit._key is not None and not self.audit._seal_key_split:
             self._ring_add(ring, self.audit._key, source="FIRM_AUDIT_KEY")
-        for extra in parse_keyring(
-            os.environ.get(_RETIRED_SEAL_KEYS_ENV), source=_RETIRED_SEAL_KEYS_ENV
-        ).values():
+        for extra in self._parse_ring_env(_RETIRED_SEAL_KEYS_ENV).values():
             self._ring_add(ring, extra, source=_RETIRED_SEAL_KEYS_ENV)
         return ring
 

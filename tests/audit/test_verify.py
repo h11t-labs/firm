@@ -509,6 +509,39 @@ def test_missing_anchor_file_with_seals_warns(db_url: str, tmp_path) -> None:
         audit.close()
 
 
+def test_legacy_three_field_anchor_line_does_not_crash_verify(db_url: str, tmp_path) -> None:
+    # A 3-field anchor line ("<sealed_at> <seq> <seal_mac>", from before the to_id column) or a
+    # partial best-effort append must NOT raise out of verify and freeze the status — it is read
+    # (legacy) or skipped (garbage), never crashed on.
+    anchor = tmp_path / "anchor.log"
+    audit = _make(db_url, anchor_path=str(anchor), anchor_max_age=3600.0)
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        newest = anchor.read_text().splitlines()[-1].split()
+        # Rewrite as a legacy 3-field line (drop the to_id column) + a garbage trailing line.
+        anchor.write_text(f"{newest[0]} {newest[1]} {newest[3]}\nnot a valid line\n")
+        report = audit.verify(anchor_path=str(anchor), full=True)  # must not raise
+        assert report.outcome == "ok"  # legacy line still carries a valid seq/seal_mac
+    finally:
+        audit.close()
+
+
+def test_malformed_retired_keyring_env_is_error_not_crash(db_url: str, monkeypatch) -> None:
+    # A typo'd FIRM_AUDIT_RETIRED_KEYS surfaces as verify's error outcome (persisted), not an
+    # uncaught ValueError that leaves the status frozen at its last verdict.
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", "no-equals-sign-here")
+    audit = _make(db_url)
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+        with pytest.raises(VerifyError):
+            audit.verify(full=True)
+        assert _status_row(audit.engine).outcome == "error"  # persisted, not frozen
+    finally:
+        audit.close()
+
+
 def test_valid_anchor_verifies_ok(db_url: str, tmp_path) -> None:
     anchor = tmp_path / "anchor.log"
     audit = _make(db_url, anchor_path=str(anchor), anchor_max_age=3600.0)
