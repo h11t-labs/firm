@@ -68,6 +68,12 @@ def test_upgrade_head_creates_tamper_evidence_schema(tmp_path) -> None:
         assert {"firm_audit_seals", "firm_audit_verify_status"} <= set(insp.get_table_names())
         idx = {i["name"]: i for i in insp.get_indexes("firm_audit_events")}
         assert idx["index_firm_audit_events_on_entry_id"]["unique"]
+        seal_cols = {c["name"] for c in insp.get_columns("firm_audit_seals")}
+        assert {"seq", "prev_mac", "gap_ranges"}.isdisjoint(seal_cols)
+        seal_idx = {i["name"]: i for i in insp.get_indexes("firm_audit_seals")}
+        assert seal_idx["index_firm_audit_seals_on_from_id"]["unique"]
+        status_cols = {c["name"] for c in insp.get_columns("firm_audit_verify_status")}
+        assert {"cycle_position", "cycle_length"}.isdisjoint(status_cols)
     finally:
         engine.dispose()
 
@@ -162,5 +168,13 @@ def test_upgrade_0001_to_0002_on_populated_db(tmp_path) -> None:
             ).all()
         assert [r.action for r in rows] == ["legacy.one", "legacy.two"]
         assert all(r.entry_id is None and r.row_mac is None and r.key_id is None for r in rows)
+
+        # The rebuilt SQLite table uses AUTOINCREMENT, so ids never regress after retention empties
+        # it. This is the schema-level half of decision 10; retention has the behavioral test.
+        with engine.connect() as conn:
+            sql = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='firm_audit_events'"
+            ).scalar_one()
+        assert "AUTOINCREMENT" in sql.upper()
     finally:
         engine.dispose()

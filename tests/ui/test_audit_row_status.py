@@ -91,11 +91,19 @@ def test_context_inactive_without_seals_or_verify(runtime) -> None:
 
 
 def test_context_active_from_a_seal(runtime, seed) -> None:
-    seed.seal(seq=1, to_id=7)
+    seed.seal(to_id=7)
     with runtime.engine.connect() as conn:
         ctx = audit_queries.row_integrity_context(conn)
     assert ctx["active"] is True
     assert ctx["max_sealed_to_id"] == 7
+
+
+def test_context_activation_is_active_but_not_sealed_coverage(runtime, seed) -> None:
+    seed.seal(kind="activation", from_id=-1, to_id=7, row_count=None, rows_mac=None)
+    with runtime.engine.connect() as conn:
+        ctx = audit_queries.row_integrity_context(conn)
+    assert ctx["active"] is True
+    assert ctx["max_sealed_to_id"] == 0
 
 
 def test_context_active_from_a_verify_row_alone(runtime, seed) -> None:

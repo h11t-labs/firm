@@ -821,12 +821,10 @@ def _cause_text(
             f"anchor stale — newest anchor {_reltime(status['newest_anchor_at'])} "
             f"(expected within {_humanize(anchor_max_age)})"
         )
-    if cause == "late_commits":
+    if cause == "verify_warnings":
         n = status["warning_count"]
-        return (
-            f"{_num(n)} late commit{'' if n == 1 else 's'} in a sealed range — "
-            "tune grace or use the long-job pattern"
-        )
+        count = f"{_num(n)} warning{'' if n == 1 else 's'}"
+        return f"verify reported {count} — check sealer and anchor liveness"
     return cause
 
 
@@ -918,8 +916,8 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         view["when_label"] = "first detected"
         view["headline"] = f"{_num(n)} finding{'' if n == 1 else 's'}"
         # What it means, in plain language — the framing sentence, true for every tamper class
-        # (modify / delete / insert / broken seal chain), kept as the lead so a non-expert reads the
-        # category first.
+        # (modify / delete / insert / invalid seal or marker), kept as the lead so a non-expert
+        # reads the category first.
         view["meaning"] = (
             "Sealed audit data no longer matches its signatures — it was modified, deleted, or "
             "inserted after being recorded."
@@ -949,8 +947,6 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
         facts: list[dict[str, Any]] = [{"label": "verified", "value": _when(s["ran_at"])}]
         if s["last_full_coverage_at"] is not None:
             cov = _reltime(s["last_full_coverage_at"])
-            if s["cycle_position"] and s["cycle_length"]:
-                cov += f" · cycle {s['cycle_position']}/{s['cycle_length']}"
         else:
             cov = "pending"
         facts.append({"label": "full coverage", "value": cov})

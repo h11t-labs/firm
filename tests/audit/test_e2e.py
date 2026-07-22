@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import func, select
@@ -40,6 +41,18 @@ def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
             max_age=60.0,
         )
     try:
+        for _ in range(100):
+            with transaction(audit.engine) as conn:
+                active = conn.execute(
+                    select(func.count())
+                    .select_from(schema.seals)
+                    .where(schema.seals.c.kind == "activation")
+                ).scalar_one()
+            if active:
+                break
+            time.sleep(0.02)
+        assert active == 1
+
         n_threads = 6
         per_thread = 15
         total = n_threads * per_thread
@@ -56,20 +69,22 @@ def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
         # max_age) without any MAC-invalidating created_at edit — retention re-verifies before it
         # prunes, so a mutated row would be refused, not laundered.
         threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(n_threads)]
-        with at_time(now_utc() - timedelta(seconds=120)):
+        old = now_utc() - timedelta(seconds=120)
+        with at_time(old), patch("firm.audit.sealing.now_utc", lambda: old):
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
 
+            written_max = _max_audit_id(audit)
+            for _ in range(100):
+                if _max_sealed_id(audit) == written_max:
+                    break
+                time.sleep(0.02)
+
         assert errors == []
         assert len(audit.history(limit=total)) == total
 
-        written_max = _max_audit_id(audit)
-        for _ in range(100):
-            if _max_sealed_id(audit) == written_max:
-                break
-            time.sleep(0.02)
         assert _max_sealed_id(audit) == written_max
         assert written_max is not None
 
@@ -84,12 +99,10 @@ def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
         pruned = audit.retention.run_once()
         assert pruned == total
         with transaction(audit.engine) as conn:
-            checkpoints = conn.execute(
-                select(func.count())
-                .select_from(schema.seals)
-                .where(schema.seals.c.kind == "checkpoint")
+            floors = conn.execute(
+                select(func.count()).select_from(schema.seals).where(schema.seals.c.kind == "floor")
             ).scalar_one()
-        assert checkpoints >= 1
+        assert floors >= 1
 
         report = audit.verify(anchor_path=str(anchor), full=True)
         assert report.outcome == "ok"

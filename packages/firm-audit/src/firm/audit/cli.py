@@ -116,12 +116,11 @@ def prune(database_url: str | None, max_age: float | None) -> None:
                     "that no longer verify — run `firm-audit verify --full` and preserve the DB",
                     err=True,
                 )
-            # A two-key deployment: retention on a host without the seal key refuses outright rather
-            # than checkpoint with the wrong key. Prune from a sealer-role host that has it.
+            # A two-key deployment: retention without the seal key cannot sign a floor.
             if audit.retention.last_refused_no_seal_key:
                 click.echo(
                     "REFUSED to prune: this host has no seal key (FIRM_AUDIT_SEAL_KEY) for the "
-                    "seal chain — run pruning on a sealer-role host in a two-key deployment",
+                    "signed floor — run pruning on a sealer-role host in a two-key deployment",
                     err=True,
                 )
     finally:
@@ -139,18 +138,15 @@ def seal(database_url: str | None) -> None:
         dispose_engine(engine)
 
 
-@main.command(help="Verify Layers 1-3 (row MACs, seal chain, anchor). Exit non-zero on tampering.")
+@main.command(help="Verify row MACs, independent seals, markers, and anchor.")
 @_db_option
 @click.option("--anchor", "anchor_path", default=None, help="Anchor file to check (Layer 3).")
-@click.option("--from-seq", default=None, type=int, help="Row-verify only seals from this seq.")
-@click.option("--full", is_flag=True, help="Recompute every sealed range from the genesis floor.")
-def verify(
-    database_url: str | None, anchor_path: str | None, from_seq: int | None, full: bool
-) -> None:
+@click.option("--full", is_flag=True, help="Recompute every sealed range.")
+def verify(database_url: str | None, anchor_path: str | None, full: bool) -> None:
     engine = create_engine_for(_url(database_url))
     try:
         with AuditLog(engine=engine, create_schema=False) as audit:
-            report = audit.verify(anchor_path=anchor_path, from_seq=from_seq, full=full)
+            report = audit.verify(anchor_path=anchor_path, full=full)
     finally:
         dispose_engine(engine)
 

@@ -99,20 +99,18 @@ def _create_seals() -> None:
     op.create_table(
         "firm_audit_seals",
         sa.Column("id", pk_bigint(), primary_key=True),
-        sa.Column("seq", sa.Integer(), nullable=False),
         sa.Column("kind", sa.String(32), nullable=False),
-        sa.Column("from_id", sa.BigInteger(), nullable=False),
+        sa.Column("from_id", sa.BigInteger()),
         sa.Column("to_id", sa.BigInteger(), nullable=False),
-        sa.Column("row_count", sa.Integer(), nullable=False),
-        sa.Column("rows_mac", sa.String(64), nullable=False),
-        sa.Column("prev_mac", sa.String(64), nullable=False),
+        sa.Column("row_count", sa.Integer()),
+        sa.Column("rows_mac", sa.String(64)),
         sa.Column("seal_mac", sa.String(64), nullable=False),
         sa.Column("sealed_at", dt_type(), nullable=False),
         sa.Column("key_id", sa.String(16), nullable=False),
-        # Signed absent-id intervals this seal skips (NULL = dense); see schema.py / integrity.py.
-        sa.Column("gap_ranges", sa.Text()),
     )
-    op.create_index("index_firm_audit_seals_on_seq", "firm_audit_seals", ["seq"], unique=True)
+    op.create_index(
+        "index_firm_audit_seals_on_from_id", "firm_audit_seals", ["from_id"], unique=True
+    )
 
 
 def _create_verify_status() -> None:
@@ -127,8 +125,6 @@ def _create_verify_status() -> None:
         sa.Column("tampered_count", sa.Integer(), nullable=False),
         sa.Column("error_message", sa.Text()),
         sa.Column("last_full_coverage_at", dt_type()),
-        sa.Column("cycle_position", sa.Integer()),
-        sa.Column("cycle_length", sa.Integer()),
         sa.Column("newest_anchor_at", dt_type()),
         sa.Column("anchor_configured", sa.Boolean(), nullable=False),
         sa.Column("unsealed_tail_count", sa.Integer(), nullable=False),
@@ -178,7 +174,11 @@ def upgrade() -> None:
     # One batch = one table rebuild on SQLite (render_as_batch); a no-op wrapper doing direct
     # ALTERs on Postgres/MySQL.
     if missing:
-        with op.batch_alter_table(_TABLE) as batch_op:
+        sqlite = op.get_bind().dialect.name == "sqlite"
+        table_kwargs = {"sqlite_autoincrement": True} if sqlite else {}
+        with op.batch_alter_table(
+            _TABLE, table_kwargs=table_kwargs, recreate="always" if sqlite else "auto"
+        ) as batch_op:
             for column in missing:
                 batch_op.add_column(column)
 

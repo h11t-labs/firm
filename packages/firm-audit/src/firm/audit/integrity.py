@@ -30,7 +30,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -43,13 +43,10 @@ from .._core.clock import now_utc
 CANON_VERSION = b"v1"
 
 # Framing markers. Any present value is ``_PRESENT`` + length + bytes; ``_ABSENT`` frames a
-# ``None`` (distinct from a zero-length present value); ``_NOMAC`` marks a row that carried no
-# ``row_mac`` when it was sealed (design review 5A) so its deletion is still detectable. The
-# three markers are single bytes chosen so no present field, whose second byte is a length,
-# can be confused with a bare marker.
+# ``None`` (distinct from a zero-length present value). The markers are single bytes chosen so no
+# present field, whose second byte is a length, can be confused with a bare marker.
 _ABSENT = b"\x00"
 _PRESENT = b"\x01"
-_NOMAC = b"\x02"
 
 _LENGTH_BYTES = 8
 
@@ -287,108 +284,60 @@ def row_mac(
     )
 
 
-def rows_mac(key: Key, rows: Iterable[tuple[int, str | None]]) -> str:
+def rows_mac(key: Key, rows: Iterable[tuple[int, str]]) -> str:
     """Hex ``HMAC-SHA256`` over the ``(id, row_mac)`` pairs a seal covers, in id order.
 
-    Each pair frames the id and then the row's MAC, or the :data:`_NOMAC` marker when the row
-    carried no ``row_mac`` — so deleting a NULL-MAC row still changes the seal (design review
-    5A). The caller supplies the rows already ordered by id and present in ``(from_id, to_id]``.
+    The caller supplies rows ordered by id and present in ``(from_id, to_id]``. Legacy NULL-MAC
+    rows are below the signed activation boundary and are never sealed.
     """
-    parts = [CANON_VERSION]
+    digest = hmac.new(key.secret, CANON_VERSION, hashlib.sha256)
     for row_id, mac in rows:
-        parts.append(_field(str(row_id)))
-        parts.append(_NOMAC if mac is None else _field(mac))
-    return _hmac_hex(key, b"".join(parts))
-
-
-def gaps_for_range(from_id: int, to_id: int, present_ids: Iterable[int]) -> list[tuple[int, int]]:
-    """The maximal ``(lo, hi)`` id-intervals inside ``(from_id, to_id]`` that are **absent** from
-    ``present_ids`` — the rows a seal's covered range skips (rolled-back id-gaps, or ids not yet
-    visible at seal time). Normally empty (the range is dense). ``present_ids`` need not be sorted.
-
-    This is what lets verify tell a genuine *late commit* (an extra row landing in one of these
-    recorded gaps) apart from a delete-and-relocate laundering attack (a sealed row deleted, its
-    slot back-filled by a relocated valid row): a benign latecomer occupies a gap the seal recorded,
-    while a deleted sealed row is an id the seal recorded as *covered*, now missing (Bug #1).
-    """
-    intervals: list[tuple[int, int]] = []
-    prev = from_id  # the first expected covered id is from_id + 1
-    for pid in sorted(present_ids):
-        if pid <= from_id or pid > to_id:
-            continue  # defensive: only ids strictly inside (from_id, to_id] are in scope
-        if pid > prev + 1:
-            intervals.append((prev + 1, pid - 1))
-        prev = pid
-    if to_id > prev:
-        intervals.append((prev + 1, to_id))
-    return intervals
-
-
-def canonical_gaps(intervals: Iterable[tuple[int, int]]) -> str:
-    """Canonical, signable string for a seal's absent-id intervals — ``"lo-hi,lo-hi"`` (sorted),
-    or ``""`` for a dense range (no gaps). The empty string is the common case, so a dense seal
-    signs and stores exactly as it did before this field existed plus one framed empty field.
-
-    Stored verbatim in ``firm_audit_seals.gap_ranges`` *and* fed to :func:`seal_mac`, so the seal
-    key signs the covered membership: a database attacker without the key cannot edit which ids a
-    seal claims to cover, which is what makes the late-commit check trustworthy (Bug #1)."""
-    ordered = sorted(intervals)
-    return ",".join(f"{lo}-{hi}" for lo, hi in ordered)
-
-
-def parse_gaps(raw: str | None) -> list[tuple[int, int]]:
-    """Inverse of :func:`canonical_gaps`: parse ``firm_audit_seals.gap_ranges`` back to intervals.
-    ``None``/``""`` (a dense seal) yields ``[]``."""
-    if not raw:
-        return []
-    intervals: list[tuple[int, int]] = []
-    for part in raw.split(","):
-        lo_s, _, hi_s = part.partition("-")
-        intervals.append((int(lo_s), int(hi_s)))
-    return intervals
-
-
-def id_in_gaps(row_id: int, intervals: Sequence[tuple[int, int]]) -> bool:
-    """Whether ``row_id`` falls in one of a seal's recorded absent-id intervals (linear over the
-    intervals — there are none in the dense common case and few otherwise)."""
-    return any(lo <= row_id <= hi for lo, hi in intervals)
+        if mac is None:
+            raise ValueError("legacy NULL-MAC rows are outside seal coverage")
+        digest.update(_field(str(row_id)))
+        digest.update(_field(mac))
+    return digest.hexdigest()
 
 
 def seal_mac(
     key: Key,
     *,
-    seq: int,
-    kind: str,
     from_id: int,
     to_id: int,
     row_count: int,
     rows_mac: str,
-    prev_mac: str,
     sealed_at: datetime,
-    gaps: str = "",
+    key_id: str,
 ) -> str:
-    """Hex ``HMAC-SHA256`` over a seal's fields — Layer 2's per-seal MAC.
-
-    Integers are framed as their decimal strings; ``sealed_at`` follows the same round-trip
-    normalization as row timestamps. ``prev_mac`` chains to seal ``seq-1`` (``"genesis"`` for
-    the first), so editing, deleting, or reordering a seal breaks the chain. ``gaps`` is the
-    :func:`canonical_gaps` string of absent-id intervals (``""`` for a dense range) — signing it
-    binds *which* ids the seal covers, so an attacker cannot rewrite the covered membership to
-    pass a deleted-sealed-row off as a benign late commit (design "Bug #1").
-    """
+    """Hex ``HMAC-SHA256`` over one independent covering seal, including its signer id."""
     message = CANON_VERSION + b"".join(
         _field(part)
         for part in (
-            str(seq),
-            kind,
+            "seal",
+            key_id,
             str(from_id),
             str(to_id),
             str(row_count),
             rows_mac,
-            prev_mac,
             canonical_created_at(sealed_at),
-            gaps,
         )
+    )
+    return _hmac_hex(key, message)
+
+
+def floor_mac(key: Key, *, through_id: int, retired_at: datetime, key_id: str) -> str:
+    """Sign one append-only retirement-floor advance, including its signer id."""
+    message = CANON_VERSION + b"".join(
+        _field(part)
+        for part in ("floor", key_id, str(through_id), canonical_created_at(retired_at))
+    )
+    return _hmac_hex(key, message)
+
+
+def activation_mac(key: Key, *, boundary_id: int, at: datetime, key_id: str) -> str:
+    """Sign the one explicit sealing-activation boundary, including its signer id."""
+    message = CANON_VERSION + b"".join(
+        _field(part) for part in ("activation", key_id, str(boundary_id), canonical_created_at(at))
     )
     return _hmac_hex(key, message)
 

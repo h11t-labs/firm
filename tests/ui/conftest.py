@@ -196,25 +196,22 @@ class Seeder:
     def seal(
         self,
         *,
-        seq: int = 1,
         kind: str = "seal",
-        from_id: int = 0,
+        from_id: int | None = 0,
         to_id: int = 1,
-        row_count: int = 1,
+        row_count: int | None = 1,
+        rows_mac: str | None = "00" * 32,
         sealed_at=None,
     ) -> None:
-        """A ``firm_audit_seals`` row — the panel reads only ``sealed_at`` (for the activation
-        moment), so the MAC columns get harmless placeholder hex."""
+        """A new-schema ``firm_audit_seals`` record with harmless placeholder MACs."""
         with self.engine.begin() as conn:
             conn.execute(
                 insert(audit_schema.seals).values(
-                    seq=seq,
                     kind=kind,
                     from_id=from_id,
                     to_id=to_id,
                     row_count=row_count,
-                    rows_mac="00" * 32,
-                    prev_mac="genesis",
+                    rows_mac=rows_mac,
                     seal_mac="ab" * 32,
                     sealed_at=sealed_at or now_utc(),
                     key_id="deadbeef",
@@ -232,8 +229,6 @@ class Seeder:
         tampered_count: int = 0,
         error_message: str | None = None,
         last_full_coverage_at=None,
-        cycle_position: int | None = None,
-        cycle_length: int | None = None,
         newest_anchor_at=None,
         anchor_configured: bool = False,
         unsealed_tail_count: int = 0,
@@ -253,8 +248,6 @@ class Seeder:
                     tampered_count=tampered_count,
                     error_message=error_message,
                     last_full_coverage_at=last_full_coverage_at,
-                    cycle_position=cycle_position,
-                    cycle_length=cycle_length,
                     newest_anchor_at=newest_anchor_at,
                     anchor_configured=anchor_configured,
                     unsealed_tail_count=unsealed_tail_count,

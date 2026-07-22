@@ -78,18 +78,22 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000
 
 ### Pruning with tamper-evidence on
 
-Without a key, pruning simply deletes rows older than `max_age` in batches. With
-[tamper-evidence](tamper-evidence.md) active (a key is configured and at least one seal exists),
-pruning **aligns to seal boundaries and only prunes what verifies**:
+Before activation, pruning simply deletes rows older than `max_age` in batches. Once
+[tamper-evidence](tamper-evidence.md) has an activation/seal/floor record, pruning **aligns to seal
+boundaries and only prunes what verifies**:
 
-- It deletes only rows in ranges **fully covered by seals older than the cutoff** — never partial
-  ranges, never unsealed rows — then writes a `kind="checkpoint"` seal carrying the chain forward.
+- It deletes only rows in ranges **fully covered by independent seals older than the cutoff** —
+  never partial ranges and never unsealed rows — then appends a signed `kind="floor"` record saying
+  every id through that boundary was legitimately retired.
 - Before deleting a range it **re-verifies** it (recomputing each row's `row_mac` and the range's
-  `rows_mac`/`row_count` against the seal). A range that no longer verifies is **refused**: nothing
-  in or beyond it is pruned, the checkpoint does not advance, `Retention.last_refused_tampered`
-  records it, and the refusal routes through `on_error`. This stops a tampered-then-expired row
-  from being laundered by deletion — the evidence stays in place, and a later `firm-audit verify`
-  still reports it as `TAMPERED`.
+  `rows_mac`/`row_count` against the seal, plus the seal's own MAC). A range that no longer verifies
+  is **refused**: nothing in or beyond it is pruned, the floor does not advance,
+  `Retention.last_refused_tampered` records it, and the refusal routes through `on_error`. This
+  stops a tampered-then-expired row from being laundered by deletion — the evidence stays in place,
+  and a later `firm-audit verify` still reports it as `TAMPERED`.
+- When an anchor is configured, retention appends the `FLOOR` line **before** committing the floor
+  row and deletions. If either anchor sink fails, pruning is refused. The signed floor row, event
+  deletion, and retired covering-seal deletion then commit in one write transaction.
 - The refusal repeats on every subsequent run until you preserve the database and investigate with
   `firm-audit verify --full`.
 

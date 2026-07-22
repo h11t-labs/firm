@@ -24,7 +24,7 @@ detects:
 - **dropping or resetting** the whole table.
 
 This is tamper-*evidence*, not tamper-*proofing* — the same trust model as AWS QLDB digests or
-certificate-transparency checkpoints. It is **not** designed to stop an attacker who holds the
+certificate-transparency proofs. It is **not** designed to stop an attacker who holds the
 database *and* the secret key *and* the external anchor, and it does not prevent destruction:
 someone with access can always `DROP TABLE`; the guarantee is that this cannot go **unnoticed**.
 Rows stay plaintext — this is integrity, not confidentiality.
@@ -39,7 +39,7 @@ anchor is only as strong as its distance from the attacker. Read this table befo
 | Anchor shipped off-host (S3, second DB, log pipeline) | remote | full Layer 3 — truncation + reset detected |
 | Anchor file on an app host, DB elsewhere | local file | protects against a DB-only compromise |
 | Everything on one host (typical SQLite setup) | local file | Layer 3 is nominal — whoever owns the host owns DB, key, *and* anchor. Layers 1+2 still stop the DB-credentials-only attacker |
-| No anchor configured | none | Layers 1+2 only — modify / forge / delete of sealed rows detected; tail truncation is not |
+| No anchor configured | none | Layers 1+2 only — row/seal modification and row deletion under a surviving seal are detected; seal deletion, ordering, and tail truncation are not |
 
 ## The three layers
 
@@ -49,8 +49,8 @@ slow path (proving ordering) needs no coordination.
 | Layer | Mechanism | Catches |
 |---|---|---|
 | **1 — row MAC** | every row self-authenticates with `HMAC-SHA256(key, canonical(row))` | modify, forge, replay |
-| **2 — seals** | a background loop chains blocks over ranges of sealed rows | delete, reorder, seal-tampering |
-| **3 — anchor** | the seal-chain head is exported outside the database | tail truncation, table drop |
+| **2 — seals** | a background loop independently signs exact id ranges | delete/insert inside a range, seal-tampering |
+| **3 — anchor** | every seal, floor, and activation event is exported outside the database | missing/reordered seals, tail truncation, table drop |
 
 **Layer 1 — per-row MAC.** At insert time, when a key is configured, the writer generates a ULID
 (`entry_id`, unique-indexed — identity and anti-replay) and stores `row_mac`, a keyed HMAC over the
@@ -60,24 +60,35 @@ an out-of-band insert has no valid MAC; a replayed row collides on `entry_id`. I
 tail a valid `(entry_id, row_mac)` pair is modification- and forgery-protected but not yet pinned
 to its position — id-to-content binding arrives with the seal.
 
-**Layer 2 — seals.** A background `SealLoop` periodically hashes a contiguous range of settled
-rows into a `firm_audit_seals` row: `rows_mac` over `(id, row_mac)` in id order, a dense unique
-`seq`, a `prev_mac` chain back to genesis, and `gap_ranges` — the ids inside the range it did *not*
-cover, signed into `seal_mac` so the covered membership itself is tamper-evident. Deleting or
-inserting a sealed row breaks `row_count`/`rows_mac`; editing or reordering a seal breaks the chain.
-Any instance may run the loop — the unique `seq` constraint arbitrates races, so no leader election
-is needed.
+**Layer 2 — seals.** A background `SealLoop` periodically hashes one contiguous settled range
+`(from_id, to_id]` into a `firm_audit_seals` row. `rows_mac` covers every `(id, row_mac)` pair in id
+order; `seal_mac` signs the range bounds, `row_count`, `rows_mac`, time, and signing `key_id`. Each
+seal stands alone. Deleting, inserting, or moving a row inside its range breaks
+`row_count`/`rows_mac`; editing the seal breaks its own MAC. Adjacent seals must be contiguous.
+Any instance may run the loop — the unique `from_id` constraint arbitrates races, so no leader
+election is needed.
 
-**Layer 3 — anchor.** After each seal, the chain head leaves the database — appended to a local
-file (`<sealed_at> <seq> <to_id> <seal_mac>`) and/or handed to a callback (ship it to S3, a second
-database, a Slack webhook). Verification checks that a seal matches the newest anchor, that the
-recorded chain extends it, and that the highest coverage the anchor ever recorded (`max(to_id)`
-across every line) is still present in the chain. The last check closes a subtle truncation:
-retention writes its checkpoint at the *head* (highest `seq`) but covering the *lowest* range, so a
-real seal it leaves behind has a **lower** `seq` than the checkpoint; deleting that seal *and* its
-rows leaves a chain that is dense and self-consistent by `seq`, with nothing in the database
-remembering those ids were ever sealed — only the anchor's exported `to_id` does. This is what
-closes tail-truncation and table-reset, which are otherwise invisible from inside the database.
+The first sealer pass also writes one signed `kind="activation"` record. Its boundary is the
+highest event id then present: rows at or below it are the legacy prefix and are never sealed;
+sealing begins strictly above it. Retention later records the pruned prefix with signed
+`kind="floor"` advances. Activation, seals, and floors use the seal key.
+
+**Layer 3 — anchor.** Every signed record also leaves the database — appended to a local file
+and/or handed to a callback (ship it to S3, a second database, a log pipeline). The file is
+append-only and has one canonical line per event:
+
+```text
+<sealed_at> SEAL <from_id> <to_id> <seal_mac>
+<retired_at> FLOOR <through_id> <floor_mac>
+<at> ACTIVATION <boundary_id> <activation_mac>
+```
+
+The anchor supplies ordering and external memory: verification can detect a database seal that
+vanished, an unexpected seal, a forged floor advance, or a reset that the database alone cannot
+remember. Parsers treat malformed attacker-controlled lines as findings, never exceptions. Seal
+and activation emission happens after the database commit and is best-effort; before doing new
+work, the sealer heals the append window by re-emitting any intact committed record missing from
+the anchor. A floor is stricter: retention must append it successfully before the prune commits.
 
 ## Rolling it out — key first, then sealing
 
@@ -88,10 +99,10 @@ is never atomic across a fleet.
    carrying MACs. No seal boundary exists yet, so a straggler instance still writing MAC-less rows
    is harmless — it is not yet an alarm.
 2. **Phase 2 — enable sealing**, once every writer carries the key: `background_sealing=True` (or
-   run `firm-audit seal`). The **first seal records the activation boundary** — the highest
-   pre-existing row id. From then on, a row *above* the boundary with no MAC is `TAMPERED` (a
-   configured writer never produces one), while rows at or below it are the legacy
-   `UNPROTECTED` set.
+   run `firm-audit seal`). The first sealer pass writes an explicit signed **activation marker**
+   whose boundary is the highest pre-existing row id. From then on, a row *above* the boundary
+   with no MAC is `TAMPERED` (a configured writer never produces one), while rows at or below it
+   are the legacy `UNPROTECTED` set.
 
 Doing it in the other order would make every rollout flash red while stragglers catch up. The
 sealer restates this order in its startup log.
@@ -101,28 +112,17 @@ sealer restates this order in its startup log.
 
 ## Sizing the grace window
 
-Seals only cover rows older than a **grace window** (`grace`, default 60 s). This is how
-out-of-order commits are handled: a row's `created_at` is stamped at insert, so any transaction
-still open when its range would be sealed must be younger than `grace`. **The rule: `grace` must
-exceed the longest application transaction that records an audit event, plus clock skew between
-instances.** As long as it does, every row is committed and visible before its id range is sealed.
-`AuditLog` emits a startup hint restating this when sealing is enabled.
+Seals only cover rows older than a **grace window** (`grace`, default 60 s). The normal
+`AuditLog.record()` path omits `conn=` and writes durably in its own short transaction, so the row
+is settled well before its range is eligible. The window also absorbs ordinary scheduling and
+clock skew between instances.
 
-A legitimate transaction that still outruns `grace` lands in an already-sealed range. Verify calls
-that a **`WARNING` (late commit)**, never `TAMPERED` — a valid MAC in a sealed range is a
-latecomer, not an attack. Only an *invalid or missing* MAC in a sealed range is tampering. False
-alarms are what train people to ignore real ones.
-
-The late-commit verdict is **soundly bounded**, not just "everything present is validly signed".
-Each seal records — and signs into its `seal_mac` — the ids in its range it did *not* cover
-(`gap_ranges`: rolled-back id-gaps, or rows not yet visible at seal time; empty for a dense range,
-the common case). A late commit fills one of those recorded gaps, so verify grants the `WARNING`
-only when the seal's **covered** (non-gap) rows still reproduce its signed `rows_mac` and
-`row_count` exactly. That closes a laundering hole: without it, a database attacker with no key
-could delete a genuinely sealed row and back-fill id-gaps with other valid signed rows (relocation
-changes only a row's `id`, which the per-row MAC ignores) to push the count past `row_count` and
-disguise the deletion as a benign late commit. Now a deleted *covered* row breaks the covered
-`rows_mac` → `TAMPERED`, and retention refuses the range.
+If you deliberately pass `conn=` (or call module-level `record(conn, ...)`) for same-transaction
+atomicity, **`grace` must exceed that caller transaction plus clock skew**. There is no late-commit
+exception: a row that appears inside an already sealed range changes the exact signed membership
+and is `TAMPERED`, even when its row MAC is valid. Each range is exactly the rows its
+`row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification. `AuditLog`
+emits a startup hint restating this when sealing is enabled.
 
 ### Long jobs: record on their own transaction
 
@@ -141,8 +141,8 @@ audit.record("etl.completed", subject=batch, actor="etl", data={"rows": 1_000_00
 ```
 
 Recording via the own-transaction path (omit `conn=`) makes the row durable immediately, or record
-*after* the job's transaction commits. `grace` then stays tight (60 s) for everything else, and the
-late-commit `WARNING` text points at this pattern by name.
+*after* the job's transaction commits. `grace` then stays tight (60 s) without risking a row
+appearing inside a range whose exact membership was already sealed.
 
 ## Key management
 
@@ -243,12 +243,12 @@ undetected. The two-key split shrinks that blast radius:
 
 - Set a distinct **seal key** — `FIRM_AUDIT_SEAL_KEY` (or `AuditLog(..., seal_key=...)`) — on the
   **designated sealer/verifier hosts only**. It signs everything on the seal side (`rows_mac` and
-  `seal_mac`, seals *and* checkpoints); ordinary app instances keep only `FIRM_AUDIT_KEY` and sign
-  just their row MACs.
+  `seal_mac`, including range seals, activation, and floors); ordinary app instances keep only
+  `FIRM_AUDIT_KEY` and sign just their row MACs.
 - After the split, an attacker who compromises an app instance holds only the row key and can forge
-  at most an individual **unsealed** row — the seal chain is out of reach. Even editing a sealed
-  row and recomputing its `row_mac` *and* the seal's `rows_mac`/`seal_mac` under the row key is
-  caught: verify checks seals under the seal key, and refuses the row key as a seal signer.
+  at most an individual **unsealed** row — the independent seals are out of reach. Even editing a
+  sealed row and recomputing its `row_mac` *and* the seal's `rows_mac`/`seal_mac` under the row key
+  is caught: verify checks seals under the seal key, and refuses the row key as a seal signer.
 
 ```bash
 # App instances (row MACs only):
@@ -270,29 +270,31 @@ to `FIRM_AUDIT_KEY`) and the seal key *is* the row key: every instance may seal,
 everything, and behavior is byte-identical to single-key mode.
 
 **The tradeoff is honest:** the split turns "any instance may seal" into a **designated sealer
-role**. Sealing and retention's checkpoint-writing both need the seal key, so in a split deployment
-they run on a sealer-role host, not just anywhere. A host without the seal key that tries to seal is
-the usual loud no-op; a host without it that tries to prune the aligned path **refuses loudly**
-(see [Retention and checkpoints](#retention-and-checkpoints)) rather than checkpoint with the wrong
-key. You gain a smaller blast radius; you pay with a second secret to manage and a role to place.
+role**. Sealing and retention's floor advance both need the seal key, so in a split deployment they
+run on a sealer-role host, not just anywhere. A host without the seal key that tries to seal is the
+usual loud no-op; a host without it that tries to prune the aligned path **refuses loudly**
+(see [Retention and the signed floor](#retention-and-the-signed-floor)) rather than sign a floor
+with the wrong key. You gain a smaller blast radius; you pay with a second secret to manage and a
+role to place.
 
 ## Verifying
 
-`firm-audit verify` (and `AuditLog.verify()`) recompute Layer 1 per row (keyset-paginated on `id`
-for bounded memory), walk the Layer 2 seal chain, and compare against the anchor for Layer 3. Every
-finding carries one of four **verdict classes**:
+`firm-audit verify` (and `AuditLog.verify()`) check Layer 1 rows (keyset-paginated on `id` for
+bounded memory), independent Layer 2 seals plus the signed activation/floor records, and the Layer
+3 anchor. Every finding carries one of four **verdict classes**:
 
 | Verdict | Meaning |
 |---|---|
-| `OK` | chain, seals, rows, and anchor all consistent |
-| `WARNING` | a valid-MAC row in a sealed range (late commit — tune `grace` or use the long-job pattern), or an unsealed tail older than a threshold (sealer liveness) |
+| `OK` | rows, seals, activation/floor records, and anchor all consistent |
+| `WARNING` | an unsealed tail or anchor older than its liveness threshold |
 | `UNPROTECTED` | NULL-MAC rows at or below the activation boundary — written before the key existed |
-| `TAMPERED` | invalid/missing MAC after activation, `row_count`/`rows_mac` mismatch, a broken seal chain, an unparseable seal field (e.g. a corrupted `gap_ranges`), or an anchor contradiction |
+| `TAMPERED` | invalid/missing MAC after activation, exact-range mismatch, invalid/non-contiguous seal or marker, a row at/below the floor, or an anchor contradiction |
 
-A seal field an attacker can edit but not re-sign (a garbage `gap_ranges`, say) is treated as a
-tampering **finding**, never an uncaught exception: verify persists `TAMPERED` and returns rather
-than raising, so a malformed field can't freeze the dashboard's last status at `OK` while the
-database is tampered.
+A signed-record or anchor field an attacker can edit but not re-sign is treated as a tampering
+**finding**, never an uncaught parse exception: verify persists `TAMPERED` and returns, so malformed
+attacker-controlled content cannot freeze the dashboard's last status at `OK`. An unknown
+`key_id` remains a `VerifyError`, persisted as the `error` outcome because no verdict can be
+reached without the signing key.
 
 ### Exit codes
 
@@ -300,34 +302,30 @@ database is tampered.
 - **Non-zero** — any `TAMPERED` finding.
 - **Non-zero (anchor exception)** — when `--anchor` is given and the newest anchor is older than
   `anchor_max_age` (default: 3× the seal interval, configurable). The silently-truncatable window
-  between the last anchored seal and the chain head is the one thing only Layer 3 guards; letting
-  it grow unbounded behind an exit-0 warning would quietly degrade the only guarantee the anchor
-  exists to give. Anchor *writes* stay best-effort — strictness lives on the verification side.
+  between the last anchored event and the newest database record is the one thing only Layer 3
+  guards; letting it grow unbounded behind an exit-0 warning would quietly degrade the only
+  guarantee the anchor exists to give. Seal/activation writes stay best-effort and heal on a later
+  sealer pass; floor writes are a hard pre-prune gate.
 
 Verification is read-only and runs anywhere the key is available. It reads seals and rows inside a
 **snapshot transaction** (`REPEATABLE READ` on Postgres/MySQL, a WAL snapshot on SQLite) so a
 concurrent legitimate prune committing between its reads cannot make it compare stale seals to
 already-pruned rows and report a false `TAMPERED`.
 
-### Rolling full coverage
+### Stateless partial coverage
 
-Re-reading every sealed range on every run is expensive; only ever reading the tail would let an
-edit in last week's data hide until someone remembers to run `--full`. The default run threads the
-needle: it verifies the **unsealed tail and the newest seals, plus a rotating slice of older sealed
-ranges**, sized so every range is recomputed at least once every `verify_cycle` runs (default 7 —
-a nightly cron gives full coverage weekly). For an **honest operator** an edit in an old range is
-therefore caught by the *default* run within a bounded, documented delay.
+Re-reading every sealed range on every run is expensive; only reading the tail would leave old
+row edits unchecked. The default run verifies every always-on invariant (all signed-record MACs,
+activation/floor validity, seal contiguity, anchor completeness, pruned-region emptiness, duplicate
+`entry_id`s, and tail liveness), recomputes the unsealed tail, and selects
+`ceil(range_count / verify_cycle)` ranges from the day's distance since 1970. It always adds the
+newest range if that slice did not select it. The choice is deterministic and **stateless**: there
+is no cursor, state file, or mutable rotation position.
 
-The rotation state is **advisory only**: it schedules work but is never trusted for a verdict — the
-seal chain, the anchor, the pruned-region-empty probe, and the unsealed tail are all walked in full
-*every* run regardless. But the cursor is **not** MAC-protected, so it is not a coverage guarantee
-against a *cursor-tampering* attacker: one who can write the state file can **pin** it — rewriting
-it to the same value before every non-`--full` run — and keep one chosen older range out of the
-rolling slice indefinitely, deferring recomputation of an edit there. **Only a periodic `--full`
-guarantees every sealed range is recomputed** (it ignores the cursor); treat the rolling slice as an
-accelerator for an honest operator, not proof that an old range was recently checked. Run a
-from-genesis `--full` on a schedule — especially when the verify state and the database share a
-host — and heed the warning verify emits whenever a non-`--full` run does a partial slice.
+This keeps the default cost bounded, but **only a periodic `--full` guarantees every sealed range
+is recomputed**. A skipped schedule can skip a date-selected slice too; do not treat partial runs as
+proof that every old row was recently checked. Run `--full` on a schedule appropriate to the risk
+and data volume.
 
 > **Green is honestly scoped.** The dashboard's integrity strip states the age of the last
 > *full-coverage* pass, not just the last run — "green" never silently means "only the tail was
@@ -360,7 +358,7 @@ concise high-severity line to stderr (the project bans stdlib logging, so this m
 `on_error`'s stderr route) — so even a stock deployment's logstream shows it:
 
 ```text
-firm-audit: CRITICAL tamper detected — 2 findings, affected: row 42, seal 12 (verified 2026-07-21 03:00:00)
+firm-audit: CRITICAL tamper detected — 2 findings, affected: #42 invoice.paid, sealed range (11, 20] (verified 2026-07-21 03:00:00)
 ```
 
 `OK` and `UNPROTECTED` runs stay silent; the `error` outcome (verify itself could not check — e.g.
@@ -373,50 +371,30 @@ per-finding messages to stdout and returns the exit code; the stderr line is the
 event). There is deliberately **no `VerifyLoop`** yet — the detection cadence is a cron/CLI run or a
 caller-run loop; `on_finding` is what turns each such run into an event.
 
-## Retention and checkpoints
+## Retention and the signed floor
 
-Pruning deletes old rows, which would read as tampering — so retention and sealing are wired
-together with **checkpoint seals** (see [Retention & querying](retention-and-querying.md)):
+Pruning deletes old rows, which would otherwise read as tampering. Retention therefore advances one
+logical, signed **retirement floor** (append-only `kind="floor"` records; the highest valid advance
+wins). See [Retention & querying](retention-and-querying.md).
 
 1. `Retention.run_once` aligns its cutoff to a seal boundary — it deletes only rows in ranges
    **fully covered by seals older than the cutoff**, never partial ranges and never unsealed rows.
-2. **Retention refuses to prune what verify would call `TAMPERED`.** Before deleting a
-   fully-expired sealed range, it re-checks both the **seal itself** — recomputing its `seal_mac`
-   and confirming its `prev_mac` chain linkage (so an edited `seal_mac` is never laundered by a
-   prune while its rows still reproduce `rows_mac`) — and the **rows under it**, using the **same
-   classifier the verifier runs**: recomputing every row's `row_mac` from its content *and* the
-   range's `rows_mac`/`row_count` against the seal (one classifier, two callers, so retention and
-   verify can never disagree). A `TAMPERED` range — a deletion, a count-preserving swap, an
-   invalid/missing MAC, an edited seal, an unverifiable seal — is **refused**: pruning stops there,
-   the checkpoint never advances
-   past it, the count lands on `Retention.last_refused_tampered`, and the refusal routes through
-   `on_error`. This closes a laundering hole — an attacker who edits an old sealed row with a plain
-   `UPDATE` (no key needed) and waits for it to age past `max_age` cannot get a naive prune to
-   delete the evidence and checkpoint over it. The refusal stops at the first bad range and repeats
-   every run until an operator investigates (`firm-audit verify --full`), so the evidence is
-   preserved, never erased.
-
-   A range whose only divergence is a **valid-MAC late commit** (a `WARNING`, not `TAMPERED` — see
-   [Sizing the grace window](#sizing-the-grace-window)) is **not** refused. A transaction that
-   outran `grace` and landed a genuine, validly-signed row in an already-sealed range is a latecomer,
-   not an attack — and on real-concurrency backends (Postgres, MySQL) a writer racing the sealer's
-   grace window makes this happen for real. Refusing it would block pruning forever over a benign
-   event; instead the range is pruned (the late row is expired too, so deleting it with the range
-   destroys no evidence). Only an *invalid or missing* MAC in a sealed range stops the prune. Trade-off:
-   pre-prune classification **re-reads (keyset-paginated) every row it is about to delete** — a
-   bounded read cost paid once per prune.
-3. After deleting, it writes a `kind="checkpoint"` seal recording `pruned_through_id` and carries
-   the chain forward as usual. The pre-prune re-verify, the deletion, and the checkpoint write all
-   run in **one transaction** (`SERIALIZABLE` on Postgres/MySQL, `BEGIN IMMEDIATE` on SQLite), so a
-   crash mid-prune can never leave a covering seal with rows missing and no checkpoint (which would
-   read as a permanent false `TAMPERED`), and a row changed after the check but before the delete is
-   never laundered.
-4. Verify skips row-recomputation at or below the newest checkpoint but still validates the seal
-   chain across it. Rows *above* the checkpoint that go missing remain violations. It also asserts
-   the pruned region is **empty**: retention deleted every row through the floor, so *any* surviving
-   row at an id at or below the floor is a forged insert into a range the checkpoint records as
-   holding zero rows — `TAMPERED`, caught by a bounded probe on *every* run (not just `--full`),
-   never invisible just because verify skips recomputation there.
+2. **Retention refuses to prune what verify would call `TAMPERED`.** Before deleting each expired
+   range, it rechecks the independent seal's own MAC and runs the **same exact range classifier as
+   verify**: every row MAC plus the range's `rows_mac`/`row_count`. Any surplus, missing, altered,
+   or moved row fails; there is no late-arrival exception. Pruning stops at the first bad range,
+   `Retention.last_refused_tampered` records the refusal, `on_error` fires, and every row remains
+   for `firm-audit verify --full` and investigation. The read is keyset-paginated but must revisit
+   every row about to be deleted.
+3. Retention signs the next floor (`through_id`, retirement time, and signing `key_id`). Every
+   configured anchor sink must accept the `FLOOR` event **before** the database transaction can
+   commit; a sink failure refuses the prune. The floor row, event deletion, and deletion of fully
+   retired covering seals then commit together in one write transaction. Floor records themselves
+   are append-only and monotonic.
+4. Verify honors the highest authentic floor (and, when an anchor is used, only an anchored
+   advance). Anchored seals entirely at/below it may legitimately be absent. Above it, seals must
+   tile contiguously from `max(floor, activation boundary)`. Verify also probes the retired prefix
+   on every run: any surviving or reinserted row with `id <= floor` is `TAMPERED`.
 
 This gives retention a hidden dependency on **sealer liveness**: with a stalled sealer, nothing
 past the last seal is prunable, so the table can grow past `max_age`. That failure is **loud, not
@@ -424,13 +402,13 @@ silent** — `run_once` returns and logs the count of expired-but-unsealed rows 
 `firm-audit prune` prints it, a skip count above a threshold routes through `on_error`, and
 verify's unsealed-tail-age `WARNING` independently flags the stalled sealer.
 
-A checkpoint is a seal, so in a [two-key deployment](#two-key-split-a-separate-seal-key-optional-hardening)
-**retention needs the seal key**. Run pruning on a sealer-role host that has `FIRM_AUDIT_SEAL_KEY`.
-On a host without it — one carrying only the row key — the aligned path would sign the checkpoint
-with the wrong key, so `run_once` **refuses the whole aligned prune**: it deletes nothing, sets
-`Retention.last_refused_no_seal_key`, routes the refusal through `on_error`, and `firm-audit prune`
-prints it. (In single-key mode the seal key *is* the row key, so this never triggers and pruning is
-unchanged.)
+The floor is seal-side evidence, so in a
+[two-key deployment](#two-key-split-a-separate-seal-key-optional-hardening) **retention needs the
+seal key**. Run pruning on a sealer-role host that has `FIRM_AUDIT_SEAL_KEY`. On a host without it
+— one carrying only the row key — `run_once` **refuses the whole aligned prune**: it deletes
+nothing, sets `Retention.last_refused_no_seal_key`, routes the refusal through `on_error`, and
+`firm-audit prune` prints it. (In single-key mode the seal key *is* the row key, so this never
+triggers and pruning is unchanged.)
 
 ## Deployment hardening
 
@@ -454,7 +432,7 @@ GRANT USAGE, SELECT ON SEQUENCE firm_audit_events_id_seq TO firm_app;
 -- A separate role that retention (pruning) runs as:
 CREATE ROLE firm_retention LOGIN PASSWORD '...';
 GRANT SELECT, DELETE ON firm_audit_events TO firm_retention;
-GRANT INSERT, SELECT ON firm_audit_seals TO firm_retention;  -- checkpoint seals
+GRANT INSERT, SELECT ON firm_audit_seals TO firm_retention;  -- signed floor records
 ```
 
 > A database first created on firm-audit 0.1.0 and upgraded through migration `0002` keeps its
@@ -478,11 +456,13 @@ alias) is not enough.
 Turning the feature on requires Alembic migration **`0002`**, which first renames the released
 `firm_audits` table to `firm_audit_events` (with its secondary indexes) to match the workspace
 `firm_<module>_<entity>` convention, then adds three nullable columns (`entry_id`, `row_mac`,
-`key_id`), a unique index on `entry_id`, and the `firm_audit_seals` (including its nullable
-`gap_ranges` column — the signed absent-id intervals a seal skips) and `firm_audit_verify_status`
-side tables. The rename is in place and preserves existing rows; nullable columns are
-zero-downtime. Direct-SQL consumers and least-privilege grants that reference `firm_audits` by
-name must be updated to `firm_audit_events`.
+`key_id`), a unique index on `entry_id`, and two side tables. `firm_audit_seals` stores three signed
+record kinds (`seal`, `activation`, `floor`) in one id-based schema: `from_id`, `to_id`,
+`row_count`, `rows_mac`, `seal_mac`, `sealed_at`, and `key_id`. `firm_audit_verify_status` stores
+the latest result and last explicit full-coverage time; partial verification has no cursor or state
+columns. The rename is in place and preserves existing rows; nullable event columns are
+zero-downtime. Direct-SQL consumers and least-privilege grants that reference `firm_audits` by name
+must be updated to `firm_audit_events`.
 
 The **unique index on `entry_id` is not** zero-downtime by default:
 
@@ -499,6 +479,4 @@ same rollout that sets `FIRM_AUDIT_KEY` — Phase 1 above.
 - [Configuration](configuration.md) — every `AuditLog(...)` option, including the tamper-evidence
   parameters.
 - [CLI](cli.md) — `firm-audit verify` and `firm-audit seal`.
-- [Retention & querying](retention-and-querying.md) — how pruning and checkpoint seals interact.
-</content>
-</invoke>
+- [Retention & querying](retention-and-querying.md) — how pruning and the signed floor interact.

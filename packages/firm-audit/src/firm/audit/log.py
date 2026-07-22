@@ -21,8 +21,8 @@ from .retention import Retention, RetentionLoop
 from .sealing import Sealer, SealLoop
 from .verify import IntegrityAlert, Verifier, VerifyReport, default_on_finding
 
-#: The anchor callback's signature: ``(seq, seal_mac, sealed_at)`` for one freshly sealed block.
-AnchorCallback = Callable[[int, str, datetime], None]
+#: Anchor callback: ``(kind, from_id, to_id, mac, at)`` for a seal/floor/activation event.
+AnchorCallback = Callable[[str, int | None, int, str, datetime], None]
 
 #: The integrity-alert callback's signature: one :class:`~firm.audit.verify.IntegrityAlert` per
 #: verify run that detected tampering (critical) or a warning. Defaults to a one-line stderr sink.
@@ -97,7 +97,6 @@ class AuditLog:
         verify_cycle: int = 7,
         anchor_max_age: float | None = None,
         unsealed_tail_max_age: float | None = None,
-        verify_state_path: str | None = None,
         on_error: Callable[[BaseException], None] | None = None,
         on_finding: FindingCallback | None = None,
     ) -> None:
@@ -123,11 +122,11 @@ class AuditLog:
         # deployment with no seal key behaves exactly as before (every instance may seal, one key
         # signs everything). Set it — on the designated sealer/verifier hosts only — to shrink the
         # blast radius: a compromised app instance then holds only the row key and can forge at most
-        # individual unsealed rows; the seal chain stays out of reach. It signs ``rows_mac`` and
+        # individual unsealed rows; independent seals stay out of reach. It signs ``rows_mac`` and
         # ``seal_mac`` (everything in ``firm_audit_seals``); row MACs keep using the row key. If the
         # configured seal key equals the row key, that is simply single-key mode.
         # ``_seal_key_split`` records whether a *distinct* seal key is in force (drives verify's
-        # seal-keyring narrowing and retention's checkpoint gate).
+        # seal-keyring narrowing and retention's signed-floor gate).
         _seal_raw = seal_key if seal_key is not None else os.environ.get("FIRM_AUDIT_SEAL_KEY")
         _loaded_seal = load_key(_seal_raw)  # None if unset/empty; hard-fails a too-short secret
         self._seal_key = _loaded_seal if _loaded_seal is not None else self._key
@@ -163,10 +162,9 @@ class AuditLog:
         )
         self._on_anchor = on_anchor
 
-        # Verification config (Layer 3 / rolling coverage). ``anchor_max_age`` defaults to 3x the
+        # Verification config. ``anchor_max_age`` defaults to 3x the
         # seal interval (design D16); the unsealed-tail liveness threshold to a generous multiple
         # of the seal cadence (grace + interval is the normal ceiling, so well past means stalled).
-        # The rolling-cursor state path is advisory only and falls back to an env var.
         self.verify_cycle = verify_cycle
         self._anchor_max_age = anchor_max_age if anchor_max_age is not None else 3.0 * seal_interval
         self._unsealed_tail_max_age = (
@@ -174,12 +172,6 @@ class AuditLog:
             if unsealed_tail_max_age is not None
             else max(10.0 * seal_interval, grace + seal_interval)
         )
-        self._verify_state_path = (
-            verify_state_path
-            if verify_state_path is not None
-            else os.environ.get("FIRM_AUDIT_VERIFY_STATE")
-        )
-
         if create_schema:
             schema.create_all(self.engine)
 
@@ -224,9 +216,8 @@ class AuditLog:
         warnings.warn(
             f"audit sealing is enabled (grace={self.grace}s, interval={seal_interval}s). Grace "
             "must exceed your longest audit-recording transaction plus inter-instance clock "
-            "skew, or legitimate late commits land in a sealed range (verify reports them as a "
-            "WARNING, never TAMPERED). Record long-running jobs via the own-transaction path "
-            "(omit conn=) rather than widening grace fleet-wide.",
+            "skew; a row that appears inside an already sealed range is TAMPERED. Record "
+            "long-running jobs via the own-transaction path (omit conn=).",
             stacklevel=3,
         )
 
@@ -300,21 +291,17 @@ class AuditLog:
                 limit=limit,
             )
 
-    def verify(
-        self, *, anchor_path: str | None = None, from_seq: int | None = None, full: bool = False
-    ) -> VerifyReport:
-        """Verify Layers 1-3 read-only and persist the outcome to ``firm_audit_verify_status``.
+    def verify(self, *, anchor_path: str | None = None, full: bool = False) -> VerifyReport:
+        """Verify rows, independent seals, markers, and anchor; persist the outcome.
 
         ``anchor_path`` defaults to the configured anchor (:data:`FIRM_AUDIT_ANCHOR_PATH`) so a
         deployment that writes an anchor also checks it; pass a path to override, or ``full=True``
-        to recompute every sealed range from the genesis/checkpoint floor (design review D12).
+        to recompute every sealed range. Only a full run guarantees complete range coverage.
         Raises :class:`~firm.audit.verify.VerifyError` on an unknown ``key_id`` (after writing the
-        ``error`` outcome). Reuses one :class:`~firm.audit.verify.Verifier` so the advisory rolling
-        cursor advances across calls in a long-running process.
+        ``error`` outcome).
         """
         return self.verifier.run(
             anchor_path=anchor_path if anchor_path is not None else self._anchor_path,
-            from_seq=from_seq,
             full=full,
         )
 

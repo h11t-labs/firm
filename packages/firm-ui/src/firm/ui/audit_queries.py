@@ -229,11 +229,13 @@ def _affected_is_truncated(raw: str | None) -> bool:
 
 def row_integrity_context(conn: Connection) -> dict[str, Any]:
     """The signals :func:`row_status` needs, gathered once per page: whether tamper-evidence is in
-    use at all (``active`` — any seal exists or a verify run has happened), the newest sealed
-    ``to_id`` (``max_sealed_to_id``, 0 when nothing is sealed), and the set of row ids the latest
-    verify flagged tampered (``tampered_ids``). When ``active`` is False the table adds no status
-    column at all, so a plain audit log looks exactly as it did before tamper-evidence existed."""
-    max_to = conn.execute(select(func.max(_seals.c.to_id))).scalar()
+    use at all (``active`` — any seal/activation/floor record exists or a verify run has happened),
+    the newest covering seal's ``to_id`` (``max_sealed_to_id``, 0 when nothing is sealed), and the
+    set of row ids the latest verify flagged tampered (``tampered_ids``). When ``active`` is False
+    the table adds no status column at all, so a plain audit log looks exactly as it did before
+    tamper-evidence existed."""
+    any_record = conn.execute(select(_seals.c.id).limit(1)).first() is not None
+    max_to = conn.execute(select(func.max(_seals.c.to_id)).where(_seals.c.kind == "seal")).scalar()
     status = verify_status_row(conn)
     affected = status["affected_identifiers"] if status else None
     # When the latest run is tampered AND its affected list was truncated, the known tampered-id set
@@ -243,7 +245,7 @@ def row_integrity_context(conn: Connection) -> dict[str, Any]:
         status and status["outcome"] == "tampered" and _affected_is_truncated(affected)
     )
     return {
-        "active": max_to is not None or status is not None,
+        "active": any_record or status is not None,
         "max_sealed_to_id": max_to or 0,
         "tampered_ids": _tampered_row_ids(affected),
         "tampered_truncated": truncated,
@@ -294,8 +296,7 @@ class IntegrityConfig:
     "configured but never verified" apart from "no key at all" (design D22). ``key_configured``
     is supplied by the *server context* (the dashboard process's ``FIRM_AUDIT_KEY``), never
     inferred from whether a status row happens to exist; ``sealing_active`` / ``sealing_since``
-    come from the seal chain, since a running sealer is what stamps the first seal and dates the
-    activation the panel's "active since N" line names."""
+    come from the explicit signed activation marker written by the first sealer pass."""
 
     key_configured: bool
     sealing_active: bool
@@ -308,7 +309,7 @@ class IntegrityState:
     the pill/strip colour token (``ok``/``warn``/``danger``/``neutral``); ``escalate`` is whether
     this state also renders at the top of the overview page (TAMPERED and amber-liveness do, the
     calm OK strip does not — review D23); ``causes`` are machine tokens (``stale``,
-    ``sealer_stalled``, ``anchor_stale``, ``late_commits``) that :mod:`.render` turns into the
+    ``sealer_stalled``, ``anchor_stale``, ``verify_warnings``) that :mod:`.render` turns into the
     itemized WARNING/ERROR prose. ``status``/``config`` carry the raw values render reads for
     timestamps, counts, and affected-range links; ``verify_max_age``/``anchor_max_age`` are the
     thresholds this state was derived under, so the prose can name them honestly."""
@@ -342,8 +343,6 @@ def verify_status_row(conn: Connection) -> dict[str, Any] | None:
         "tampered_count": row.tampered_count,
         "error_message": row.error_message,
         "last_full_coverage_at": row.last_full_coverage_at,
-        "cycle_position": row.cycle_position,
-        "cycle_length": row.cycle_length,
         "newest_anchor_at": row.newest_anchor_at,
         "anchor_configured": row.anchor_configured,
         "unsealed_tail_count": row.unsealed_tail_count,
@@ -357,9 +356,11 @@ def verify_status_row(conn: Connection) -> dict[str, Any] | None:
 
 def integrity_config(conn: Connection, *, key_configured: bool) -> IntegrityConfig:
     """Whether integrity is switched on. ``key_configured`` is the server's own
-    ``FIRM_AUDIT_KEY`` presence (passed in, not read here); sealing state comes from the seal
-    chain — ``sealing_since`` is the oldest seal's ``sealed_at``, i.e. the activation moment."""
-    since = conn.execute(select(func.min(_seals.c.sealed_at))).scalar_one()
+    ``FIRM_AUDIT_KEY`` presence (passed in, not read here); sealing state comes only from the
+    explicit signed ``kind="activation"`` marker, whose ``sealed_at`` is the activation moment."""
+    since = conn.execute(
+        select(func.min(_seals.c.sealed_at)).where(_seals.c.kind == "activation")
+    ).scalar_one()
     return IntegrityConfig(
         key_configured=key_configured, sealing_active=since is not None, sealing_since=since
     )
@@ -415,7 +416,7 @@ def integrity_state(
     if status["anchor_configured"] and anchor_age is not None and anchor_age > anchor_max_age:
         causes.append("anchor_stale")
     if status["warning_count"]:
-        causes.append("late_commits")
+        causes.append("verify_warnings")
 
     if status["outcome"] == "error":
         # ERROR (verify itself failed, e.g. unknown key_id) is amber and counts toward liveness
@@ -423,8 +424,8 @@ def integrity_state(
         return make("error", "warn", True, tuple(causes))
     if status["outcome"] == "warning" or causes:
         # Only a stalled pipeline (verify not running, sealer behind) is "amber liveness" and
-        # escalates to the overview; a benign late-commit / stale-anchor warning stays on the
-        # audit tab (review D23).
+        # escalates to the overview; a verifier / stale-anchor warning stays on the audit tab
+        # (review D23).
         liveness = bool({"stale", "sealer_stalled"}.intersection(causes))
         return make("warning", "warn", liveness, tuple(causes))
     return make("ok", "ok", False)

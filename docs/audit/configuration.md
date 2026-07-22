@@ -14,10 +14,11 @@ AuditLog(
     seal_key=None,                  # separate seal-side secret; None = use mac_key (env: FIRM_AUDIT_SEAL_KEY)
     background_sealing=False,       # run the seal loop on a timer (requires a key)
     seal_interval=60.0,             # seconds between seal runs
-    grace=60.0,                     # seal only rows older than this (out-of-order commit window)
+    grace=60.0,                     # seal only rows older than this (settling window)
     seal_batch_size=10_000,         # max rows sealed per transaction
-    anchor_path=None,               # append the seal-chain head here (env: FIRM_AUDIT_ANCHOR_PATH)
-    on_anchor=None,                 # callback(seq, seal_mac, sealed_at) for custom anchor sinks
+    anchor_path=None,               # append seal/floor/activation events here
+    on_anchor=None,                 # callback(kind, from_id, to_id, mac, at) for custom sinks
+    verify_cycle=7,                 # stateless older-range rotation period in days
 )
 ```
 
@@ -37,12 +38,13 @@ picture. Without a key, none of these have any effect and the schema behaves exa
 | Option | Default | Notes |
 |---|---|---|
 | `mac_key` | `None` (env `FIRM_AUDIT_KEY`) | Feature key (the **row key**). Must be a UTF-8 string of **≥ 32 chars** — shorter is a hard error at startup. Pass `""` to force the feature off and ignore the environment. |
-| `seal_key` | `None` (env `FIRM_AUDIT_SEAL_KEY`) | Optional **separate seal key** — signs `rows_mac`/`seal_mac` (seals + checkpoints); row MACs keep using `mac_key`. Unset (or equal to `mac_key`) = single-key mode, unchanged. Same ≥ 32-char validation. Set it on **sealer/verifier hosts only** to shrink the blast radius of an instance compromise — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
+| `seal_key` | `None` (env `FIRM_AUDIT_SEAL_KEY`) | Optional **separate seal key** — signs independent seals, the activation marker, and retirement floors; row MACs keep using `mac_key`. Unset (or equal to `mac_key`) = single-key mode, unchanged. Same ≥ 32-char validation. Set it on **sealer/verifier hosts only** to shrink the blast radius of an instance compromise — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
 | `background_sealing` / `seal_interval` | `False` / `60.0` | Opt-in timer-based sealing (Layer 2), signing with the seal key. Enable only after the key is deployed fleet-wide — see the [two-phase rollout](tamper-evidence.md#rolling-it-out-key-first-then-sealing). |
-| `grace` | `60.0` | Seals cover only rows older than this. **Must exceed the longest audit-recording transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
+| `grace` | `60.0` | Seals cover only rows older than this. The default `record()` path commits in its own short transaction; if you pass `conn=`, this window **must exceed that caller transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
 | `seal_batch_size` | `10_000` | Max rows sealed per transaction, so a sealer backlog becomes several seals, never one monster transaction. |
-| `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file the seal-chain head is written to (Layer 3). |
-| `on_anchor` | `None` | Callback `(seq, seal_mac, sealed_at)` for shipping the anchor off-host (S3, a second DB, a webhook). Failures route to `on_error`, never crash the seal. |
+| `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file that records every `SEAL`, `FLOOR`, and `ACTIVATION` event (Layer 3). |
+| `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping the same events off-host (S3, a second DB, a webhook). Seal/activation failures route to `on_error` and are healed on a later sealer pass; a floor sink failure refuses the prune. |
+| `verify_cycle` | `7` | Default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. This is stateless: there is no cursor or verify state file. Only `full=True` / `--full` guarantees complete range coverage. |
 
 Rotation uses two verify-only archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
 **row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
@@ -53,7 +55,7 @@ Rotation uses two verify-only archives of **retired** keys, `FIRM_AUDIT_RETIRED_
 | Variable | Used by | Purpose |
 |---|---|---|
 | `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret — the **row key** (≥ 32 chars). |
-| `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals + checkpoints; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
+| `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals, activation, and floors; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
 | `FIRM_AUDIT_RETIRED_KEYS` | verify | Retired **row** keys (rotation): `"id1=old,…"`. Eligible for row-MAC verification only — **never** to validate a seal, in any mode. |
 | `FIRM_AUDIT_RETIRED_SEAL_KEYS` | verify | Retired **seal** keys (rotation): `"id1=old,…"`. Eligible for seal verification *and* row verification (a seal key is higher-privilege). A single-key deployment retires its key here. |
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
@@ -64,8 +66,10 @@ Call `audit.close()` (or use the `with` form) to stop the background loop and di
 ## Two topologies
 
 **Shared database** — pass `engine=` pointing at your application's own engine (or the same
-`database_url`). `AuditLog.record(..., conn=...)` and the module-level `record(conn, ...)` then
-write inside *your* transaction: atomic with the business change, the same-transaction guarantee.
+`database_url`). By default `AuditLog.record(...)` writes durably in its own short transaction.
+`AuditLog.record(..., conn=...)` and the module-level `record(conn, ...)` instead write inside
+*your* transaction: atomic with the business change. With sealing enabled, that caller transaction
+must commit inside `grace`; a row that appears inside an already sealed range is tampering.
 
 ```python
 from firm.audit import AuditLog

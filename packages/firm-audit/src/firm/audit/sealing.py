@@ -1,42 +1,19 @@
-"""Layer 2 — asynchronous seals over ranges of sealed rows.
+"""Asynchronous independent seals and the explicit activation marker.
 
-Layer 1 (:mod:`.events`) makes every row self-authenticate, but a *deleted* row simply isn't
-there to check. Sealing closes that hole without reintroducing the coordination a synchronous
-hash chain would need (see the design's "Why not the obvious design"): a background
-:class:`SealLoop` periodically walks the rows committed since the last seal and writes one
-chained ``firm_audit_seals`` block over them. Existence and ordering are protected by the seal;
-the write path stays lock-free and multi-writer.
+Layer 1 authenticates each keyed event but cannot prove that a row still exists. Layer 2 closes
+that gap with independent seals over settled id ranges. Each seal signs only its own range and the
+``(id, row_mac)`` pairs inside it; ordering comes from id-contiguity and deletion memory comes from
+the optional append-only anchor, not from a predecessor chain.
 
-Three properties carry the design:
-
-* **No election.** Every instance may run the sealer. The unique index on ``seq`` is the
-  arbiter — if two sealers race, one INSERT wins and the loser catches the violation, rolls
-  back, and retries next tick. Nothing coordinates beyond that one constraint, so it is
-  portable to SQLite/MySQL/Postgres with no extra infrastructure.
-
-* **The grace window handles out-of-order commits.** A row's ``created_at`` is stamped at
-  insert, so only rows older than ``grace`` are eligible to seal; as long as ``grace`` exceeds
-  the longest audit-recording transaction (plus inter-instance clock skew), every row is
-  committed and visible before its id range is sealed. Ordering is by ``id``, never by
-  ``created_at`` — clock skew widens the needed ``grace`` but can never corrupt the chain.
-
-* **Two-phase rollout (design review D13).** Key presence and sealing are separate switches
-  because key-enablement is never atomic across a fleet. Phase 1 deploys ``FIRM_AUDIT_KEY``
-  everywhere (rows start carrying MACs); phase 2 enables sealing once every writer carries the
-  key. The initial backlog drain seals everything from the beginning of the table (``from_id``
-  0), so pre-existing legacy rows — written before the key existed and carrying no ``row_mac`` —
-  are sealed too, hashed with the explicit ``nomac`` marker so their deletion is still
-  detectable (review 5A). That drain is *batched* (below), so it becomes several seals rather
-  than one: the **activation boundary** is therefore the highest sealed id, not seq 1's
-  ``to_id`` (:meth:`~firm.audit.verify.Verifier._floor_and_boundary` reads it as
-  ``max(to_id)``). Verify treats a NULL-MAC row at or below the boundary as *unprotected
-  (legacy)* and one above it as *tampered* (a configured writer never emits a NULL MAC, so a
-  missing one after activation is config drift or a forged insert).
-  :class:`~firm.audit.log.AuditLog` restates this deploy-key-first order when sealing is enabled.
+The first sealer pass writes one signed ``activation`` record whose boundary is the highest event
+id then present. Rows at or below that boundary are legacy and are never sealed. Later passes seal
+only rows above the boundary after the grace window. Racing sealers choose the same ``from_id``;
+the unique index on that coordinate is the portable arbiter.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -48,7 +25,14 @@ from .._core.clock import now_utc
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
-from .integrity import Key, canonical_created_at
+from .integrity import Key
+from .verify import (
+    _format_anchor_event,
+    _read_anchor,
+    _record_matches_anchor,
+    load_seal_records,
+    seal_is_intact,
+)
 
 if TYPE_CHECKING:
     from .log import AuditLog
@@ -56,89 +40,128 @@ if TYPE_CHECKING:
 _audits = schema.audit_events
 _seals = schema.seals
 
-#: The ``prev_mac`` of seal ``seq == 1``; there is no earlier seal to chain to.
-_GENESIS = "genesis"
+# A real event id is positive. Reserving this unique ``from_id`` gives concurrent activation
+# attempts the same database arbiter as concurrent range seals without adding another table/index.
+_ACTIVATION_FROM_ID = -1
 
 
 class Sealer:
-    """Writes chained seals over the rows committed since the last seal.
-
-    Reads its configuration from the owning :class:`~firm.audit.log.AuditLog`
-    (:attr:`~firm.audit.log.AuditLog.grace`, :attr:`~firm.audit.log.AuditLog.seal_batch_size`,
-    the key, and the anchor sink), exactly as :class:`~firm.audit.retention.Retention` reads
-    ``max_age`` — so :meth:`run_once`, ``firm-audit seal``, and :class:`SealLoop` all share one
-    implementation.
-    """
+    """Activate sealing once, then write independent seals over settled rows."""
 
     def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
 
     def run_once(self) -> int:
-        """Seal the backlog of committed, past-grace rows and return how many rows were sealed.
+        """Activate if needed, seal the eligible backlog, and return the sealed row count.
 
-        A no-op (returns 0) when no seal key is configured — sealing needs a key to sign, and
-        without one there is nothing to protect (design review D13; a startup hint is emitted when
-        sealing is enabled but the key is missing). The seal key is the two-key split's signer
-        (:attr:`~firm.audit.log.AuditLog._seal_key`): a distinct ``FIRM_AUDIT_SEAL_KEY`` when
-        configured, otherwise the row key, so single-key deployments are unchanged.
-
-        Drains the whole backlog in successive seals of at most ``seal_batch_size`` rows, so a
-        sealer that has been down does not build one monster transaction (review 7A). If a
-        concurrent sealer takes the next ``seq`` first, the resulting :class:`IntegrityError` is
-        swallowed and the work resumes on the next tick — the loser never crashes and never
-        double-seals.
+        Activation and each covering seal commit in their own short transaction. Before writing,
+        an anchor-heal pass re-emits any intact committed record absent from the configured file.
+        New anchor emission follows the commit and is best-effort; a sink failure is routed through
+        ``on_error`` and leaves the signed database record intact. A racing insert loses via the
+        unique ``from_id`` constraint and is retried on a later poll.
         """
         key = self.audit._seal_key
         if key is None:
             return 0
-        batch_size = self.audit.seal_batch_size
+
+        if self.audit._anchor_path is not None:
+            self._heal_anchor()
+
+        try:
+            activation = self._ensure_activation(key)
+        except IntegrityError:
+            return 0
+        if activation is not None:
+            boundary, mac, at = activation
+            self._emit_anchor(kind="activation", from_id=None, to_id=boundary, mac=mac, at=at)
+
         total = 0
         while True:
             try:
                 sealed = self._seal_next_batch(key)
             except IntegrityError:
-                # A concurrent sealer already took this ``seq`` and advanced the chain; roll back
-                # (done by the transaction context) and let the next tick resume from the new hwm.
                 return total
             if sealed is None:
                 return total
-            seq, to_id, seal_mac, sealed_at, row_count = sealed
-            self._emit_anchor(seq=seq, to_id=to_id, seal_mac=seal_mac, sealed_at=sealed_at)
+            from_id, to_id, mac, at, row_count = sealed
+            self._emit_anchor(kind="seal", from_id=from_id, to_id=to_id, mac=mac, at=at)
             total += row_count
-            if row_count < batch_size:
+            if row_count < self.audit.seal_batch_size:
                 return total
 
-    def _seal_next_batch(self, key: Key) -> tuple[int, int, str, datetime, int] | None:
-        """Seal one batch in a single short transaction; ``None`` when there is nothing to seal.
+    def _heal_anchor(self) -> None:
+        """Re-append every intact committed record missing from the configured anchor.
 
-        Reads the high-water mark (the latest seal's ``to_id``, or 0 for the very first seal —
-        which therefore starts at the beginning of the table, sealing pre-existing legacy rows),
-        selects up to ``seal_batch_size`` eligible rows in id order, and inserts the chained
-        seal. Raises :class:`IntegrityError` when the chosen ``seq`` was already taken by a racing
-        sealer. Returns ``(seq, to_id, seal_mac, sealed_at, row_count)`` on success so the caller
-        can emit the anchor *after* the seal has committed.
+        Malformed input, including a partial tail, is deliberately ignored here: exact parsed
+        events are enough to identify what is absent, and appending the canonical replacement turns
+        a partial tail into a reconstructible benign fragment without rewriting prior bytes.
         """
+        path = self.audit._anchor_path
+        assert path is not None
+        try:
+            anchor = _read_anchor(path)
+            seal_keyring = self.audit.verifier.seal_keyring
+            with self.audit.engine.connect() as conn:
+                records = load_seal_records(conn)
+        except Exception as exc:
+            self.audit.on_error(exc)
+            return
+
+        for record in records:
+            if not seal_is_intact(record, seal_keyring):
+                continue
+            if any(_record_matches_anchor(record, event) for event in anchor.events):
+                continue
+            assert record.to_id is not None
+            assert record.seal_mac is not None
+            assert record.sealed_at is not None
+            self._emit_anchor(
+                kind=record.kind,
+                from_id=record.from_id,
+                to_id=record.to_id,
+                mac=record.seal_mac,
+                at=record.sealed_at,
+            )
+
+    def _ensure_activation(self, key: Key) -> tuple[int, str, datetime] | None:
+        """Insert activation and return its anchor payload, or ``None`` if already present."""
+        engine = self.audit.engine
+        with get_dialect(engine).begin_claim_tx(engine) as conn:
+            exists = conn.execute(
+                select(_seals.c.id).where(_seals.c.kind == "activation").limit(1)
+            ).first()
+            if exists is not None:
+                return None
+            boundary = conn.execute(select(func.max(_audits.c.id))).scalar_one() or 0
+            at = now_utc()
+            mac = integrity.activation_mac(key, boundary_id=boundary, at=at, key_id=key.id)
+            conn.execute(
+                _seals.insert().values(
+                    kind="activation",
+                    from_id=_ACTIVATION_FROM_ID,
+                    to_id=boundary,
+                    row_count=None,
+                    rows_mac=None,
+                    seal_mac=mac,
+                    sealed_at=at,
+                    key_id=key.id,
+                )
+            )
+        return boundary, mac, at
+
+    def _seal_next_batch(self, key: Key) -> tuple[int, int, str, datetime, int] | None:
+        """Insert one independent covering seal, or return ``None`` when no rows are eligible."""
         cutoff = now_utc() - timedelta(seconds=self.audit.grace)
         engine = self.audit.engine
-        # ``begin_claim_tx`` takes SQLite's write lock up front (``BEGIN IMMEDIATE``) so two
-        # sealers that read-then-write never deadlock on lock promotion; on Postgres/MySQL it is
-        # an ordinary transaction and the ``seq`` unique constraint is what arbitrates the race
-        # (mirrors :mod:`.retention`'s claim/delete loop).
         with get_dialect(engine).begin_claim_tx(engine) as conn:
-            last = conn.execute(select(_seals).order_by(_seals.c.seq.desc()).limit(1)).first()
-            if last is None:
-                hwm, seq, prev_mac = 0, 1, _GENESIS
-            else:
-                # The high-water mark is the highest *sealed id*, read as ``max(to_id)`` — not the
-                # head seal's own ``to_id``. Retention writes a ``checkpoint`` seal at the head
-                # (highest ``seq``) whose ``to_id`` is the low ``pruned_through_id``, so trusting
-                # the head's ``to_id`` would regress the mark and re-seal already-sealed ranges.
-                # ``seq``/``prev_mac`` still come from the head so the chain stays dense and linked.
-                # Without checkpoints ``max(to_id)`` equals the head's ``to_id``, so this is inert
-                # for the ordinary sealing path.
-                max_to_id = conn.execute(select(func.max(_seals.c.to_id))).scalar_one()
-                hwm, seq, prev_mac = max_to_id, last.seq + 1, last.seal_mac
-
+            hwm = (
+                conn.execute(
+                    select(func.max(_seals.c.to_id)).where(
+                        _seals.c.kind.in_(("activation", "floor", "seal"))
+                    )
+                ).scalar_one()
+                or 0
+            )
             rows = conn.execute(
                 select(_audits.c.id, _audits.c.row_mac)
                 .where(_audits.c.id > hwm, _audits.c.created_at <= cutoff)
@@ -147,115 +170,97 @@ class Sealer:
             ).all()
             if not rows:
                 return None
-
-            return self._insert_seal(
-                conn,
-                key,
-                seq=seq,
-                from_id=hwm,
-                to_id=rows[-1].id,
-                rows=[(row.id, row.row_mac) for row in rows],
-                prev_mac=prev_mac,
-            )
+            if any(row.row_mac is None for row in rows):
+                self.audit.on_error(
+                    RuntimeError(
+                        "audit sealer refused to seal an unsigned row above the activation "
+                        "boundary; verify will report it as TAMPERED"
+                    )
+                )
+                return None
+            pairs = [(row.id, row.row_mac) for row in rows]
+            return self._insert_seal(conn, key, from_id=hwm, to_id=rows[-1].id, rows=pairs)
 
     def _insert_seal(
         self,
         conn: Connection,
         key: Key,
         *,
-        seq: int,
         from_id: int,
         to_id: int,
-        rows: list[tuple[int, str | None]],
-        prev_mac: str,
-        kind: str = "seal",
+        rows: list[tuple[int, str]],
     ) -> tuple[int, int, str, datetime, int]:
-        """Compute ``rows_mac``/``seal_mac`` and insert one seal row; return its identity as
-        ``(seq, to_id, seal_mac, sealed_at, row_count)``.
-
-        ``rows`` are the ``(id, row_mac)`` pairs actually present in ``(from_id, to_id]`` in id
-        order — rollback id-gaps are harmless because the seal hashes what exists rather than
-        assuming id continuity, and a NULL ``row_mac`` is folded in with the ``nomac`` marker so
-        even an unsigned row's deletion changes the seal (review 5A).
-        """
-        sealed_at = now_utc()
-        rows_mac = integrity.rows_mac(key, rows)
+        """Compute and insert one range seal, returning its anchor payload and row count."""
+        at = now_utc()
+        aggregate = integrity.rows_mac(key, rows)
         row_count = len(rows)
-        # Record which ids in ``(from_id, to_id]`` this seal does NOT cover — rolled-back id-gaps,
-        # or rows not yet visible at seal time. Signed into ``seal_mac``, so verify can later tell a
-        # benign late commit (an extra row that fills a recorded gap) from a delete-and-relocate
-        # laundering attack (a covered id gone missing). Dense in the common case → ``""`` (review
-        # "Bug #1").
-        gaps = integrity.canonical_gaps(
-            integrity.gaps_for_range(from_id, to_id, [rid for rid, _ in rows])
-        )
-        seal_mac = integrity.seal_mac(
+        mac = integrity.seal_mac(
             key,
-            seq=seq,
-            kind=kind,
             from_id=from_id,
             to_id=to_id,
             row_count=row_count,
-            rows_mac=rows_mac,
-            prev_mac=prev_mac,
-            sealed_at=sealed_at,
-            gaps=gaps,
+            rows_mac=aggregate,
+            sealed_at=at,
+            key_id=key.id,
         )
         conn.execute(
             _seals.insert().values(
-                seq=seq,
-                kind=kind,
+                kind="seal",
                 from_id=from_id,
                 to_id=to_id,
                 row_count=row_count,
-                rows_mac=rows_mac,
-                prev_mac=prev_mac,
-                seal_mac=seal_mac,
-                sealed_at=sealed_at,
+                rows_mac=aggregate,
+                seal_mac=mac,
+                sealed_at=at,
                 key_id=key.id,
-                gap_ranges=gaps or None,
             )
         )
-        return seq, to_id, seal_mac, sealed_at, row_count
+        return from_id, to_id, mac, at, row_count
 
-    def _emit_anchor(self, *, seq: int, to_id: int, seal_mac: str, sealed_at: datetime) -> None:
-        """Ship the freshly committed chain head to the external anchor sink — best effort.
+    def _emit_anchor(
+        self,
+        *,
+        kind: str,
+        from_id: int | None,
+        to_id: int,
+        mac: str,
+        at: datetime,
+    ) -> bool:
+        """Append one new-format anchor event and call the optional sink.
 
-        Appends ``"<sealed_at> <seq> <to_id> <seal_mac>"`` to the anchor file (if a path is
-        configured) and/or hands ``(seq, seal_mac, sealed_at)`` to the ``on_anchor`` callback
-        (design Layer 3). The ``to_id`` (the seal's highest covered id) is what lets a later
-        ``verify --anchor`` remember the maximum coverage ever exported: a seal whose rows *and*
-        seal row were both deleted leaves no trace in the database, but the anchor still records
-        that ids through its ``to_id`` were once sealed, so verify can catch the truncation of a
-        real range above the checkpoint floor (Bug B). This runs
-        *after* the seal has committed, and every sink is wrapped so a failure — disk full, a
-        vanished path, a callback that raises — routes to ``on_error`` and never crashes or rolls
-        back the seal (review 3A). A stalled sink stays visible: verify reports the newest
-        anchor's age.
+        Returns whether every configured sink accepted the event. Sealing ignores the result
+        (best-effort after commit); retention uses it as a hard gate before advancing a floor.
         """
+        line = _format_anchor_event(kind=kind, from_id=from_id, to_id=to_id, mac=mac, at=at) + "\n"
+
+        accepted = True
         path = self.audit._anchor_path
         if path is not None:
             try:
-                line = f"{canonical_created_at(sealed_at)} {seq} {to_id} {seal_mac}\n"
-                with open(path, "a", encoding="utf-8") as handle:
-                    handle.write(line)
-            except Exception as exc:  # best-effort: a broken sink must not lose the seal
+                encoded = line.encode("utf-8")
+                with open(path, "ab+") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    separator = b""
+                    if handle.tell() > 0:
+                        handle.seek(-1, os.SEEK_END)
+                        if handle.read(1) not in {b"\n", b"\r"}:
+                            separator = b"\n"
+                    handle.write(separator + encoded)
+            except Exception as exc:
+                accepted = False
                 self.audit.on_error(exc)
         callback = self.audit._on_anchor
         if callback is not None:
             try:
-                callback(seq, seal_mac, sealed_at)
+                callback(kind, from_id, to_id, mac, at)
             except Exception as exc:
+                accepted = False
                 self.audit.on_error(exc)
+        return accepted
 
 
 class SealLoop(InterruptiblePoller):
-    """Optional background loop that runs the sealer on a timer. Off by default.
-
-    The same :class:`~firm.audit.retention.RetentionLoop` pattern: a third
-    :class:`~firm._core.poller.InterruptiblePoller`. Enable it with
-    ``AuditLog(..., background_sealing=True)`` or run it out of ``firm-audit seal``.
-    """
+    """Optional background loop that activates and seals on a timer."""
 
     def __init__(
         self,

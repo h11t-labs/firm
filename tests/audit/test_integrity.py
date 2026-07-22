@@ -16,8 +16,10 @@ from firm.audit import integrity
 from firm.audit.integrity import (
     KEY_MIN_LENGTH,
     Key,
+    activation_mac,
     add_key,
     canonical_created_at,
+    floor_mac,
     key_id,
     load_key,
     new_ulid,
@@ -172,33 +174,37 @@ def test_every_field_is_bound(field: str) -> None:
 
 def test_seal_mac_stable_and_field_sensitive() -> None:
     base: dict = {
-        "seq": 1,
-        "kind": "seal",
         "from_id": 0,
         "to_id": 10,
         "row_count": 10,
         "rows_mac": "a" * 64,
-        "prev_mac": "genesis",
         "sealed_at": datetime(2026, 7, 20, 12, 0, 0),
+        "key_id": KEY.id,
     }
     m = seal_mac(KEY, **base)
     assert m == seal_mac(KEY, **base)
     assert len(m) == 64
-    assert seal_mac(KEY, **{**base, "seq": 2}) != m
-    assert seal_mac(KEY, **{**base, "kind": "checkpoint"}) != m
-    assert seal_mac(KEY, **{**base, "prev_mac": "b" * 64}) != m
+    assert seal_mac(KEY, **{**base, "from_id": 1}) != m
+    assert seal_mac(KEY, **{**base, "key_id": "deadbeef"}) != m
 
 
-def test_rows_mac_order_sensitive_and_nomac_distinct() -> None:
+def test_floor_and_activation_macs_bind_coordinate_time_and_key_id() -> None:
+    at = datetime(2026, 7, 20, 12, 0, 0)
+    floor = floor_mac(KEY, through_id=10, retired_at=at, key_id=KEY.id)
+    activation = activation_mac(KEY, boundary_id=10, at=at, key_id=KEY.id)
+    assert floor != activation
+    assert floor != floor_mac(KEY, through_id=11, retired_at=at, key_id=KEY.id)
+    assert floor != floor_mac(KEY, through_id=10, retired_at=at, key_id="deadbeef")
+    assert activation != activation_mac(KEY, boundary_id=11, at=at, key_id=KEY.id)
+
+
+def test_rows_mac_order_sensitive_and_rejects_null_mac() -> None:
     a = rows_mac(KEY, [(1, "a" * 64), (2, "b" * 64)])
     assert a == rows_mac(KEY, [(1, "a" * 64), (2, "b" * 64)])
     # Reordering the rows changes the MAC.
     assert rows_mac(KEY, [(2, "b" * 64), (1, "a" * 64)]) != a
-    # A NULL-MAC row is distinct from both a present MAC and an absent field, and a
-    # NULL-MAC row still contributes (so its later deletion is detectable).
-    with_nomac = rows_mac(KEY, [(1, None)])
-    assert with_nomac != rows_mac(KEY, [(1, "")])
-    assert rows_mac(KEY, [(1, None), (2, None)]) != rows_mac(KEY, [(1, None)])
+    with pytest.raises(ValueError, match="outside seal coverage"):
+        rows_mac(KEY, [(1, None)])  # type: ignore[list-item]
 
 
 # --- keyring parsing -------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Audit schema — ``firm_audit_events`` plus the tamper-evidence side tables.
+"""Audit schema — append-only events plus independent tamper-evidence records.
 
 Append-only: nothing in this package updates or deletes a ``firm_audit_events`` row except
 :mod:`.retention`'s opt-in pruning. Every column :func:`~firm.audit.log.AuditLog.history`
@@ -21,7 +21,7 @@ are created regardless but stay empty until the sealer and verifier (opt-in) wri
 * ``firm_audit_events.entry_id`` — client-generated ULID, unique index; identity + anti-replay.
 * ``firm_audit_events.row_mac`` — hex ``HMAC-SHA256`` over the canonical row (:mod:`.integrity`).
 * ``firm_audit_events.key_id`` — which key signed the row (rotation).
-* ``firm_audit_seals`` — Layer 2's chained blocks over ranges of sealed rows.
+* ``firm_audit_seals`` — independent range seals plus signed activation/floor markers.
 * ``firm_audit_verify_status`` — single-row snapshot of the latest verification, read by the
   dashboard's integrity panel.
 """
@@ -83,33 +83,28 @@ audit_events = Table(
     # supported dialect), so pre-key rows never collide. Migration 0002 builds this index
     # CONCURRENTLY on Postgres; here (fresh create_all) it is inline on an empty table.
     Index("index_firm_audit_events_on_entry_id", "entry_id", unique=True),
+    sqlite_autoincrement=True,
 )
 
-# Layer 2 — chained seals over ranges of sealed rows (design "Layer 2 — seals"). Written only by
-# the opt-in sealer; empty otherwise. ``seq`` is a dense app-assigned counter and its unique
-# index is the arbiter when two sealers race (the loser hits the violation and retries). The
-# surrogate ``id`` PK follows the package convention; seals are always addressed by ``seq``.
+# Layer 2 — three independent signed record kinds. A ``seal`` covers ``(from_id, to_id]`` and
+# supplies ``row_count``/``rows_mac``. The one ``activation`` marker stores its ``boundary_id`` in
+# ``to_id`` and reserves ``from_id=-1`` so racing first sealers hit the same unique constraint. A
+# ``floor`` advance stores ``through_id`` in ``to_id`` and leaves ``from_id`` NULL; advances are
+# append-only. NULL ``from_id`` values do not collide on any supported database, while the unique
+# index arbitrates racing covering seals by their shared high-water mark.
 seals = Table(
     "firm_audit_seals",
     metadata,
     Column("id", pk_bigint(), primary_key=True),
-    Column("seq", Integer, nullable=False),
-    Column("kind", String(32), nullable=False),  # "seal" | "checkpoint"
-    Column("from_id", BigInteger, nullable=False),
+    Column("kind", String(32), nullable=False),  # seal | floor | activation
+    Column("from_id", BigInteger),
     Column("to_id", BigInteger, nullable=False),
-    Column("row_count", Integer, nullable=False),
-    Column("rows_mac", String(64), nullable=False),
-    Column("prev_mac", String(64), nullable=False),
+    Column("row_count", Integer),
+    Column("rows_mac", String(64)),
     Column("seal_mac", String(64), nullable=False),
     Column("sealed_at", _DT, nullable=False),
     Column("key_id", String(16), nullable=False),
-    # Canonical ``"lo-hi,lo-hi"`` intervals of ids in ``(from_id, to_id]`` this seal does NOT
-    # cover (rolled-back id-gaps, or rows not yet visible at seal time). NULL/empty = dense range,
-    # the common case. Signed into ``seal_mac`` so the covered membership is tamper-evident: verify
-    # trusts it to tell a genuine late commit (an extra row in a recorded gap) from a
-    # delete-and-relocate laundering attack (a covered id now missing) — see :mod:`.integrity`.
-    Column("gap_ranges", Text),
-    Index("index_firm_audit_seals_on_seq", "seq", unique=True),
+    Index("index_firm_audit_seals_on_from_id", "from_id", unique=True),
 )
 
 # Single-row snapshot of the latest verification run, upserted by ``verify`` and read by the
@@ -127,9 +122,7 @@ verify_status = Table(
     Column("unprotected_count", Integer, nullable=False, default=0),
     Column("tampered_count", Integer, nullable=False, default=0),
     Column("error_message", Text),  # populated on the ERROR outcome (design D24)
-    Column("last_full_coverage_at", _DT),  # last from-genesis coverage (rolling cycle, D12)
-    Column("cycle_position", Integer),  # k in "cycle k/N"
-    Column("cycle_length", Integer),  # N (verify_cycle)
+    Column("last_full_coverage_at", _DT),  # last explicit ``--full`` coverage
     Column("newest_anchor_at", _DT),  # age of the freshest anchor the run saw
     Column("anchor_configured", Boolean, nullable=False, default=False),  # vs. "no anchor" (D22)
     Column("unsealed_tail_count", Integer, nullable=False, default=0),

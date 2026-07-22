@@ -41,8 +41,6 @@ def _status(**over: object) -> dict[str, object]:
         "tampered_count": 0,
         "error_message": None,
         "last_full_coverage_at": NOW - timedelta(hours=6),
-        "cycle_position": 3,
-        "cycle_length": 7,
         "newest_anchor_at": NOW - timedelta(seconds=30),
         "anchor_configured": True,
         "unsealed_tail_count": 2,
@@ -79,11 +77,11 @@ def test_state_ok_when_fresh_and_clean() -> None:
     assert st.causes == ()
 
 
-def test_state_warning_on_late_commit_does_not_escalate() -> None:
+def test_state_verifier_warning_does_not_escalate() -> None:
     st = integrity_state(_status(outcome="warning", warning_count=2), _cfg(), now=NOW)
     assert st.state == "warning"
-    assert "late_commits" in st.causes
-    assert st.escalate is False  # benign late commit stays on the audit tab
+    assert "verify_warnings" in st.causes
+    assert st.escalate is False  # a non-liveness warning stays on the audit tab
 
 
 def test_state_error_is_amber_and_escalates() -> None:
@@ -200,15 +198,24 @@ def test_integrity_config_without_seals_is_inactive(runtime) -> None:
     assert cfg.sealing_since is None
 
 
-def test_integrity_config_reads_activation_from_oldest_seal(runtime, seed) -> None:
-    first = NOW - timedelta(days=2)
-    seed.seal(seq=1, sealed_at=first)
-    seed.seal(seq=2, sealed_at=NOW)
+def test_integrity_config_reads_explicit_activation_marker(runtime, seed) -> None:
+    older_seal = NOW - timedelta(days=2)
+    activated_at = NOW - timedelta(days=1)
+    seed.seal(from_id=0, to_id=5, sealed_at=older_seal)
+    seed.seal(
+        kind="activation",
+        from_id=-1,
+        to_id=0,
+        row_count=None,
+        rows_mac=None,
+        sealed_at=activated_at,
+    )
+    seed.seal(from_id=5, to_id=10, sealed_at=NOW)
     with runtime.engine.connect() as conn:
         cfg = audit_queries.integrity_config(conn, key_configured=True)
     assert cfg.key_configured is True
     assert cfg.sealing_active is True
-    assert cfg.sealing_since == first
+    assert cfg.sealing_since == activated_at
 
 
 # -- rendering per state -----------------------------------------------------------------------
@@ -237,7 +244,7 @@ def test_render_ok_is_a_calm_strip(runtime) -> None:
     assert "verified" in body  # freshness — the primary fact
     assert "unsealed tail" in body  # label
     assert "2 rows" in body  # value
-    assert "cycle 3/7" in body
+    assert "cycle" not in body
     assert 'role="alert"' not in body
 
 
@@ -246,7 +253,7 @@ def test_render_warning_itemizes_the_cause(runtime) -> None:
     assert 'class="integrity warn"' in body
     assert 'class="integrity-icon"' in body
     assert ">Warning</span>" in body
-    assert "2 late commits in a sealed range" in body
+    assert "verify reported 2 warnings" in body
 
 
 def test_render_error_carries_the_failure_message(runtime) -> None:
@@ -264,7 +271,7 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
         '{"kind": "row", "label": "#42 invoice.paid", "id": 42, '
         '"message": "modified after it was sealed (signature no longer matches)", '
         '"verdict": "tampered"},'
-        '{"kind": "seal", "label": "sealed range #12", '
+        '{"kind": "seal", "label": "sealed range (11, 12]", '
         '"message": "records deleted, inserted, or swapped in this sealed range", '
         '"verdict": "tampered"}'
         "]"
@@ -282,7 +289,7 @@ def test_render_tampered_is_a_banner_with_links_and_next_step(runtime) -> None:
     assert 'class="integrity-findings"' in body
     assert "#42 invoice.paid" in body  # the record's real identity, not "row 42"
     assert "modified after it was sealed (signature no longer matches)" in body
-    assert "sealed range #12" in body
+    assert "sealed range (11, 12]" in body
     assert 'href="/audit/42"' in body  # the row-level finding links into the audit table
     assert 'class="finding-ref"' in body
     assert "firm-audit verify --full" in body  # the verify command
@@ -386,7 +393,7 @@ def test_overview_hides_ok_strip(runtime) -> None:
     assert "integrity" not in body  # the calm OK strip stays audit-only
 
 
-def test_overview_hides_benign_late_commit_warning(runtime) -> None:
+def test_overview_hides_non_liveness_verifier_warning(runtime) -> None:
     body = _overview_html(_state(_status(outcome="warning", warning_count=2)))
     assert 'class="integrity' not in body
 

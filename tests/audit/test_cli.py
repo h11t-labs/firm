@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 from click.testing import CliRunner
 from sqlalchemy import update
@@ -114,6 +115,7 @@ def test_prune_with_max_age_flag_deletes_old_rows(db_url: str) -> None:
 def test_prune_prints_skipped_unsealed_count(db_url: str, monkeypatch) -> None:
     secret = "cli-prune-test-key-padding-0123456789"  # noqa: S105  (throwaway)
     audit = AuditLog(database_url=db_url, mac_key=secret, grace=0.0)
+    audit.sealer.run_once()  # explicit activation on an empty log
     audit.record("sealed")
     audit.sealer.run_once()
     audit.record("old.a")
@@ -136,9 +138,12 @@ def test_prune_prints_skipped_unsealed_count(db_url: str, monkeypatch) -> None:
 def test_prune_reports_refused_tampered_range(db_url: str, monkeypatch, at_time) -> None:
     secret = "cli-refuse-test-key-padding-0123456789"  # noqa: S105  (throwaway)
     audit = AuditLog(database_url=db_url, mac_key=secret, grace=0.0)
-    with at_time(now_utc() - timedelta(hours=2)):  # signed old, so it seals and expires cleanly
-        audit.record("sealed")
     audit.sealer.run_once()
+    old = now_utc() - timedelta(hours=2)
+    with at_time(old):
+        audit.record("sealed")
+    with patch("firm.audit.sealing.now_utc", lambda: old):
+        audit.sealer.run_once()
     # Tamper the sealed row's content with a plain UPDATE (row_mac column left untouched).
     with transaction(audit.engine) as conn:
         conn.execute(
