@@ -13,12 +13,14 @@ are never updated or deleted.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import DBAPIError
 
 from .._core.clock import now_utc
 from .._core.database import snapshot_transaction
@@ -42,6 +44,7 @@ _audits = schema.audit_events
 _seals = schema.seals
 _BATCH_SIZE = 1000
 _SKIP_ALERT_THRESHOLD = 1000
+_TRANSACTION_ATTEMPTS = 3
 
 
 class Retention:
@@ -52,22 +55,36 @@ class Retention:
         self.last_skipped_unsealed = 0
         self.last_refused_tampered = 0
         self.last_refused_no_seal_key = False
+        self.last_refused_no_activation = False
 
     def run_once(self) -> int:
         self.last_skipped_unsealed = 0
         self.last_refused_tampered = 0
         self.last_refused_no_seal_key = False
+        self.last_refused_no_activation = False
         if self.audit.max_age is None:
             return 0
         cutoff = now_utc() - timedelta(seconds=self.audit.max_age)
         if self._sealing_active():
             return self._run_aligned(cutoff)
+        if self.audit._seal_key is not None and self._has_expired_events(cutoff):
+            self._refuse_no_activation()
+            return 0
         return self._run_plain(cutoff)
 
     def _sealing_active(self) -> bool:
         """Any activation/seal/floor record makes plain pruning unsafe."""
         with self.audit.engine.connect() as conn:
             return conn.execute(select(func.count()).select_from(_seals)).scalar_one() > 0
+
+    def _has_expired_events(self, cutoff: datetime) -> bool:
+        with self.audit.engine.connect() as conn:
+            return (
+                conn.execute(
+                    select(_audits.c.id).where(_audits.c.created_at < cutoff).limit(1)
+                ).first()
+                is not None
+            )
 
     def _run_plain(self, cutoff: datetime) -> int:
         engine = self.audit.engine
@@ -86,6 +103,19 @@ class Retention:
                 return total
 
     def _run_aligned(self, cutoff: datetime) -> int:
+        for attempt in range(_TRANSACTION_ATTEMPTS):
+            try:
+                return self._run_aligned_once(cutoff)
+            except DBAPIError as exc:
+                if not _is_retryable_transaction_error(exc):
+                    raise
+                if attempt + 1 == _TRANSACTION_ATTEMPTS:
+                    self.audit.on_error(exc)
+                    return 0
+                time.sleep(0.01 * (attempt + 1))
+        raise AssertionError("unreachable")
+
+    def _run_aligned_once(self, cutoff: datetime) -> int:
         seal_key = self.audit._seal_key
         if seal_key is None:
             self._refuse_no_seal_key(None)
@@ -94,6 +124,9 @@ class Retention:
         deleted = 0
         with snapshot_transaction(self.audit.engine, write=True) as conn:
             records = load_seal_records(conn)
+            if records.capped:
+                self._refuse_tampered(None)
+                return 0
             keyring = self.audit.verifier.keyring
             seal_keyring = self.audit.verifier.seal_keyring
 
@@ -102,12 +135,7 @@ class Retention:
                 for record in records
                 if record.key_id is not None and record.key_id not in seal_keyring
             ]
-            row_key_only = (
-                self.audit._key is not None
-                and self.audit._seal_key is not None
-                and self.audit._key.secret == self.audit._seal_key.secret
-            )
-            if unknown and row_key_only:
+            if unknown:
                 self._refuse_no_seal_key(unknown[0])
                 return 0
             for record in records:
@@ -133,6 +161,9 @@ class Retention:
             floor = max((record.to_id or 0 for record in floors), default=0)
             if self.audit._anchor_path is not None:
                 anchor = _read_anchor(self.audit._anchor_path)
+                if anchor.capped:
+                    self._refuse_tampered(floors[-1] if floors else None)
+                    return 0
                 _, corrupt = _classify_anchor_issues(anchor, records, retired_through=floor)
                 if corrupt:
                     self._refuse_tampered(floors[-1] if floors else None)
@@ -229,6 +260,15 @@ class Retention:
             )
         )
 
+    def _refuse_no_activation(self) -> None:
+        self.last_refused_no_activation = True
+        self.audit.on_error(
+            RuntimeError(
+                "audit retention REFUSED to plain-prune expired signed rows: a seal key is "
+                "configured but no activation marker exists"
+            )
+        )
+
     def _alert_if_over_threshold(self) -> None:
         if self.last_skipped_unsealed > _SKIP_ALERT_THRESHOLD:
             self.audit.on_error(
@@ -253,3 +293,18 @@ class RetentionLoop(InterruptiblePoller):
 
     def poll(self) -> int:
         return self.retention.run_once()
+
+
+def _is_retryable_transaction_error(exc: DBAPIError) -> bool:
+    """Recognize serialization/deadlock failures across supported DBAPI drivers."""
+    original = exc.orig
+    state = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+    if state in {"40001", "40P01"}:
+        return True
+    args = getattr(original, "args", ())
+    if args and args[0] in {1205, 1213}:
+        return True
+    message = str(original).lower()
+    return any(
+        phrase in message for phrase in ("serialization failure", "deadlock", "database is locked")
+    )

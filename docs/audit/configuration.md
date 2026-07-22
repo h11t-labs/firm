@@ -18,7 +18,7 @@ AuditLog(
     seal_batch_size=10_000,         # max rows sealed per transaction
     anchor_path=None,               # append seal/floor/activation events here
     on_anchor=None,                 # callback(kind, from_id, to_id, mac, at) for custom sinks
-    verify_cycle=7,                 # stateless older-range rotation period in days
+    verify_cycle=7,                 # old-range verification cost divisor, not a day period
 )
 ```
 
@@ -33,7 +33,8 @@ AuditLog(
 ## Tamper-evidence
 
 All opt-in and off until a key is set — see [Tamper-evidence](tamper-evidence.md) for the full
-picture. Without a key, none of these have any effect and the schema behaves exactly as before.
+picture. Without a key, runtime behavior is inert; the migrated schema still contains the nullable
+evidence columns and side tables.
 
 | Option | Default | Notes |
 |---|---|---|
@@ -43,10 +44,10 @@ picture. Without a key, none of these have any effect and the schema behaves exa
 | `grace` | `60.0` | Seals cover only rows older than this. The default `record()` path commits in its own short transaction; if you pass `conn=`, this window **must exceed that caller transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
 | `seal_batch_size` | `10_000` | Max rows sealed per transaction, so a sealer backlog becomes several seals, never one monster transaction. |
 | `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file that records every `SEAL`, `FLOOR`, and `ACTIVATION` event (Layer 3). |
-| `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping the same events off-host (S3, a second DB, a webhook). Seal/activation failures route to `on_error` and are healed on a later sealer pass; a floor sink failure refuses the prune. |
-| `verify_cycle` | `7` | Default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. This is stateless: there is no cursor or verify state file. Only `full=True` / `--full` guarantees complete range coverage. |
+| `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping the same events off-host (S3, a second DB, a webhook). Seal/activation failures route to `on_error` and are healed on a later sealer pass; a floor sink failure refuses the prune. For verification, materialize callback-only history and pass it as `anchor_path`; the callback is a write sink, not a readable Layer 3 source. |
+| `verify_cycle` | `7` | Cost divisor: default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. It is not a period; the conservative rotation bound is `range_count` days. Only `full=True` / `--full` guarantees complete coverage. |
 
-Rotation uses two verify-only archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
+Rotation uses two role-scoped archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
 **row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
 `"label=secret,label2=secret2"` — see [Key rotation](tamper-evidence.md#rotation).
 
@@ -56,8 +57,8 @@ Rotation uses two verify-only archives of **retired** keys, `FIRM_AUDIT_RETIRED_
 |---|---|---|
 | `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret — the **row key** (≥ 32 chars). |
 | `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals, activation, and floors; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
-| `FIRM_AUDIT_RETIRED_KEYS` | verify | Retired **row** keys (rotation): `"id1=old,…"`. Eligible for row-MAC verification only — **never** to validate a seal, in any mode. |
-| `FIRM_AUDIT_RETIRED_SEAL_KEYS` | verify | Retired **seal** keys (rotation): `"id1=old,…"`. Eligible for seal verification *and* row verification (a seal key is higher-privilege). A single-key deployment retires its key here. |
+| `FIRM_AUDIT_RETIRED_KEYS` | verify, retention | Retired **row** keys (rotation): `"id1=old,…"`. Eligible for row-MAC validation only — **never** a seal. |
+| `FIRM_AUDIT_RETIRED_SEAL_KEYS` | sealer heal, retention, verify | Retired **seal** keys: `"id1=old,…"`. Eligible for Layer-2 validation only. A single-key deployment puts its old key in **both** retired archives. |
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
 | `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 

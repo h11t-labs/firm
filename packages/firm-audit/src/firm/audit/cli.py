@@ -123,6 +123,12 @@ def prune(database_url: str | None, max_age: float | None) -> None:
                     "signed floor — run pruning on a sealer-role host in a two-key deployment",
                     err=True,
                 )
+            if audit.retention.last_refused_no_activation:
+                click.echo(
+                    "REFUSED to prune: a seal key is configured but no signed activation marker "
+                    "exists — activate sealing before retention",
+                    err=True,
+                )
     finally:
         dispose_engine(engine)
 

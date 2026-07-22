@@ -9,8 +9,9 @@ Default runs always check markers, seal MACs, contiguity, the legacy prefix, the
 duplicates, anchor completeness, the newest range, and a stateless date-derived slice of older
 ranges. Only ``full=True`` recomputes every sealed range. Attacker-controlled marker and anchor
 fields are parsed defensively: malformed values produce TAMPERED findings, never exceptions.
-A strict-prefix anchor fragment from an interrupted append is the sole WARNING exception. Unknown
-``key_id`` values remain a verification error and are persisted as ``outcome="error"``.
+An interrupted final anchor line or a strict-prefix fragment is a WARNING exception. Unknown row
+``key_id`` values remain a verification error only when no tampering was found; an unavailable
+Layer-2 signer is itself a TAMPERED finding.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import math
 import os
 import sys
 import time
+from bisect import bisect_right
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -48,6 +50,9 @@ _RETIRED_SEAL_KEYS_ENV = "FIRM_AUDIT_RETIRED_SEAL_KEYS"
 _PAGE = 1000
 _MAX_AFFECTED = 20
 _MAX_FINDINGS = 1000
+_MAX_SEAL_RECORDS = 100_000
+_MAX_ANCHOR_ITEMS = _MAX_FINDINGS
+_MAX_ANCHOR_LINE_CHARS = 4096
 _STATUS_ID = 1
 
 
@@ -89,6 +94,7 @@ class AnchorData:
     events: tuple[AnchorEvent, ...]
     malformed: tuple[MalformedAnchorLine, ...]
     partial_tail: MalformedAnchorLine | None
+    capped: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,77 +128,102 @@ def _parse_datetime(value: Any) -> tuple[datetime | None, str | None]:
         return None, f"sealed_at {value!r} is not an ISO datetime"
 
 
-def load_seal_records(conn: Connection) -> list[SealRecord]:
+class SealRecords(list[SealRecord]):
+    """A bounded, keyset-paged side-table scan."""
+
+    capped: bool = False
+
+
+def load_seal_records(conn: Connection) -> SealRecords:
     """Load side-table rows without invoking dialect datetime/integer result processors.
 
     Casting attacker-controlled typed fields to text lets verification classify malformed values
     instead of raising while SQLAlchemy decodes them.
     """
-    rows = conn.execute(
-        select(
-            _seals.c.id,
-            cast(_seals.c.kind, String).label("kind"),
-            cast(_seals.c.from_id, String).label("from_id"),
-            cast(_seals.c.to_id, String).label("to_id"),
-            cast(_seals.c.row_count, String).label("row_count"),
-            cast(_seals.c.rows_mac, String).label("rows_mac"),
-            cast(_seals.c.seal_mac, String).label("seal_mac"),
-            cast(_seals.c.sealed_at, String).label("sealed_at"),
-            cast(_seals.c.key_id, String).label("key_id"),
-        ).order_by(_seals.c.id)
-    ).all()
-    records: list[SealRecord] = []
-    for row in rows:
-        errors: list[str] = []
-        kind = row.kind or ""
-        from_id, error = _parse_int(row.from_id, name="from_id", required=kind == "seal")
-        if error:
-            errors.append(error)
-        to_id, error = _parse_int(row.to_id, name="to_id", required=True)
-        if error:
-            errors.append(error)
-        row_count, error = _parse_int(row.row_count, name="row_count", required=kind == "seal")
-        if error:
-            errors.append(error)
-        sealed_at, error = _parse_datetime(row.sealed_at)
-        if error:
-            errors.append(error)
-        if kind not in {"seal", "floor", "activation"}:
-            errors.append(f"unknown kind {kind!r}")
-        if row.seal_mac is None:
-            errors.append("seal_mac is NULL")
-        if row.key_id is None:
-            errors.append("key_id is NULL")
-        if kind == "seal":
-            if row.rows_mac is None:
-                errors.append("rows_mac is NULL")
-            if from_id is not None and to_id is not None and from_id >= to_id:
-                errors.append("seal range is empty or reversed")
-            if row_count is not None and row_count < 0:
-                errors.append("row_count is negative")
-        elif kind == "activation":
-            if from_id != -1:
-                errors.append("activation from_id is not the reserved -1 value")
-            if row_count is not None or row.rows_mac is not None:
-                errors.append("activation carries non-canonical range fields")
-        elif kind == "floor":
-            if from_id is not None or row_count is not None or row.rows_mac is not None:
-                errors.append("floor carries non-canonical range fields")
-        records.append(
-            SealRecord(
-                id=row.id,
-                kind=kind,
-                from_id=from_id,
-                to_id=to_id,
-                row_count=row_count,
-                rows_mac=row.rows_mac,
-                seal_mac=row.seal_mac,
-                sealed_at=sealed_at,
-                key_id=row.key_id,
-                errors=tuple(errors),
-            )
+    columns = (
+        _seals.c.id,
+        cast(_seals.c.kind, String).label("kind"),
+        cast(_seals.c.from_id, String).label("from_id"),
+        cast(_seals.c.to_id, String).label("to_id"),
+        cast(_seals.c.row_count, String).label("row_count"),
+        cast(_seals.c.rows_mac, String).label("rows_mac"),
+        cast(_seals.c.seal_mac, String).label("seal_mac"),
+        cast(_seals.c.sealed_at, String).label("sealed_at"),
+        cast(_seals.c.key_id, String).label("key_id"),
+    )
+    records = SealRecords()
+    last_id = 0
+    while len(records) < _MAX_SEAL_RECORDS:
+        rows = conn.execute(
+            select(*columns).where(_seals.c.id > last_id).order_by(_seals.c.id).limit(_PAGE)
+        ).all()
+        if not rows:
+            break
+        for row in rows:
+            if len(records) >= _MAX_SEAL_RECORDS:
+                records.capped = True
+                break
+            records.append(_parse_seal_record(row))
+        last_id = rows[-1].id
+        if len(rows) < _PAGE:
+            break
+    if len(records) == _MAX_SEAL_RECORDS:
+        records.capped = (
+            conn.execute(select(_seals.c.id).where(_seals.c.id > last_id).limit(1)).first()
+            is not None
         )
     return records
+
+
+def _parse_seal_record(row: Any) -> SealRecord:
+    """Defensively parse one raw side-table row."""
+    errors: list[str] = []
+    kind = row.kind or ""
+    from_id, error = _parse_int(row.from_id, name="from_id", required=kind == "seal")
+    if error:
+        errors.append(error)
+    to_id, error = _parse_int(row.to_id, name="to_id", required=True)
+    if error:
+        errors.append(error)
+    row_count, error = _parse_int(row.row_count, name="row_count", required=kind == "seal")
+    if error:
+        errors.append(error)
+    sealed_at, error = _parse_datetime(row.sealed_at)
+    if error:
+        errors.append(error)
+    if kind not in {"seal", "floor", "activation"}:
+        errors.append(f"unknown kind {kind!r}")
+    if row.seal_mac is None:
+        errors.append("seal_mac is NULL")
+    if row.key_id is None:
+        errors.append("key_id is NULL")
+    if kind == "seal":
+        if row.rows_mac is None:
+            errors.append("rows_mac is NULL")
+        if from_id is not None and to_id is not None and from_id >= to_id:
+            errors.append("seal range is empty or reversed")
+        if row_count is not None and row_count < 0:
+            errors.append("row_count is negative")
+    elif kind == "activation":
+        if from_id != -1:
+            errors.append("activation from_id is not the reserved -1 value")
+        if row_count is not None or row.rows_mac is not None:
+            errors.append("activation carries non-canonical range fields")
+    elif kind == "floor":
+        if from_id is not None or row_count is not None or row.rows_mac is not None:
+            errors.append("floor carries non-canonical range fields")
+    return SealRecord(
+        id=row.id,
+        kind=kind,
+        from_id=from_id,
+        to_id=to_id,
+        row_count=row_count,
+        rows_mac=row.rows_mac,
+        seal_mac=row.seal_mac,
+        sealed_at=sealed_at,
+        key_id=row.key_id,
+        errors=tuple(errors),
+    )
 
 
 def _iter_rows(conn: Connection, low: int, high: int | None) -> Iterator[Any]:
@@ -238,10 +269,7 @@ def _row_verdict(row: Any, boundary: int | None, keyring: dict[str, Key]) -> str
         return "tampered"
     key = keyring.get(row.key_id)
     if key is None:
-        raise VerifyError(
-            f"row {row.id} was signed by unknown key_id {row.key_id!r} — add its secret to "
-            "FIRM_AUDIT_RETIRED_KEYS."
-        )
+        return "unresolved"
     try:
         expected = recompute_row_mac(key, row)
     except (TypeError, ValueError, UnicodeError):
@@ -285,21 +313,24 @@ def classify_range(
 
     count = 0
     rows_ok = True
+    unresolved = False
 
     def pairs() -> Iterator[tuple[int, str]]:
-        nonlocal count, rows_ok
+        nonlocal count, rows_ok, unresolved
         for row in _iter_rows(conn, from_id, to_id):
             count += 1
             verdict = _row_verdict(row, boundary, keyring)
             if on_row is not None:
                 on_row(row, verdict)
-            if verdict != "ok" or row.row_mac is None:
+            if verdict == "unresolved":
+                unresolved = True
+            elif verdict != "ok" or row.row_mac is None:
                 rows_ok = False
             yield row.id, row.row_mac or ""
 
     aggregate = integrity.rows_mac(key, pairs())
     if rows_ok and count == seal.row_count and hmac.compare_digest(aggregate, seal.rows_mac):
-        return "ok"
+        return "unresolved" if unresolved else "ok"
     return "tampered"
 
 
@@ -406,13 +437,10 @@ def _classify_anchor_issues(
 ) -> tuple[tuple[MalformedAnchorLine, ...], tuple[MalformedAnchorLine, ...]]:
     """Split malformed input into benign partial appends and actual corruption.
 
-    A crash can leave the final append as a strict prefix of its committed record's canonical
-    line. The sealer's heal pass appends the complete line after that fragment, moving the fragment
-    into the middle of the file. Position therefore is only an initial parsing hint: a fragment is
-    benign whenever it is a strict prefix of either an intact committed record or its complete,
-    healed SEAL event below an honored retirement floor. Every other malformed line is corruption.
-    This keeps healed fragments benign after retention legitimately removes their database record
-    without treating arbitrary uncommitted anchor events as reconstruction evidence.
+    A crash can leave any malformed final non-blank line, because the database transaction has not
+    yet committed. The sealer's heal pass can append the complete record after a strict-prefix
+    fragment, moving that fragment into the middle of the file. Such reconstructible strict
+    prefixes stay benign; every other malformed middle line is corruption.
     """
     reconstructible = {_record_anchor_line(record) for record in intact_records}
     reconstructible.update(
@@ -427,8 +455,9 @@ def _classify_anchor_issues(
     corrupt: list[MalformedAnchorLine] = []
     for issue in issues:
         content = issue.content
-        if content and any(
-            line != content and line.startswith(content) for line in reconstructible
+        if issue is anchor.partial_tail or (
+            content
+            and any(line != content and line.startswith(content) for line in reconstructible)
         ):
             partial.append(issue)
         else:
@@ -439,27 +468,43 @@ def _classify_anchor_issues(
 def _read_anchor(path: str) -> AnchorData:
     """Parse new-format anchor events and retain malformed lines without ever raising.
 
-    The final malformed non-blank line is carried separately as a potential interrupted append.
-    Its final classification still requires the strict-prefix rule in
-    :func:`_classify_anchor_issues`; arbitrary garbage at EOF is not automatically trusted.
+    Input is streamed and retained data is capped. The final malformed non-blank line is carried
+    separately as an interrupted append; malformed lines that are followed by another event are
+    corruption unless the strict-prefix healing rule can reconstruct them.
     """
     try:
         with open(path, encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
+            return _parse_anchor_stream(_bounded_anchor_lines(handle))
     except FileNotFoundError:
         return AnchorData(False, (), (), None)
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         issue = MalformedAnchorLine(None, None, f"anchor cannot be read: {exc}")
         return AnchorData(True, (), (issue,), None)
 
+
+def _parse_anchor_stream(lines: Iterator[str]) -> AnchorData:
+    """Parse a streamed anchor while retaining only bounded evidence."""
     events: list[AnchorEvent] = []
     malformed: list[MalformedAnchorLine] = []
-    partial_tail: MalformedAnchorLine | None = None
-    nonblank = [index for index, line in enumerate(lines) if line.strip()]
-    last_nonblank = nonblank[-1] if nonblank else None
-    for line_number, line in enumerate(lines, start=1):
+    pending_malformed: MalformedAnchorLine | None = None
+    capped = False
+
+    def retain(item: AnchorEvent | MalformedAnchorLine) -> None:
+        nonlocal capped
+        if len(events) + len(malformed) >= _MAX_ANCHOR_ITEMS:
+            capped = True
+        elif isinstance(item, AnchorEvent):
+            events.append(item)
+        else:
+            malformed.append(item)
+
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.rstrip("\r\n")
         if not line.strip():
             continue
+        if pending_malformed is not None:
+            retain(pending_malformed)
+            pending_malformed = None
         parts = line.split()
         try:
             at = datetime.fromisoformat(parts[0])
@@ -470,21 +515,31 @@ def _read_anchor(path: str) -> AnchorData:
                 mac = parts[4]
                 if from_id >= to_id:
                     raise ValueError
-                events.append(AnchorEvent("seal", at, from_id, to_id, mac, line_number))
+                retain(AnchorEvent("seal", at, from_id, to_id, mac, line_number))
             elif kind in {"FLOOR", "ACTIVATION"} and len(parts) == 4:
                 to_id = int(parts[2])
-                events.append(AnchorEvent(kind.lower(), at, None, to_id, parts[3], line_number))
+                retain(AnchorEvent(kind.lower(), at, None, to_id, parts[3], line_number))
             else:
                 raise ValueError
         except (IndexError, ValueError):
-            issue = MalformedAnchorLine(
+            pending_malformed = MalformedAnchorLine(
                 line_number, line, f"anchor line {line_number} is malformed"
             )
-            if line_number - 1 == last_nonblank:
-                partial_tail = issue
-            else:
-                malformed.append(issue)
-    return AnchorData(True, tuple(events), tuple(malformed), partial_tail)
+    return AnchorData(True, tuple(events), tuple(malformed), pending_malformed, capped)
+
+
+def _bounded_anchor_lines(handle: Any) -> Iterator[str]:
+    """Yield physical lines without ever materializing an attacker-sized line."""
+    while True:
+        chunk = handle.readline(_MAX_ANCHOR_LINE_CHARS + 1)
+        if not chunk:
+            return
+        if len(chunk) <= _MAX_ANCHOR_LINE_CHARS or chunk.endswith(("\n", "\r")):
+            yield chunk
+            continue
+        while chunk and not chunk.endswith(("\n", "\r")):
+            chunk = handle.readline(_MAX_ANCHOR_LINE_CHARS + 1)
+        yield "anchor-line-exceeded-size-cap\n"
 
 
 def _record_matches_anchor(record: SealRecord, event: AnchorEvent) -> bool:
@@ -500,6 +555,14 @@ def _record_matches_anchor(record: SealRecord, event: AnchorEvent) -> bool:
     return integrity.canonical_created_at(record.sealed_at) == integrity.canonical_created_at(
         event.at
     )
+
+
+def _anchor_index(anchor: AnchorData) -> dict[tuple[str, int], list[AnchorEvent]]:
+    """Index bounded anchor events by their id-space coordinate."""
+    indexed: dict[tuple[str, int], list[AnchorEvent]] = {}
+    for event in anchor.events:
+        indexed.setdefault((event.kind, event.to_id), []).append(event)
+    return indexed
 
 
 class _Findings(list):  # type: ignore[type-arg]
@@ -637,6 +700,7 @@ class Verifier:
             report = self._verify(anchor_path=anchor_path, full=full)
         except VerifyError as exc:
             self._persist_error(str(exc))
+            self.audit.on_error(exc)
             raise
         except (SQLAlchemyError, TypeError, ValueError, UnicodeError) as exc:
             now = now_utc()
@@ -655,7 +719,10 @@ class Verifier:
                 affected_identifiers=_affected_json([finding], 1),
             )
         report.duration_seconds = time.monotonic() - started
-        self._persist(report)
+        try:
+            self._persist(report)
+        except Exception as exc:
+            self.audit.on_error(exc)
         self._emit_finding(report)
         return report
 
@@ -667,24 +734,35 @@ class Verifier:
         now = now_utc()
         counters = _Counters()
         findings: list[Finding] = _Findings()
-        anchor = _read_anchor(anchor_path) if anchor_path is not None else None
+        unresolved_rows: dict[int, str] = {}
 
         with snapshot_transaction(self.audit.engine) as conn:
+            anchor = _read_anchor(anchor_path) if anchor_path is not None else None
             records = load_seal_records(conn)
+            if records.capped:
+                findings.append(
+                    Finding(
+                        "warning",
+                        f"seal-record scan reached its {_MAX_SEAL_RECORDS}-record safety cap",
+                        "audit-integrity-storage",
+                    )
+                )
+                counters.warning += 1
             intact = self._check_records(records, keyring, seal_keyring, counters, findings)
-            floor = self._resolve_floor(records, intact, anchor, seal_keyring, counters, findings)
-            boundary = self._resolve_activation(
-                records, intact, anchor, seal_keyring, counters, findings
-            )
+            floor = self._resolve_floor(records, intact, anchor, counters, findings)
+            boundary = self._resolve_activation(records, intact, anchor, counters, findings)
 
             self._check_pruned_region_empty(conn, floor, counters, findings)
             self._check_duplicates(conn, counters, findings)
-            self._verify_legacy_prefix(conn, floor, boundary, keyring, counters, findings)
+            self._verify_legacy_prefix(
+                conn, floor, boundary, keyring, unresolved_rows, counters, findings
+            )
 
             covering = [
                 record
                 for record in records
                 if record.kind == "seal"
+                and record.id in intact
                 and not record.errors
                 and record.to_id is not None
                 and record.to_id > floor
@@ -699,6 +777,7 @@ class Verifier:
                     boundary,
                     keyring,
                     seal_keyring,
+                    unresolved_rows,
                     counters,
                     findings,
                 )
@@ -707,7 +786,7 @@ class Verifier:
                 [origin, *(record.to_id or origin for record in covering)], default=origin
             )
             tail_count, tail_oldest = self._verify_tail(
-                conn, max_covered, boundary, keyring, counters, findings
+                conn, max_covered, boundary, keyring, unresolved_rows, counters, findings
             )
             self._check_tail_liveness(
                 any(record.kind == "activation" for record in records),
@@ -726,6 +805,8 @@ class Verifier:
                 counters,
                 findings,
             )
+            if unresolved_rows and not counters.tampered:
+                raise VerifyError(next(iter(unresolved_rows.values())))
             prior = conn.execute(
                 select(_status.c.last_full_coverage_at).where(_status.c.id == _STATUS_ID)
             ).first()
@@ -761,11 +842,21 @@ class Verifier:
             assert record.key_id is not None
             key = seal_keyring.get(record.key_id)
             if key is None:
-                if record.key_id in keyring:
-                    raise VerifyError(
-                        f"{label} uses key_id {record.key_id!r}, a row key that is not a seal key"
+                role = (
+                    "a row key that is not a seal key"
+                    if record.key_id in keyring
+                    else "an unavailable seal key"
+                )
+                findings.append(
+                    Finding(
+                        "tampered",
+                        f"{label} has an unverifiable seal signer: key_id "
+                        f"{record.key_id!r} is {role}",
+                        label,
                     )
-                raise VerifyError(f"{label} uses unknown seal key_id {record.key_id!r}")
+                )
+                counters.tampered += 1
+                continue
             assert record.seal_mac is not None
             if not hmac.compare_digest(recompute_seal_mac(key, record), record.seal_mac):
                 findings.append(Finding("tampered", f"{label} has an invalid MAC", label))
@@ -779,7 +870,6 @@ class Verifier:
         records: Sequence[SealRecord],
         intact: set[int],
         anchor: AnchorData | None,
-        seal_keyring: dict[str, Key],
         counters: _Counters,
         findings: list[Finding],
     ) -> int:
@@ -799,9 +889,12 @@ class Verifier:
             previous = max(previous, record.to_id)
 
         honored: list[SealRecord] = []
+        anchor_available = anchor is not None and anchor.exists and bool(anchor.events)
+        anchor_events = _anchor_index(anchor) if anchor_available else {}
         for record in valid:
-            if anchor is None or any(
-                _record_matches_anchor(record, event) for event in anchor.events
+            if not anchor_available or any(
+                _record_matches_anchor(record, event)
+                for event in anchor_events.get((record.kind, record.to_id or 0), ())
             ):
                 honored.append(record)
             else:
@@ -820,11 +913,9 @@ class Verifier:
         records: Sequence[SealRecord],
         intact: set[int],
         anchor: AnchorData | None,
-        seal_keyring: dict[str, Key],
         counters: _Counters,
         findings: list[Finding],
     ) -> int | None:
-        del seal_keyring  # role validation already happened in _check_records
         valid = [
             record for record in records if record.kind == "activation" and record.id in intact
         ]
@@ -845,8 +936,11 @@ class Verifier:
                 counters.tampered += 1
             return None
         marker = valid[0]
-        if anchor is not None and not any(
-            _record_matches_anchor(marker, event) for event in anchor.events
+        anchor_available = anchor is not None and anchor.exists and bool(anchor.events)
+        anchor_events = _anchor_index(anchor) if anchor_available else {}
+        if anchor_available and not any(
+            _record_matches_anchor(marker, event)
+            for event in anchor_events.get((marker.kind, marker.to_id or 0), ())
         ):
             assert marker.sealed_at is not None
             age = (now_utc() - marker.sealed_at).total_seconds()
@@ -914,6 +1008,7 @@ class Verifier:
         boundary: int | None,
         keyring: dict[str, Key],
         seal_keyring: dict[str, Key],
+        unresolved_rows: dict[int, str],
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
@@ -924,7 +1019,7 @@ class Verifier:
             keyring,
             seal_keyring,
             on_row=lambda row, row_verdict: self._record_row_verdict(
-                row, row_verdict, counters, findings
+                row, row_verdict, unresolved_rows, counters, findings
             ),
         )
         if verdict == "tampered":
@@ -944,13 +1039,20 @@ class Verifier:
         floor: int,
         boundary: int | None,
         keyring: dict[str, Key],
+        unresolved_rows: dict[int, str],
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
         if boundary is None or boundary <= floor:
             return
         for row in _iter_rows(conn, floor, boundary):
-            self._record_row_verdict(row, _row_verdict(row, boundary, keyring), counters, findings)
+            self._record_row_verdict(
+                row,
+                _row_verdict(row, boundary, keyring),
+                unresolved_rows,
+                counters,
+                findings,
+            )
 
     def _verify_tail(
         self,
@@ -958,6 +1060,7 @@ class Verifier:
         max_covered: int,
         boundary: int | None,
         keyring: dict[str, Key],
+        unresolved_rows: dict[int, str],
         counters: _Counters,
         findings: list[Finding],
     ) -> tuple[int, datetime | None]:
@@ -967,13 +1070,20 @@ class Verifier:
             count += 1
             if oldest is None or row.created_at < oldest:
                 oldest = row.created_at
-            self._record_row_verdict(row, _row_verdict(row, boundary, keyring), counters, findings)
+            self._record_row_verdict(
+                row,
+                _row_verdict(row, boundary, keyring),
+                unresolved_rows,
+                counters,
+                findings,
+            )
         return count, oldest
 
     def _record_row_verdict(
         self,
         row: Any,
         verdict: str,
+        unresolved_rows: dict[int, str],
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
@@ -981,6 +1091,15 @@ class Verifier:
             counters.ok += 1
         elif verdict == "unprotected":
             counters.unprotected += 1
+        elif verdict == "unresolved":
+            message = (
+                f"row {row.id} was signed by unknown key_id {row.key_id!r} — add its secret to "
+                "FIRM_AUDIT_RETIRED_KEYS."
+            )
+            if row.id not in unresolved_rows:
+                unresolved_rows[row.id] = message
+                findings.append(Finding("warning", message, f"#{row.id} {row.action}", id=row.id))
+                counters.warning += 1
         elif row.row_mac is None:
             findings.append(
                 Finding(
@@ -1103,6 +1222,15 @@ class Verifier:
         if anchor is None:
             return None, False
         intact_records = [record for record in records if record.id in intact]
+        if anchor.capped:
+            findings.append(
+                Finding(
+                    "warning",
+                    f"anchor scan reached its {_MAX_ANCHOR_ITEMS}-item safety cap",
+                    "anchor",
+                )
+            )
+            counters.warning += 1
         partial, corrupt = _classify_anchor_issues(anchor, intact_records, retired_through=floor)
         for issue in partial:
             findings.append(
@@ -1118,18 +1246,65 @@ class Verifier:
             counters.tampered += 1
         if not anchor.exists or not anchor.events:
             if records:
+                beyond_lag = any(
+                    record.sealed_at is not None
+                    and (now - record.sealed_at).total_seconds() > self.audit._anchor_max_age
+                    for record in records
+                )
+                verdict = "tampered" if beyond_lag else "warning"
+                qualifier = " beyond the anchor lag window" if beyond_lag else ""
                 findings.append(
                     Finding(
-                        "warning",
-                        "anchor file is missing or empty while tamper-evidence records exist",
+                        verdict,
+                        "anchor file is missing or empty while tamper-evidence records exist"
+                        f"{qualifier}",
                         "anchor",
                     )
                 )
-                counters.warning += 1
+                if beyond_lag:
+                    counters.tampered += 1
+                else:
+                    counters.warning += 1
             return None, False
 
+        anchor_events = _anchor_index(anchor)
+        record_index: dict[tuple[str, int], list[SealRecord]] = {}
+        for record in records:
+            record_index.setdefault((record.kind, record.to_id or 0), []).append(record)
+
+        seen_anchor_lines: set[str] = set()
         for event in anchor.events:
-            matches = [record for record in records if _record_matches_anchor(record, event)]
+            line = _event_anchor_line(event)
+            if line in seen_anchor_lines:
+                findings.append(
+                    Finding(
+                        "tampered",
+                        f"anchor line {event.line_number} replays an earlier authenticated event",
+                        "anchor",
+                    )
+                )
+                counters.tampered += 1
+            seen_anchor_lines.add(line)
+
+        intact_lines = {_record_anchor_line(record) for record in intact_records}
+        seal_events = sorted(
+            (event for event in anchor.events if event.kind == "seal"),
+            key=lambda event: event.to_id,
+        )
+        seal_to_ids = [event.to_id for event in seal_events]
+        missing_prefix = [0]
+        for event in seal_events:
+            missing_prefix.append(
+                missing_prefix[-1] + (_event_anchor_line(event) not in intact_lines)
+            )
+        pending_start = bisect_right(seal_to_ids, floor)
+
+        for event in anchor.events:
+            matches = [
+                record
+                for record in record_index.get((event.kind, event.to_id), ())
+                if _record_matches_anchor(record, event)
+            ]
             if event.kind == "seal":
                 if event.to_id <= floor:
                     continue
@@ -1155,17 +1330,11 @@ class Verifier:
                 elif not any(record.id in intact for record in matches):
                     if event.kind == "floor" and floor >= event.to_id:
                         continue
-                    pending_seals = [
-                        candidate
-                        for candidate in anchor.events
-                        if candidate.kind == "seal" and floor < candidate.to_id <= event.to_id
-                    ]
-                    crashed_prune = event.kind == "floor" and all(
-                        any(
-                            record.id in intact and _record_matches_anchor(record, candidate)
-                            for record in records
-                        )
-                        for candidate in pending_seals
+                    pending_end = bisect_right(seal_to_ids, event.to_id)
+                    crashed_prune = (
+                        event.kind == "floor"
+                        and pending_end > pending_start
+                        and missing_prefix[pending_end] == missing_prefix[pending_start]
                     )
                     if crashed_prune:
                         findings.append(
@@ -1190,7 +1359,10 @@ class Verifier:
         for record in records:
             if record.id not in intact:
                 continue
-            anchored = any(_record_matches_anchor(record, event) for event in anchor.events)
+            anchored = any(
+                _record_matches_anchor(record, event)
+                for event in anchor_events.get((record.kind, record.to_id or 0), ())
+            )
             if anchored:
                 continue
             assert record.sealed_at is not None

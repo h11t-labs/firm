@@ -75,7 +75,7 @@ Checks row MACs, independent range seals, the signed activation/floor markers, a
 `--anchor`) the external anchor. Reads the key from `FIRM_AUDIT_KEY`; during a rotation it also
 reads the retired-key archives
 `FIRM_AUDIT_RETIRED_KEYS` (retired row keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired seal keys).
-Read-only.
+The evidence scan is read-only; updating `firm_audit_verify_status` requires a write grant.
 
 ```bash
 firm-audit verify --database-url sqlite:///audit.db --anchor /var/lib/firm/audit.anchor

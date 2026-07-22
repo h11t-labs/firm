@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 import pytest
@@ -412,15 +413,15 @@ def test_missing_anchor_file_with_records_warns(db_url: str, tmp_path) -> None:
         audit.close()
 
 
-def test_legacy_three_field_anchor_line_is_tampered_not_crash(db_url: str, tmp_path) -> None:
+def test_malformed_final_anchor_line_warns_not_crash(db_url: str, tmp_path) -> None:
     anchor = tmp_path / "anchor.log"
     audit = _make(db_url, anchor_path=str(anchor))
     try:
         line = anchor.read_text().splitlines()[0].split()
         anchor.write_text(f"{line[0]} 1 {line[-1]}\n", encoding="utf-8")
         report = audit.verify(full=True)
-        assert report.outcome == "tampered"
-        assert _status_row(audit.engine).outcome == "tampered"
+        assert report.outcome == "warning"
+        assert _status_row(audit.engine).outcome == "warning"
     finally:
         audit.close()
 
@@ -479,7 +480,8 @@ def test_delete_and_relocate_is_tampered(db_url: str) -> None:
 
 
 def test_unknown_key_id_is_a_hard_error(db_url: str) -> None:
-    audit = _make(db_url)
+    errors: list[BaseException] = []
+    audit = _make(db_url, on_error=errors.append)
     try:
         audit.record("a")
         with transaction(audit.engine) as conn:
@@ -487,6 +489,7 @@ def test_unknown_key_id_is_a_hard_error(db_url: str) -> None:
         with pytest.raises(VerifyError, match="unknown key_id"):
             audit.verify(full=True)
         assert _status_row(audit.engine).outcome == "error"
+        assert errors and isinstance(errors[0], VerifyError)
     finally:
         audit.close()
 
@@ -625,6 +628,63 @@ def test_verify_upserts_single_status_row_without_cycle_columns(db_url: str) -> 
         assert status.last_full_coverage_at is not None
         assert not hasattr(status, "cycle_length")
         assert not hasattr(status, "cycle_position")
+    finally:
+        audit.close()
+
+
+def test_broken_status_sink_does_not_mask_tampered_report(db_url: str) -> None:
+    errors: list[BaseException] = []
+    alerts: list[IntegrityAlert] = []
+    audit = _make(db_url, on_error=errors.append, on_finding=alerts.append)
+    try:
+        with transaction(audit.engine) as conn:
+            conn.exec_driver_sql("DROP TABLE firm_audit_verify_status")
+        report = audit.verify(full=True)
+        assert report.outcome == "tampered"
+        assert errors
+        assert alerts and alerts[0].severity == "critical"
+    finally:
+        audit.close()
+
+
+def test_anchor_is_read_after_snapshot_opens(db_url: str, tmp_path, monkeypatch) -> None:
+    from firm.audit import verify as verify_mod
+
+    audit = _make(db_url)
+    anchor = tmp_path / "anchor.log"
+    order: list[str] = []
+    original_snapshot = verify_mod.snapshot_transaction
+    original_read_anchor = verify_mod._read_anchor
+
+    @contextmanager
+    def tracked_snapshot(engine):
+        order.append("snapshot")
+        with original_snapshot(engine) as conn:
+            yield conn
+
+    def tracked_read_anchor(path: str):
+        order.append("anchor")
+        return original_read_anchor(path)
+
+    monkeypatch.setattr(verify_mod, "snapshot_transaction", tracked_snapshot)
+    monkeypatch.setattr(verify_mod, "_read_anchor", tracked_read_anchor)
+    try:
+        audit.verify(anchor_path=str(anchor), full=True)
+        assert order[:2] == ["snapshot", "anchor"]
+    finally:
+        audit.close()
+
+
+def test_seal_side_table_scan_uses_keyset_pages(db_url: str, monkeypatch) -> None:
+    from firm.audit import verify as verify_mod
+
+    audit = _make(db_url, seal_batch_size=1)
+    try:
+        for index in range(3):
+            audit.record(f"e{index}")
+        audit.sealer.run_once()
+        monkeypatch.setattr(verify_mod, "_PAGE", 1)
+        assert audit.verify(full=True).outcome == "ok"
     finally:
         audit.close()
 

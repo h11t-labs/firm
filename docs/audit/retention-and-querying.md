@@ -78,7 +78,8 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000
 
 ### Pruning with tamper-evidence on
 
-Before activation, pruning simply deletes rows older than `max_age` in batches. Once
+Without a configured key, pruning simply deletes rows older than `max_age` in batches. With a key
+configured, expired rows are not plain-pruned until a signed activation exists. Once
 [tamper-evidence](tamper-evidence.md) has an activation/seal/floor record, pruning **aligns to seal
 boundaries and only prunes what verifies**:
 
@@ -92,8 +93,11 @@ boundaries and only prunes what verifies**:
   stops a tampered-then-expired row from being laundered by deletion — the evidence stays in place,
   and a later `firm-audit verify` still reports it as `TAMPERED`.
 - When an anchor is configured, retention appends the `FLOOR` line **before** committing the floor
-  row and deletions. If either anchor sink fails, pruning is refused. The signed floor row, event
-  deletion, and retired covering-seal deletion then commit in one write transaction.
+  row and deletions and fsyncs the file. If either anchor sink fails, pruning is refused. The signed
+  floor row, event deletion, and retired covering-seal deletion then commit in one write
+  transaction; serialization/deadlock failures get a bounded retry.
+- A host missing any current or retired seal key needed by existing records refuses loudly and
+  sets `last_refused_no_seal_key`; it never categorizes the evidence as prunable tampering.
 - The refusal repeats on every subsequent run until you preserve the database and investigate with
   `firm-audit verify --full`.
 

@@ -16,6 +16,7 @@ from firm.audit import AuditLog, integrity, schema
 from firm.audit.integrity import load_key
 
 _SECRET = "sealing-secret-key-padding-0123456789"  # noqa: S105
+_SEAL_SECRET = "separate-seal-key-padding-0123456789ab"  # noqa: S105
 _KEY = load_key(_SECRET)
 assert _KEY is not None
 _audits = schema.audit_events
@@ -322,6 +323,47 @@ def test_on_anchor_callback_failure_routes_to_on_error(db_url: str) -> None:
     try:
         _activate(audit)
         assert errors and "anchor-sink-down" in str(errors[0])
+    finally:
+        audit.close()
+
+
+def test_row_only_host_refuses_mixed_signer_records(db_url: str) -> None:
+    owner = AuditLog(database_url=db_url, mac_key=_SECRET, seal_key=_SEAL_SECRET, grace=0.0)
+    try:
+        _activate(owner)
+        owner.record("first")
+        assert owner.sealer.run_once() == 1
+        before = len(_records(owner.engine))
+        errors: list[BaseException] = []
+        row_only = AuditLog(
+            engine=owner.engine,
+            create_schema=False,
+            mac_key=_SECRET,
+            grace=0.0,
+            on_error=errors.append,
+        )
+        try:
+            row_only.record("second")
+            assert row_only.sealer.run_once() == 0
+            assert len(_records(owner.engine)) == before
+            assert errors and "mixed-signer" in str(errors[0])
+        finally:
+            row_only.close()
+    finally:
+        owner.close()
+
+
+def test_anchor_file_append_is_fsynced(db_url: str, tmp_path, monkeypatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr("firm.audit.sealing.os.fsync", calls.append)
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        anchor_path=str(tmp_path / "anchor.log"),
+    )
+    try:
+        _activate(audit)
+        assert calls
     finally:
         audit.close()
 

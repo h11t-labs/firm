@@ -13,7 +13,7 @@ from sqlalchemy import delete, func, select, update
 from firm._core.clock import now_utc
 from firm._core.database import transaction
 from firm.audit import AuditLog, integrity, schema
-from firm.audit.verify import VerifyError
+from firm.audit.verify import IntegrityAlert, VerifyError
 
 _SINGLE_KEY = "attack-single-key-current-0123456789abcdef"
 _ROW_KEY = "attack-row-key-current-0123456789abcdefghi"
@@ -106,11 +106,22 @@ def _attack_params() -> list[pytest.ParameterSet]:
         "drop-seals-table",
     )
     return [
-        pytest.param(lifecycle, mutation, id=f"{lifecycle.id}-{mutation}")
+        pytest.param(
+            lifecycle,
+            mutation,
+            _expected_outcome(lifecycle, mutation),
+            id=f"{lifecycle.id}-{mutation}",
+        )
         for lifecycle in _LIFECYCLES
         for mutation in mutations
         if _mutation_applies(lifecycle, mutation)
     ]
+
+
+def _expected_outcome(lifecycle: Lifecycle, mutation: str) -> str:
+    if lifecycle.stage == "fresh" and mutation in {"delete-anchor", "truncate-anchor"}:
+        return "warning"
+    return "tampered"
 
 
 _ATTACK_PARAMS = _attack_params()
@@ -222,9 +233,6 @@ def _build_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lifecycle: Lifec
         monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", f"old-row={_OLD_ROW_KEY}")
         monkeypatch.setenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", f"old-seal={_OLD_SEAL_KEY}")
         audit = _open_log(database_url, lifecycle, anchor_path, rotated=True, create_schema=False)
-        _record_old(audit, "current-key", 2)
-        if lifecycle.stage != "fresh":
-            _seal_old(audit)
 
     if lifecycle.stage == "sealed-tail":
         audit.record("young-tail")
@@ -433,13 +441,14 @@ def _status_outcome(audit: AuditLog) -> str | None:
     return row.outcome if row is not None else None
 
 
-def _assert_verify_rejects(built: BuiltLog) -> None:
-    try:
-        report = built.audit.verify(full=True)
-    except VerifyError:
+def _assert_verify_outcome(built: BuiltLog, expected: str) -> None:
+    if expected == "error":
+        with pytest.raises(VerifyError):
+            built.audit.verify(full=True)
         assert _status_outcome(built.audit) == "error"
         return
-    assert report.outcome != "ok"
+    report = built.audit.verify(full=True)
+    assert report.outcome == expected
 
 
 def _present_ids(audit: AuditLog, wanted: tuple[int, ...]) -> set[int]:
@@ -471,7 +480,8 @@ def test_clean_lifecycle_positive_control(
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, lifecycle)
     try:
-        assert built.audit.verify(full=True).outcome in {"ok", "warning"}
+        expected_clean = "warning" if lifecycle.stage == "fresh" else "ok"
+        assert built.audit.verify(full=True).outcome == expected_clean
         deleted = built.audit.retention.run_once()
         if lifecycle.stage == "fresh":
             assert deleted == 0
@@ -480,22 +490,23 @@ def test_clean_lifecycle_positive_control(
             assert deleted > 0
             assert built.audit.retention.last_refused_tampered == 0
             assert not _present_ids(built.audit, built.target_row_ids)
-            assert built.audit.verify(full=True).outcome in {"ok", "warning"}
+            assert built.audit.verify(full=True).outcome == "ok"
     finally:
         built.audit.close()
 
 
-@pytest.mark.parametrize("lifecycle,mutation", _ATTACK_PARAMS)
+@pytest.mark.parametrize("lifecycle,mutation,expected", _ATTACK_PARAMS)
 def test_attack_matrix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     lifecycle: Lifecycle,
     mutation: str,
+    expected: str,
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, lifecycle)
     try:
         protected_ids = _apply_mutation(built, mutation)
-        _assert_verify_rejects(built)
+        _assert_verify_outcome(built, expected)
         _assert_retention_does_not_launder(built, protected_ids, mutation)
     finally:
         built.audit.close()
@@ -525,7 +536,7 @@ def test_orphaned_floor_anchor_is_a_crashed_prune_and_next_retention_converges(
         )
 
         report = built.audit.verify(full=True)
-        assert report.outcome != "tampered"
+        assert report.outcome == "warning"
         assert any("crashed prune" in finding.message for finding in report.findings)
 
         assert built.audit.retention.run_once() > 0
@@ -547,7 +558,7 @@ def test_sealer_heals_a_committed_seal_missing_from_anchor(
         lines = [line for line in lines if line.split()[-1] != target.seal_mac]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        assert built.audit.verify(full=True).outcome != "tampered"
+        assert built.audit.verify(full=True).outcome == "ok"
         assert built.audit.sealer.run_once() == 0
         healed = path.read_text(encoding="utf-8").splitlines()
         assert any(line.split()[-1] == target.seal_mac for line in healed)
@@ -570,14 +581,14 @@ def test_partial_anchor_tail_warns_heals_and_does_not_block_retention(
         path.write_text("\n".join([*lines[:-1], partial]), encoding="utf-8")
 
         report = built.audit.verify(full=True)
-        assert report.outcome != "tampered"
+        assert report.outcome == "warning"
         assert any("partial anchor append" in finding.message for finding in report.findings)
 
         assert built.audit.sealer.run_once() == 0
         assert partial in path.read_text(encoding="utf-8").splitlines()
         assert built.audit.retention.run_once() > 0
         assert built.audit.retention.last_refused_tampered == 0
-        assert built.audit.verify(full=True).outcome != "tampered"
+        assert built.audit.verify(full=True).outcome == "warning"
     finally:
         built.audit.close()
 
@@ -617,3 +628,192 @@ def test_deleted_floor_and_anchor_line_cannot_hide_already_pruned_rows(
         assert built.audit.verify(full=True).outcome == "tampered"
     finally:
         built.audit.close()
+
+
+def test_row_key_signed_layer_two_forgery_is_tampered_and_alerts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", False, "split"))
+    alerts: list[IntegrityAlert] = []
+    built.audit.on_finding = alerts.append
+    try:
+        seal = _target_seal(built)
+        row_key = integrity.load_key(_ROW_KEY)
+        assert row_key is not None
+        with transaction(built.audit.engine) as conn:
+            rows = conn.execute(
+                select(_audits.c.id, _audits.c.row_mac)
+                .where(_audits.c.id > seal.from_id, _audits.c.id <= seal.to_id)
+                .order_by(_audits.c.id)
+            ).all()
+            aggregate = integrity.rows_mac(row_key, [(row.id, row.row_mac) for row in rows])
+            forged_mac = integrity.seal_mac(
+                row_key,
+                from_id=seal.from_id,
+                to_id=seal.to_id,
+                row_count=seal.row_count,
+                rows_mac=aggregate,
+                sealed_at=seal.sealed_at,
+                key_id=row_key.id,
+            )
+            conn.execute(
+                update(_seals)
+                .where(_seals.c.id == seal.id)
+                .values(key_id=row_key.id, rows_mac=aggregate, seal_mac=forged_mac)
+            )
+        report = built.audit.verify(full=True)
+        assert report.outcome == "tampered"
+        assert alerts and alerts[0].severity == "critical"
+    finally:
+        built.audit.close()
+
+
+def test_real_row_tamper_plus_unknown_layer_two_key_is_tampered_and_alerts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 regression guard: junk signer evidence cannot suppress the real tamper alert."""
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", False, "single"))
+    alerts: list[IntegrityAlert] = []
+    built.audit.on_finding = alerts.append
+    try:
+        with transaction(built.audit.engine) as conn:
+            conn.execute(
+                update(_audits)
+                .where(_audits.c.id == built.target_row_ids[0])
+                .values(action="HACKED")
+            )
+            conn.execute(
+                _seals.insert().values(
+                    kind="floor",
+                    from_id=None,
+                    to_id=0,
+                    row_count=None,
+                    rows_mac=None,
+                    seal_mac="f" * 64,
+                    sealed_at=now_utc(),
+                    key_id="deadbeef",
+                )
+            )
+        report = built.audit.verify(full=True)
+        assert report.outcome == "tampered"
+        assert alerts and alerts[0].severity == "critical"
+    finally:
+        built.audit.close()
+
+
+def test_unknown_row_key_as_sole_obstacle_is_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("fresh", False, "single"))
+    try:
+        with transaction(built.audit.engine) as conn:
+            conn.execute(
+                update(_audits)
+                .where(_audits.c.id == built.target_row_ids[0])
+                .values(key_id="deadbeef")
+            )
+        _assert_verify_outcome(built, "error")
+    finally:
+        built.audit.close()
+
+
+@pytest.mark.parametrize("kind", ["SEAL", "FLOOR"])
+def test_replayed_valid_anchor_event_is_tampered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("retained-1", True, "single"))
+    try:
+        path = built.anchor_path
+        assert path is not None
+        replay = next(
+            line for line in path.read_text(encoding="utf-8").splitlines() if f" {kind} " in line
+        )
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(replay + "\n")
+        assert built.audit.verify(full=True).outcome == "tampered"
+    finally:
+        built.audit.close()
+
+
+def test_retention_missing_retired_seal_key_refuses_without_pruning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", False, "split"))
+    before = _present_ids(built.audit, built.target_row_ids)
+    database_url = str(built.audit.engine.url)
+    built.audit.close()
+    pruner = AuditLog(
+        database_url=database_url,
+        create_schema=False,
+        mac_key=_ROW_KEY,
+        seal_key=_NEW_SEAL_KEY,
+        max_age=3600.0,
+        on_error=lambda _error: None,
+    )
+    try:
+        assert pruner.retention.run_once() == 0
+        assert pruner.retention.last_refused_no_seal_key is True
+        assert _present_ids(pruner, tuple(before)) == before
+    finally:
+        pruner.close()
+
+
+def test_orphan_floor_past_resolved_floor_without_anchored_seals_is_tampered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("retained-1", True, "single"))
+    try:
+        built.audit._anchor_max_age = 24 * 60 * 60
+        floor = _newest_floor(built.audit)
+        with transaction(built.audit.engine) as conn:
+            conn.execute(delete(_seals).where(_seals.c.id == floor.id))
+        path = built.anchor_path
+        assert path is not None
+        lines = [
+            line for line in path.read_text(encoding="utf-8").splitlines() if " SEAL " not in line
+        ]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        assert built.audit.verify(full=True).outcome == "tampered"
+    finally:
+        built.audit.close()
+
+
+def test_null_row_mac_is_unprotected_at_boundary_but_tampered_in_tail(tmp_path: Path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'null-mac.db'}"
+    audit = AuditLog(database_url=database_url, mac_key=_SINGLE_KEY, grace=0.0)
+    try:
+        with transaction(audit.engine) as conn:
+            conn.execute(_audits.insert().values(action="legacy", created_at=now_utc()))
+        assert audit.sealer.run_once() == 0
+        legacy = audit.verify(full=True)
+        assert legacy.outcome == "ok"
+        assert legacy.unprotected_count == 1
+
+        with transaction(audit.engine) as conn:
+            conn.execute(_audits.insert().values(action="tail", created_at=now_utc()))
+        assert audit.verify(full=True).outcome == "tampered"
+    finally:
+        audit.close()
+
+
+def test_activation_boundary_uses_grace_cutoff_and_young_row_is_later_sealed(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'activation-grace.db'}"
+    audit = AuditLog(database_url=database_url, mac_key=_SINGLE_KEY, grace=3600.0)
+    try:
+        old = now_utc() - timedelta(hours=2)
+        with patch("firm.audit.events.now_utc", lambda: old):
+            audit.record("old")
+        audit.record("young")
+        assert audit.sealer.run_once() == 0
+        activation = next(record for record in _records(audit) if record.kind == "activation")
+        assert activation.to_id == 1
+
+        later = now_utc() + timedelta(hours=2)
+        with patch("firm.audit.sealing.now_utc", lambda: later):
+            assert audit.sealer.run_once() == 1
+        assert _range_seals(audit)[-1].to_id == 2
+        assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()

@@ -297,8 +297,9 @@ class AuditLog:
         ``anchor_path`` defaults to the configured anchor (:data:`FIRM_AUDIT_ANCHOR_PATH`) so a
         deployment that writes an anchor also checks it; pass a path to override, or ``full=True``
         to recompute every sealed range. Only a full run guarantees complete range coverage.
-        Raises :class:`~firm.audit.verify.VerifyError` on an unknown ``key_id`` (after writing the
-        ``error`` outcome).
+        The evidence scan is read-only; status persistence needs a write. Raises
+        :class:`~firm.audit.verify.VerifyError` for an unknown row ``key_id`` only when no tampered
+        finding exists, after writing the ``error`` outcome and routing through ``on_error``.
         """
         return self.verifier.run(
             anchor_path=anchor_path if anchor_path is not None else self._anchor_path,

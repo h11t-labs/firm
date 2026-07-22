@@ -6,10 +6,9 @@ firm-audit's tamper-evidence layer is **opt-in** and makes those changes *detect
 prevented (anyone with `DELETE` can delete), but impossible to do without leaving a mark that
 verification will find.
 
-It is off until you configure a key. **Without `FIRM_AUDIT_KEY`, nothing on this page is in
-effect** — the schema, the write path, and every existing behaviour stay byte-for-byte what they
-were. Turning it on adds columns and a side table; it never changes how un-keyed rows are read or
-written.
+It is off until you configure a key. **Without `FIRM_AUDIT_KEY`, the runtime behavior on this page
+is inert**: writes leave the evidence columns NULL and reads behave as before. The nullable columns
+and two side tables are always part of the migrated schema, independent of key configuration.
 
 ## Threat model
 
@@ -69,8 +68,9 @@ Any instance may run the loop — the unique `from_id` constraint arbitrates rac
 election is needed.
 
 The first sealer pass also writes one signed `kind="activation"` record. Its boundary is the
-highest event id then present: rows at or below it are the legacy prefix and are never sealed;
-sealing begins strictly above it. Retention later records the pruned prefix with signed
+highest event id already outside the grace window: rows at or below it are the legacy prefix and
+are never sealed; younger rows remain above it and are sealed on a later pass. Retention later
+records the pruned prefix with signed
 `kind="floor"` advances. Activation, seals, and floors use the seal key.
 
 **Layer 3 — anchor.** Every signed record also leaves the database — appended to a local file
@@ -90,6 +90,10 @@ and activation emission happens after the database commit and is best-effort; be
 work, the sealer heals the append window by re-emitting any intact committed record missing from
 the anchor. A floor is stricter: retention must append it successfully before the prune commits.
 
+`on_anchor` is a write-only delivery callback. If it is your only sink (for example S3 or another
+database), materialize that history as the canonical line format and supply it to verification via
+`anchor_path`; the callback alone cannot be read back to detect truncation or reset.
+
 ## Rolling it out — key first, then sealing
 
 Key presence and sealing are **two separate switches, enabled in order**, because enabling a key
@@ -100,7 +104,8 @@ is never atomic across a fleet.
    is harmless — it is not yet an alarm.
 2. **Phase 2 — enable sealing**, once every writer carries the key: `background_sealing=True` (or
    run `firm-audit seal`). The first sealer pass writes an explicit signed **activation marker**
-   whose boundary is the highest pre-existing row id. From then on, a row *above* the boundary
+   whose boundary is the highest pre-existing row id outside the grace window. From then on, a row
+   *above* the boundary
    with no MAC is `TAMPERED` (a configured writer never produces one), while rows at or below it
    are the legacy `UNPROTECTED` set.
 
@@ -151,7 +156,7 @@ off: columns stay NULL and everything behaves as it did before tamper-evidence e
 
 - **The key must be a UTF-8 string of at least 32 characters.** A shorter key is a **hard error at
   startup**, not a warning — a weak key silently voids all three layers, so it fails loudly
-  instead. Empty or absent means the feature is simply off, logged as one clear line.
+  instead. Empty or absent means the feature is simply off.
 - `key_id` — the first 8 hex chars of `SHA-256(key)` — is stored on every row and seal so a
   verifier knows which key to check under. It is not the key and reveals nothing about it. Two
   *distinct* configured keys that happen to share a `key_id` (astronomically unlikely, but it would
@@ -179,21 +184,21 @@ audit = AuditLog(engine=app_engine, mac_key="a-32-char-or-longer-secret-here!!")
 
 Rotate without re-signing — re-signing would require an `UPDATE`, which the append-only contract
 forbids. New writes use the new key; the **retired** key stays on the verifier so its old objects
-still verify. Retired keys live in two **verify-only, role-scoped** archives — read only by
-`firm-audit verify`, never by a writer or sealer:
+still verify. Retired keys live in two **role-scoped** archives. Verification and retention read
+them; the sealer's anchor-heal pass reads the retired seal archive. Writers never use them to sign
+new evidence:
 
 - **`FIRM_AUDIT_RETIRED_KEYS`** — retired **row** keys. Eligible to validate row MACs only, and
   **never** a seal, in any mode.
-- **`FIRM_AUDIT_RETIRED_SEAL_KEYS`** — retired **seal** keys. Eligible to validate seals *and* rows
-  (a seal key is the higher-privilege key). A single-key deployment retires its one key here,
-  because that key signed both its rows and its seals.
+- **`FIRM_AUDIT_RETIRED_SEAL_KEYS`** — retired **seal** keys. Eligible to validate Layer-2 records
+  only. In single-key mode the same old secret also belongs in the row archive.
 
 The archives never hold the *new* key — writers pick that up from `FIRM_AUDIT_KEY` /
 `FIRM_AUDIT_SEAL_KEY` alone. Where the **old** key goes depends on what it signed:
 
 | Deployment | Key you rotate | New key → | Retire the old key into | Its old objects that still verify |
 |---|---|---|---|---|
-| Single-key | the one key | `FIRM_AUDIT_KEY` (every writer) | `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its rows **and** seals |
+| Single-key | the one key | `FIRM_AUDIT_KEY` (every writer) | **both** `FIRM_AUDIT_RETIRED_KEYS` and `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its rows **and** seals |
 | Two-key split | row key | `FIRM_AUDIT_KEY` (every instance) | `FIRM_AUDIT_RETIRED_KEYS` | its rows (seals untouched) |
 | Two-key split | seal key | `FIRM_AUDIT_SEAL_KEY` (sealer/verifier hosts) | `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its seals (rows untouched) |
 
@@ -213,8 +218,8 @@ compromises one holds it. If a rotated-out row key were still eligible to valida
 attacker could wait for the rotation, then re-sign a sealed range under the stolen key and relabel
 its `key_id` — laundering a rewrite of sealed history. `FIRM_AUDIT_RETIRED_KEYS` is therefore
 row-only in **every** mode: a retired row key validates the rows it signed and nothing more. A seal
-signed by a key that is not a *seal* key (current or retired) is unverifiable — a hard failure, never
-a laundered OK.
+signed by a key that is not a *seal* key (current or retired) is a `TAMPERED` unverifiable-signer
+finding, never a laundered OK.
 
 Both archives split each entry on the **first** `=`, so a secret may itself contain `=`. A comma is
 **always an entry delimiter** — a secret cannot contain one: `id1=A,id2=B` is two keys and is
@@ -225,8 +230,9 @@ is taken as a separate key. Either way parsing is **fail-closed** — it never s
 distinct secrets into one identity, and a genuine `key_id` collision between the parsed keys is a
 hard error. **Do not put a comma in a secret;** use a longer comma-free random value. Writer and
 verifier parse secrets with the same function — a parse divergence would masquerade as tampering.
-Verify **hard-fails on an unknown `key_id`**: a forged row cannot invent a `key_id`, because it
-still needs a valid MAC under a known key.
+Verify hard-fails on an unknown **row** `key_id` only when it is the run's sole obstacle. If another
+finding proves tampering, that verdict wins and the alert still fires. Unknown Layer-2 signers are
+always `TAMPERED` findings.
 
 > **A leaked key is not a retired key.** The archives are for keys aged out on schedule, still
 > trusted. A key that was **leaked or compromised** does **not** belong in any archive: adding it
@@ -261,9 +267,8 @@ export FIRM_AUDIT_SEAL_KEY="a-different-32-char-or-longer-seal-secret"
 The verifier needs **both** keys (rows are checked under the row key, seals under the seal key);
 configure `mac_key`/`FIRM_AUDIT_KEY` *and* `seal_key`/`FIRM_AUDIT_SEAL_KEY` on it. If verify meets a
 seal signed by a key it holds only as a *row* key — the current row key, or a retired one from
-`FIRM_AUDIT_RETIRED_KEYS` — it hard-fails and names both possible causes: *a two-key verifier
-missing its seal key (add `FIRM_AUDIT_SEAL_KEY` / `FIRM_AUDIT_RETIRED_SEAL_KEYS`), or a
-current-or-retired row key used to forge the seal (tampering)*.
+`FIRM_AUDIT_RETIRED_KEYS` — it reports a `TAMPERED` unverifiable-signer finding. Retention is more
+conservative: an unavailable current or retired seal key causes a loud no-op, never a prune.
 
 **This is opt-in and the default is unchanged.** Leave `FIRM_AUDIT_SEAL_KEY` unset (or set it equal
 to `FIRM_AUDIT_KEY`) and the seal key *is* the row key: every instance may seal, one key signs
@@ -272,10 +277,15 @@ everything, and behavior is byte-identical to single-key mode.
 **The tradeoff is honest:** the split turns "any instance may seal" into a **designated sealer
 role**. Sealing and retention's floor advance both need the seal key, so in a split deployment they
 run on a sealer-role host, not just anywhere. A host without the seal key that tries to seal is the
-usual loud no-op; a host without it that tries to prune the aligned path **refuses loudly**
+usual loud no-op after a seal-key-signed record exists; a host without it that tries to prune the
+aligned path **refuses loudly**
 (see [Retention and the signed floor](#retention-and-the-signed-floor)) rather than sign a floor
 with the wrong key. You gain a smaller blast radius; you pay with a second secret to manage and a
 role to place.
+
+The first-ever activation has no existing signer from which to infer deployment intent. In a
+two-key deployment, run both the sealer and retention only on the seal-key host from the start.
+After activation, a mixed `key_id` history is a structural backstop: the sealer refuses to write.
 
 ## Verifying
 
@@ -286,15 +296,20 @@ bounded memory), independent Layer 2 seals plus the signed activation/floor reco
 | Verdict | Meaning |
 |---|---|
 | `OK` | rows, seals, activation/floor records, and anchor all consistent |
-| `WARNING` | an unsealed tail or anchor older than its liveness threshold |
+| `WARNING` | recoverable liveness/crash evidence: old unsealed tail, stale anchor, missing/empty anchor still within its lag window, orphan floor intent already superseded or still backed by intact seals, interrupted final/strict-prefix anchor append, or a bounded scan cap |
 | `UNPROTECTED` | NULL-MAC rows at or below the activation boundary — written before the key existed |
 | `TAMPERED` | invalid/missing MAC after activation, exact-range mismatch, invalid/non-contiguous seal or marker, a row at/below the floor, or an anchor contradiction |
 
 A signed-record or anchor field an attacker can edit but not re-sign is treated as a tampering
 **finding**, never an uncaught parse exception: verify persists `TAMPERED` and returns, so malformed
-attacker-controlled content cannot freeze the dashboard's last status at `OK`. An unknown
-`key_id` remains a `VerifyError`, persisted as the `error` outcome because no verdict can be
-reached without the signing key.
+attacker-controlled content cannot freeze the dashboard's last status at `OK`. An unknown row
+`key_id` becomes `VerifyError` only when no tampered finding exists; otherwise tampering takes
+precedence and `on_finding` still fires.
+
+> **Nullable-row caveat.** A NULL `row_mac` is `UNPROTECTED` at or below the activation boundary
+> (and everywhere in a Layer-1-only deployment). An attacker who nulls a MAC there erases Layer-1
+> evidence. Sealing confines that hole to the explicit legacy prefix: above the boundary, NULL is
+> `TAMPERED`.
 
 ### Exit codes
 
@@ -307,8 +322,9 @@ reached without the signing key.
   guarantee the anchor exists to give. Seal/activation writes stay best-effort and heal on a later
   sealer pass; floor writes are a hard pre-prune gate.
 
-Verification is read-only and runs anywhere the key is available. It reads seals and rows inside a
-**snapshot transaction** (`REPEATABLE READ` on Postgres/MySQL, a WAL snapshot on SQLite) so a
+The evidence scan is read-only and runs anywhere the key is available; persisting
+`firm_audit_verify_status` requires a write grant. It opens the **snapshot transaction before
+reading the anchor** (`REPEATABLE READ` on Postgres/MySQL, a WAL snapshot on SQLite), so a
 concurrent legitimate prune committing between its reads cannot make it compare stale seals to
 already-pruned rows and report a false `TAMPERED`.
 
@@ -322,6 +338,10 @@ activation/floor validity, seal contiguity, anchor completeness, pruned-region e
 newest range if that slice did not select it. The choice is deterministic and **stateless**: there
 is no cursor, state file, or mutable rotation position.
 
+`verify_cycle` is a cost divisor, not a period: larger values recompute fewer old ranges per run.
+Because the date-derived start advances through id-range positions, the conservative worst-case
+rotation bound is `n_ranges` days, not `verify_cycle` days.
+
 This keeps the default cost bounded, but **only a periodic `--full` guarantees every sealed range
 is recomputed**. A skipped schedule can skip a date-selected slice too; do not treat partial runs as
 proof that every old row was recently checked. Run `--full` on a schedule appropriate to the risk
@@ -333,10 +353,10 @@ and data volume.
 
 ## Alerting / log stream
 
-A verify run that *detects* tampering is a signal, not just a return value. So besides persisting
+A verify run that *detects* tampering is a signal, not just a return value. So besides attempting to persist
 the outcome (for the dashboard) and returning an exit code (for a cron), every run whose outcome is
-`TAMPERED` or `WARNING` fires an **`on_finding`** hook — **once per run, after the status row is
-persisted** — with a structured `IntegrityAlert` (severity `critical` for tampered, `warning` for
+`TAMPERED` or `WARNING` fires an **`on_finding`** hook — **once per run, after status persistence
+is attempted** — with a structured `IntegrityAlert` (severity `critical` for tampered, `warning` for
 warning; the outcome, the counts, the affected identifiers, and `ran_at`). This is the *in-process
 event path*; a scheduled `firm-audit verify` (cron) plus its **exit code** is the *batch path*.
 
@@ -364,7 +384,7 @@ firm-audit: CRITICAL tamper detected — 2 findings, affected: #42 invoice.paid,
 `OK` and `UNPROTECTED` runs stay silent; the `error` outcome (verify itself could not check — e.g.
 an unknown `key_id`) is surfaced by the raised `VerifyError` and `on_error`, not `on_finding`. To
 **mute** the default line, pass a no-op (`on_finding=lambda alert: None`); to redirect it, pass your
-own sink. A sink that raises is routed to `on_error` and **never crashes the (read-only) verify**.
+own sink. A sink that raises is routed to `on_error` and never crashes verification.
 
 This fires for both `AuditLog.verify()` and the CLI `firm-audit verify` (the CLI still prints the
 per-finding messages to stdout and returns the exit code; the stderr line is the log-pipeline
@@ -388,9 +408,10 @@ wins). See [Retention & querying](retention-and-querying.md).
    every row about to be deleted.
 3. Retention signs the next floor (`through_id`, retirement time, and signing `key_id`). Every
    configured anchor sink must accept the `FLOOR` event **before** the database transaction can
-   commit; a sink failure refuses the prune. The floor row, event deletion, and deletion of fully
-   retired covering seals then commit together in one write transaction. Floor records themselves
-   are append-only and monotonic.
+   commit; the file append is flushed and `fsync`ed, and a sink failure refuses the prune. The floor row, event deletion, and deletion of fully
+   retired covering seals then commit together in one write transaction. Serialization/deadlock
+   aborts are retried a bounded number of times. Floor records themselves are append-only and
+   monotonic.
 4. Verify honors the highest authentic floor (and, when an anchor is used, only an anchored
    advance). Anchored seals entirely at/below it may legitimately be absent. Above it, seals must
    tile contiguously from `max(floor, activation boundary)`. Verify also probes the retired prefix
@@ -409,6 +430,10 @@ seal key**. Run pruning on a sealer-role host that has `FIRM_AUDIT_SEAL_KEY`. On
 nothing, sets `Retention.last_refused_no_seal_key`, routes the refusal through `on_error`, and
 `firm-audit prune` prints it. (In single-key mode the seal key *is* the row key, so this never
 triggers and pruning is unchanged.)
+
+If a seal key is configured but no activation exists while rows are already older than the
+retention cutoff, retention refuses plain pruning. This prevents an emptied side table from silently
+downgrading a keyed deployment to unguarded age deletion.
 
 ## Deployment hardening
 
@@ -432,7 +457,7 @@ GRANT USAGE, SELECT ON SEQUENCE firm_audit_events_id_seq TO firm_app;
 -- A separate role that retention (pruning) runs as:
 CREATE ROLE firm_retention LOGIN PASSWORD '...';
 GRANT SELECT, DELETE ON firm_audit_events TO firm_retention;
-GRANT INSERT, SELECT ON firm_audit_seals TO firm_retention;  -- signed floor records
+GRANT INSERT, SELECT, DELETE ON firm_audit_seals TO firm_retention;  -- floor + retired seals
 ```
 
 > A database first created on firm-audit 0.1.0 and upgraded through migration `0002` keeps its

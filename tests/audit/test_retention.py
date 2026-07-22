@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import OperationalError
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
@@ -129,14 +130,17 @@ def test_background_retention_failure_reaches_on_error(db_url, monkeypatch) -> N
         audit.close()
 
 
-def test_key_without_activation_uses_plain_pruning(db_url: str) -> None:
-    audit = AuditLog(database_url=db_url, mac_key=_SECRET, max_age=3600.0)
+def test_key_without_activation_refuses_plain_pruning(db_url: str) -> None:
+    seen: list[BaseException] = []
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, max_age=3600.0, on_error=seen.append)
     try:
         audit.record("old")
         with transaction(audit.engine) as conn:
             conn.execute(update(_audits).values(created_at=now_utc() - timedelta(hours=2)))
-        assert audit.retention.run_once() == 1
-        assert _records(audit.engine) == []
+        assert audit.retention.run_once() == 0
+        assert audit.retention.last_refused_no_activation is True
+        assert len(_rows(audit.engine)) == 1
+        assert seen and "activation marker" in str(seen[0])
     finally:
         audit.close()
 
@@ -403,5 +407,53 @@ def test_large_unsealed_skip_routes_to_on_error(db_url: str, at_time, monkeypatc
             audit.record("unsealed")
         audit.retention.run_once()
         assert any("UNSEALED" in str(error) for error in seen)
+    finally:
+        audit.close()
+
+
+def test_aligned_prune_retries_serialization_failure(db_url: str, at_time, monkeypatch) -> None:
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
+    try:
+        _activate(audit)
+        _seal_old(audit, at_time, "old")
+        original = audit.retention._run_aligned_once
+        attempts = 0
+
+        def flaky(cutoff):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError("prune", {}, RuntimeError("serialization failure"))
+            return original(cutoff)
+
+        monkeypatch.setattr(audit.retention, "_run_aligned_once", flaky)
+        assert audit.retention.run_once() == 1
+        assert attempts == 2
+    finally:
+        audit.close()
+
+
+def test_persistent_serialization_failure_is_reported_not_raised(
+    db_url: str, at_time, monkeypatch
+) -> None:
+    errors: list[BaseException] = []
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        max_age=3600.0,
+        on_error=errors.append,
+    )
+    try:
+        _activate(audit)
+        _seal_old(audit, at_time, "old")
+
+        def fail(_cutoff):
+            raise OperationalError("prune", {}, RuntimeError("deadlock detected"))
+
+        monkeypatch.setattr(audit.retention, "_run_aligned_once", fail)
+        assert audit.retention.run_once() == 0
+        assert len(_rows(audit.engine)) == 1
+        assert len(errors) == 1
     finally:
         audit.close()

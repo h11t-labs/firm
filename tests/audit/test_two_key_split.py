@@ -147,7 +147,7 @@ def test_row_key_holder_cannot_rewrite_sealed_history(db_url: str) -> None:
         audit.close()
 
 
-def test_row_key_relabeling_seal_is_verify_error(db_url: str) -> None:
+def test_row_key_relabeling_seal_is_tampered(db_url: str) -> None:
     audit = _split(db_url)
     try:
         audit.record("a")
@@ -173,8 +173,7 @@ def test_row_key_relabeling_seal_is_verify_error(db_url: str) -> None:
                     ),
                 )
             )
-        with pytest.raises(VerifyError, match="row key"):
-            audit.verify(full=True)
+        assert audit.verify(full=True).outcome == "tampered"
     finally:
         audit.close()
 
@@ -256,8 +255,7 @@ def test_retired_row_key_cannot_sign_seals(db_url: str, monkeypatch) -> None:
         seal_key=_SEAL_SECRET,
     )
     try:
-        with pytest.raises(VerifyError, match="row key"):
-            verifier.verify(full=True)
+        assert verifier.verify(full=True).outcome == "tampered"
     finally:
         verifier.close()
 

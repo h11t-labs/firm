@@ -6,9 +6,9 @@ that gap with independent seals over settled id ranges. Each seal signs only its
 the optional append-only anchor, not from a predecessor chain.
 
 The first sealer pass writes one signed ``activation`` record whose boundary is the highest event
-id then present. Rows at or below that boundary are legacy and are never sealed. Later passes seal
-only rows above the boundary after the grace window. Racing sealers choose the same ``from_id``;
-the unique index on that coordinate is the portable arbiter.
+id already outside the grace window. Younger rows stay above the boundary and are sealed later.
+Racing sealers choose the same ``from_id``; the unique index on that coordinate is the portable
+arbiter.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Connection, func, select
+from sqlalchemy import Connection, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .._core.clock import now_utc
@@ -62,6 +62,8 @@ class Sealer:
         """
         key = self.audit._seal_key
         if key is None:
+            return 0
+        if not self._signer_matches_existing_records(key):
             return 0
 
         if self.audit._anchor_path is not None:
@@ -107,6 +109,12 @@ class Sealer:
             self.audit.on_error(exc)
             return
 
+        if records.capped:
+            self.audit.on_error(
+                RuntimeError("audit sealer refused anchor healing: seal-record scan hit its cap")
+            )
+            return
+
         for record in records:
             if not seal_is_intact(record, seal_keyring):
                 continue
@@ -123,6 +131,28 @@ class Sealer:
                 at=record.sealed_at,
             )
 
+    def _signer_matches_existing_records(self, key: Key) -> bool:
+        """Refuse a mixed-signer Layer-2 history before writing anything."""
+        try:
+            with self.audit.engine.connect() as conn:
+                mismatch = conn.execute(
+                    select(_seals.c.key_id)
+                    .where(or_(_seals.c.key_id != key.id, _seals.c.key_id.is_(None)))
+                    .limit(1)
+                ).first()
+        except Exception as exc:
+            self.audit.on_error(exc)
+            return False
+        if mismatch is None:
+            return True
+        self.audit.on_error(
+            RuntimeError(
+                "audit sealer REFUSED to write mixed-signer Layer-2 history: existing "
+                f"key_id={mismatch.key_id!r}, configured signer key_id={key.id!r}"
+            )
+        )
+        return False
+
     def _ensure_activation(self, key: Key) -> tuple[int, str, datetime] | None:
         """Insert activation and return its anchor payload, or ``None`` if already present."""
         engine = self.audit.engine
@@ -132,8 +162,14 @@ class Sealer:
             ).first()
             if exists is not None:
                 return None
-            boundary = conn.execute(select(func.max(_audits.c.id))).scalar_one() or 0
             at = now_utc()
+            cutoff = at - timedelta(seconds=self.audit.grace)
+            boundary = (
+                conn.execute(
+                    select(func.max(_audits.c.id)).where(_audits.c.created_at <= cutoff)
+                ).scalar_one()
+                or 0
+            )
             mac = integrity.activation_mac(key, boundary_id=boundary, at=at, key_id=key.id)
             conn.execute(
                 _seals.insert().values(
@@ -246,6 +282,8 @@ class Sealer:
                         if handle.read(1) not in {b"\n", b"\r"}:
                             separator = b"\n"
                     handle.write(separator + encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
             except Exception as exc:
                 accepted = False
                 self.audit.on_error(exc)

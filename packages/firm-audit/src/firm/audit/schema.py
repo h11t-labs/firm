@@ -12,11 +12,10 @@ The Table object is a supported *read* surface (the dashboard's queries build on
 a column is a breaking change. Writes must go through :func:`~firm.audit.record` /
 :class:`~firm.audit.AuditLog` — nothing else may insert, and only retention may delete.
 
-**Tamper-evidence columns and tables are opt-in and inert without a key** (design review 4A).
-When no ``FIRM_AUDIT_KEY`` is configured, :mod:`.events` never populates ``entry_id``/``row_mac``/
-``key_id`` and they stay NULL — behavior and schema semantics are exactly as they were before
-these columns existed. The two side tables (``firm_audit_seals``, ``firm_audit_verify_status``)
-are created regardless but stay empty until the sealer and verifier (opt-in) write to them:
+**Tamper-evidence runtime behavior is opt-in and inert without a key** (design review 4A).
+The columns and side tables always exist in the migrated schema. When no ``FIRM_AUDIT_KEY`` is
+configured, :mod:`.events` leaves ``entry_id``/``row_mac``/``key_id`` NULL and the side tables stay
+empty until the opt-in sealer or verifier writes to them:
 
 * ``firm_audit_events.entry_id`` — client-generated ULID, unique index; identity + anti-replay.
 * ``firm_audit_events.row_mac`` — hex ``HMAC-SHA256`` over the canonical row (:mod:`.integrity`).
@@ -69,7 +68,7 @@ audit_events = Table(
     Column("context", Text),
     Column("created_at", _DT, nullable=False, default=now_utc),
     # Tamper-evidence (Layer 1). Nullable: a key-less deployment leaves all three NULL and is
-    # byte-identical to the pre-tamper-evidence schema. See :mod:`.integrity` / :mod:`.events`.
+    # behaviorally identical to an unkeyed write. See :mod:`.integrity` / :mod:`.events`.
     Column("entry_id", String(26)),
     Column("row_mac", String(64)),
     Column("key_id", String(16)),
