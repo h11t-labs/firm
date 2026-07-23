@@ -173,12 +173,21 @@ class HmacSigner:
         return _hmac_hex(self.key, message)
 
     def verify(self, message: bytes, tag: str) -> bool:
-        return hmac.compare_digest(self.sign(message), tag)
+        return self.tags_match(self.sign(message), tag)
 
     @staticmethod
     def tags_match(expected: str, actual: str) -> bool:
-        """Constant-time comparison for the streaming rows-MAC recipe."""
-        return hmac.compare_digest(expected, actual)
+        """Constant-time comparison, robust to an attacker-written non-ASCII tag.
+
+        ``hmac.compare_digest`` raises ``TypeError`` when a ``str`` argument holds a non-ASCII
+        codepoint. A stored MAC is attacker-controlled (a plain DB/anchor write), so treat that as a
+        non-match rather than let the exception escape ``seal_is_intact`` / ``Retention.run_once``
+        and break the never-raise-on-tampered-storage contract — a non-ASCII value can never equal a
+        hex digest anyway."""
+        try:
+            return hmac.compare_digest(expected, actual)
+        except TypeError:
+            return False
 
 
 def _make_key(secret: bytes) -> Key:

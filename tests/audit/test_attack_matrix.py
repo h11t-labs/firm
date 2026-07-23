@@ -1064,6 +1064,31 @@ def test_malformed_anchor_line_is_skipped_not_raised(tmp_path: Path) -> None:
         audit.close()
 
 
+def test_non_ascii_db_seal_mac_does_not_raise_out_of_retention(tmp_path: Path) -> None:
+    """A non-ASCII seal_mac written straight into the database must make verify report tampered and
+    retention refuse — never raise TypeError out of run_once (the never-raise-on-storage contract,
+    which compare_digest would otherwise break on a non-ASCII tag)."""
+    database_url = f"sqlite:///{tmp_path / 'nonascii-mac.db'}"
+    audit = AuditLog(
+        database_url=database_url,
+        mac_key=_SINGLE_KEY,
+        grace=0.0,
+        max_age=0.0,
+        on_error=lambda _e: None,
+    )
+    try:
+        audit.record("a")
+        assert audit.sealer.run_once() == 1
+        with transaction(audit.engine) as conn:
+            conn.execute(
+                update(_seals).where(_seals.c.kind == "seal").values(seal_mac="café" + "x" * 60)
+            )
+        assert audit.verify(full=True).outcome == "tampered"
+        audit.retention.run_once()  # refuses; must not raise
+    finally:
+        audit.close()
+
+
 def test_transient_verify_error_preserves_sealing_observed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

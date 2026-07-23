@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import threading
-import time
 from datetime import timedelta
 from unittest.mock import patch
 
-import pytest
 from sqlalchemy import func, select
 
 from firm._core.clock import now_utc
@@ -29,30 +27,19 @@ def _max_sealed_id(audit: AuditLog) -> int | None:
 
 def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
     anchor = tmp_path / "anchor.log"
-    with pytest.warns(UserWarning):
-        audit = AuditLog(
-            database_url=db_url,
-            mac_key=_SECRET,
-            grace=0.0,
-            background_sealing=True,
-            seal_interval=0.02,
-            anchor_path=str(anchor),
-            anchor_max_age=3600.0,
-            max_age=60.0,
-        )
+    # Sealing is driven explicitly (not a background loop) so it never runs *concurrently* with the
+    # writers: with grace=0 a row can commit below an already-sealed frontier (MVCC assigns ids
+    # before commit), and the no-late-commit design correctly flags that non-contiguous seal as
+    # tampered. The background-loop warning path is covered in test_sealing.py.
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+        max_age=60.0,
+    )
     try:
-        for _ in range(100):
-            with transaction(audit.engine) as conn:
-                active = conn.execute(
-                    select(func.count())
-                    .select_from(schema.seals)
-                    .where(schema.seals.c.kind == "activation")
-                ).scalar_one()
-            if active:
-                break
-            time.sleep(0.02)
-        assert active == 1
-
         n_threads = 6
         per_thread = 15
         total = n_threads * per_thread
@@ -65,9 +52,9 @@ def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
             except Exception as exc:
                 errors.append(exc)
 
-        # Sign all lifecycle rows at a past instant so they are genuinely old (and expired against
-        # max_age) without any MAC-invalidating created_at edit — retention re-verifies before it
-        # prunes, so a mutated row would be refused, not laundered.
+        # Concurrent writers, then seal the whole committed, contiguous backlog at the same past
+        # instant so the seals are old enough for retention (which gates on seal age) without any
+        # MAC-invalidating created_at edit.
         threads = [threading.Thread(target=writer, args=(tid,)) for tid in range(n_threads)]
         old = now_utc() - timedelta(seconds=120)
         with at_time(old), patch("firm.audit.sealing.now_utc", lambda: old):
@@ -75,25 +62,27 @@ def test_tamper_evidence_lifecycle(db_url: str, tmp_path, at_time) -> None:
                 thread.start()
             for thread in threads:
                 thread.join()
-
+            while audit.sealer.run_once():  # drain activation + all range seals at `old`
+                pass
             written_max = _max_audit_id(audit)
-            for _ in range(100):
-                if _max_sealed_id(audit) == written_max:
-                    break
-                time.sleep(0.02)
 
         assert errors == []
         assert len(audit.history(limit=total)) == total
-
-        assert _max_sealed_id(audit) == written_max
         assert written_max is not None
+        assert _max_sealed_id(audit) == written_max
+        with transaction(audit.engine) as conn:
+            active = conn.execute(
+                select(func.count())
+                .select_from(schema.seals)
+                .where(schema.seals.c.kind == "activation")
+            ).scalar_one()
+        assert active == 1
 
-        audit.record("e2e.retention.keep", actor=("Worker", "retention"))  # fresh — must survive
+        # A fresh row, sealed at the real clock, is not expired and must survive retention.
+        audit.record("e2e.retention.keep", actor=("Worker", "retention"))
         final_max = _max_audit_id(audit)
-        for _ in range(100):
-            if _max_sealed_id(audit) == final_max:
-                break
-            time.sleep(0.02)
+        while audit.sealer.run_once():
+            pass
         assert _max_sealed_id(audit) == final_max
 
         pruned = audit.retention.run_once()
