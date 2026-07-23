@@ -59,8 +59,12 @@ def test_insert_ignore_renders_native_conflict_handling() -> None:
     cases = [
         # Postgres also RETURNINGs the PK: inserted_count() relies on it because psycopg
         # reports rowcount -1 for compiled single-row INSERTs.
+        # Postgres also RETURNINGs the PK: inserted_count() relies on it because psycopg
+        # reports rowcount -1 for compiled single-row INSERTs.
         (PostgresDialect(), postgresql.dialect(), "ON CONFLICT (class_name) DO NOTHING"),
         (PostgresDialect(), postgresql.dialect(), "RETURNING firm_queue_jobs.id"),
+        # MySQL uses INSERT IGNORE — the only form that meets the 1/0 rowcount contract under
+        # the CLIENT.FOUND_ROWS flag SQLAlchemy always sets (see Dialect.insert_ignore).
         (MysqlDialect(), mysql.dialect(), "INSERT IGNORE"),
         (SqliteDialect(), sqlite.dialect(), "ON CONFLICT (class_name) DO NOTHING"),
     ]
