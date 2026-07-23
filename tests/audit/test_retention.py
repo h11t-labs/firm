@@ -344,9 +344,7 @@ def test_restore_below_committed_floor_still_tampered(db_url: str, tmp_path, at_
 
         with transaction(audit.engine) as conn:
             conn.execute(delete(_seals).where(_seals.c.kind == "floor"))
-            conn.execute(
-                _audits.insert().values(id=1, action="forged", created_at=now_utc())
-            )
+            conn.execute(_audits.insert().values(id=1, action="forged", created_at=now_utc()))
 
         assert audit.verify(full=True).outcome == "tampered"
         assert audit.retention.run_once() == 0
