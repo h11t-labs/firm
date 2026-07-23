@@ -73,9 +73,10 @@ class Dialect(ABC):
         the raw ``rowcount`` is *not* reliable for these statements on Postgres.
 
         Backend divergence: PostgreSQL/SQLite scope the no-op to the named unique index
-        (``ON CONFLICT ... DO NOTHING``), so only a duplicate-key conflict is swallowed. MySQL
-        uses ``INSERT ... IGNORE`` — the only form that meets the 1/0 rowcount contract there
-        (a no-op ``ON DUPLICATE KEY UPDATE`` reports 1 on conflict under the ``CLIENT.FOUND_ROWS``
-        flag SQLAlchemy always sets) — which also downgrades unrelated errors (NOT NULL, FK,
-        truncation) to warnings. Callers must therefore pass rows that can only fail on the
-        conflict."""
+        (``ON CONFLICT ... DO NOTHING``), so only a duplicate-key conflict is swallowed and any
+        other constraint violation still raises. MySQL uses ``INSERT ... IGNORE`` — the only
+        form that meets the 1/0 rowcount contract there (a no-op ``ON DUPLICATE KEY UPDATE``
+        reports 1 on conflict under the ``CLIENT.FOUND_ROWS`` flag SQLAlchemy always sets) —
+        which also downgrades unrelated errors (NOT NULL, FK, truncation) to warnings. So on
+        MySQL a row that violates such a constraint is silently skipped and
+        :func:`inserted_count` reads 0, indistinguishable from a benign key conflict."""

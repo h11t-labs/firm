@@ -51,7 +51,12 @@ class MysqlDialect(Dialect):
         # IODKU variant that yields 0-on-conflict under FOUND_ROWS.
         #
         # Known downside / divergence: unlike PG/SQLite's index-scoped DO NOTHING, IGNORE also
-        # downgrades unrelated errors (NOT NULL, FK, truncation) to warnings. firm's only caller
-        # is schema_setup's auto-create race, where the row is fully-formed and the sole possible
-        # failure is the duplicate-key conflict, so the broader swallow is harmless there.
+        # downgrades unrelated errors (NOT NULL, FK, truncation) to warnings. Two callers use
+        # this: schema_setup's schema auto-create race (fully-formed row, so the only possible
+        # failure is the duplicate-key conflict), and firm-cache's entry first-write
+        # (entries.py `ensure_entry` / `set(unless_exist=True)`). The cache path carries a real
+        # residual risk on MySQL: a row violating an unrelated constraint (e.g. an oversized
+        # value) is silently skipped, and inserted_count() reads 0 — indistinguishable from a
+        # benign key conflict. This is a documented divergence from PG/SQLite, where only the
+        # key conflict is swallowed and the constraint violation still raises.
         return mysql_insert(table).values(**values).prefix_with("IGNORE")
