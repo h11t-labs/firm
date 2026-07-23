@@ -12,6 +12,7 @@ import firm.queue as bq
 from firm._core.config import Runtime
 from firm.queue import schema
 from firm.queue.scheduler import RecurringTask, Scheduler
+from firm.queue.worker import run_ready
 
 _SINK: list[int] = []
 
@@ -19,6 +20,11 @@ _SINK: list[int] = []
 @bq.job()
 def recurring_job() -> None:
     _SINK.append(1)
+
+
+@bq.job(concurrency={"to": 1, "duration": 300})
+def limited_recurring_job() -> None:
+    _SINK.append(3)
 
 
 def _task() -> RecurringTask:
@@ -114,6 +120,57 @@ def test_recurring_task_custom_queue_and_priority(
     assert job_row.priority == 8
     assert ready_row.queue_name == "reports"
     assert ready_row.priority == 8
+
+
+def test_recurring_task_honors_concurrency(runtime: Runtime, count: Callable[..., int]) -> None:
+    # A recurring job with a concurrency limit must not run unbounded: while the first fire
+    # holds the only slot, the next period's fire lands in blocked_executions (not ready), and
+    # is promoted once the slot frees. Matches solid_queue, where recurring tasks honor
+    # concurrency controls.
+    _SINK.clear()
+    task = RecurringTask(key="limited", schedule="*/5 * * * *", job=limited_recurring_job)
+    scheduler = Scheduler(runtime, [task])
+    scheduler.sync_tasks()
+
+    assert scheduler.tick(at=datetime(2026, 6, 28, 12, 3, 0)) == 1  # acquires the slot -> ready
+    assert count(schema.ready_executions) == 1
+    assert count(schema.blocked_executions) == 0
+    with runtime.engine.connect() as conn:
+        assert conn.execute(select(schema.jobs.c.concurrency_key)).scalar() is not None
+
+    # Next period fires while the first still holds the slot -> blocked, not ready.
+    assert scheduler.tick(at=datetime(2026, 6, 28, 12, 8, 0)) == 1
+    assert count(schema.ready_executions) == 1
+    assert count(schema.blocked_executions) == 1
+
+    # Draining the holder releases the slot and promotes the blocked fire.
+    assert run_ready(runtime) == 1
+    assert count(schema.blocked_executions) == 0
+    assert count(schema.ready_executions) == 1
+    assert run_ready(runtime) == 1
+    assert _SINK == [3, 3]
+
+
+def test_sync_updates_changed_task(runtime: Runtime, count: Callable[..., int]) -> None:
+    # sync_tasks upserts: a changed schedule for an existing key updates the stored row (a
+    # documented read surface for the dashboard/CLI), rather than leaving it stale.
+    Scheduler(runtime, [_task()]).sync_tasks()
+    with runtime.engine.connect() as conn:
+        before = conn.execute(
+            select(schema.recurring_tasks.c.schedule, schema.recurring_tasks.c.class_name)
+        ).one()
+    assert before.schedule == "*/5 * * * *"
+
+    changed = RecurringTask(key="cleanup", schedule="0 9 * * *", job=recurring_job)
+    Scheduler(runtime, [changed]).sync_tasks()
+
+    assert count(schema.recurring_tasks) == 1  # updated in place, not duplicated
+    with runtime.engine.connect() as conn:
+        after = conn.execute(
+            select(schema.recurring_tasks.c.schedule, schema.recurring_tasks.c.class_name)
+        ).one()
+    assert after.schedule == "0 9 * * *"  # mutable column written
+    assert after.class_name == before.class_name  # unchanged column untouched
 
 
 def test_sync_persists_and_deletes_configured_tasks(

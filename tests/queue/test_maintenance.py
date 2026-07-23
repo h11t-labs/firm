@@ -70,6 +70,110 @@ def test_retry_all_failed(runtime: Runtime, count: Callable[..., int]) -> None:
     assert count(schema.ready_executions) == 2
 
 
+def test_retry_all_failed_batches(runtime: Runtime, count: Callable[..., int]) -> None:
+    # retry_all_failed processes in chunks: with batch_size=2 over 3 failed jobs it takes two
+    # passes, and every job is re-enqueued to ready with its failed row cleared.
+    for _ in range(3):
+        boom_job.enqueue()
+    run_ready(runtime)
+    assert count(schema.failed_executions) == 3
+
+    assert maintenance.retry_all_failed(runtime, batch_size=2) == 3
+    assert count(schema.failed_executions) == 0
+    assert count(schema.ready_executions) == 3
+
+
+def test_retry_all_failed_resets_attempts(runtime: Runtime, engine: Engine) -> None:
+    # The batched path mirrors retry_failed's per-job state reset (attempts -> 0, finished_at
+    # cleared) so a retried job gets a fresh run.
+    boom_job.enqueue()
+    run_ready(runtime)
+    assert maintenance.retry_all_failed(runtime) == 1
+    with engine.connect() as conn:
+        row = conn.execute(select(schema.jobs.c.attempts, schema.jobs.c.finished_at)).one()
+    assert row.attempts == 0
+    assert row.finished_at is None
+
+
+def test_discard_forfeits_slot_promoted_concurrently(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """A discard must not leak a concurrency slot when a dispatcher promotes the same scheduled
+    job concurrently. discard_job now locks the jobs row up front, so it serializes against the
+    promotion (FOR UPDATE on Postgres/MySQL; BEGIN IMMEDIATE on SQLite) and forfeits the slot the
+    promotion acquired. On SQLite the race can't actually occur — BEGIN IMMEDIATE already
+    serializes writers — so here the locking path is exercised functionally; on Postgres/MySQL
+    (when configured via the backend fixture) the same test genuinely covers the row lock."""
+    import threading
+    import time as _time
+    from datetime import timedelta as _td
+
+    from sqlalchemy import insert as sa_insert
+    from sqlalchemy import select as sa_select
+
+    key = "promote-race"
+    with engine.begin() as conn:
+        job_a = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="J", priority=0, concurrency_key=key
+            )
+        ).inserted_primary_key[0]
+        job_b = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="J", priority=0, concurrency_key=key
+            )
+        ).inserted_primary_key[0]
+        # A holds the only slot (value 0); B waits blocked behind it.
+        conn.execute(
+            sa_insert(schema.semaphores).values(
+                key=key, value=0, expires_at=now_utc() + _td(seconds=60)
+            )
+        )
+        conn.execute(
+            sa_insert(schema.blocked_executions).values(
+                job_id=job_b,
+                queue_name="default",
+                priority=0,
+                concurrency_key=key,
+                expires_at=now_utc() + _td(seconds=60),
+            )
+        )
+
+    outcome: dict[str, bool] = {}
+    done = threading.Event()
+
+    def _discarder() -> None:
+        outcome["discarded"] = maintenance.discard_job(runtime, job_a)
+        done.set()
+
+    discarder = threading.Thread(target=_discarder)
+    # A dispatcher mid-promotion of A: hold A's jobs row FOR UPDATE (as dispatch_once does via
+    # its scheduled⋈jobs join) and insert its ready row — uncommitted.
+    with runtime.dialect.begin_claim_tx(engine) as conn:
+        conn.execute(
+            runtime.dialect.with_row_lock(
+                sa_select(schema.jobs.c.id).where(schema.jobs.c.id == job_a)
+            )
+        )
+        conn.execute(
+            sa_insert(schema.ready_executions).values(
+                job_id=job_a, queue_name="default", priority=0
+            )
+        )
+        discarder.start()
+        _time.sleep(0.3)
+        assert not done.is_set(), "discard slipped past a concurrent promotion"
+    discarder.join(10)
+
+    assert outcome["discarded"] is True
+    assert count(schema.blocked_executions) == 0  # B was promoted
+    assert count(schema.ready_executions) == 1  # A's ready cascaded away; B is now ready
+    # The slot moved to B rather than leaking: capacity stays exhausted.
+    with engine.connect() as conn:
+        value = conn.execute(sa_select(schema.semaphores.c.value)).scalar()
+    assert value == 0
+
+
 def test_discard_job_deletes_job_and_executions(
     runtime: Runtime, count: Callable[..., int]
 ) -> None:
