@@ -5,9 +5,13 @@ Two modes:
 * :class:`ThreadSupervisor` runs every component as a thread in one process. Simple, portable,
   great for development, tests, and embedding.
 * :class:`ForkSupervisor` forks a child process per component (the production default). The
-  supervisor reaps and restarts dead children, prunes processes with stale heartbeats and
-  recovers their in-flight jobs, and shuts down on signals: TERM/INT drain gracefully within
-  ``shutdown_timeout``; QUIT exits immediately.
+  supervisor reaps and restarts dead children, and shuts down on signals: TERM/INT drain
+  gracefully within ``shutdown_timeout``; QUIT exits immediately.
+
+Both supervisors prune processes with stale heartbeats and recover their in-flight jobs — at
+startup and periodically (fork mode inline in its supervise loop, thread mode via a
+:class:`~firm.queue.recovery.ReaperLoop`) — so a hard-killed process's claims are re-readied
+in every deployment shape.
 
 Forking happens **before** any threads are started, and each child calls ``runtime.reset()``
 first so it never reuses a SQLite handle inherited from the parent.
@@ -29,7 +33,7 @@ from .._core.poller import InterruptiblePoller
 from .._core.process import HeartbeatPoller, ProcessInfo
 from .dispatcher import DispatcherLoop, MaintenanceLoop
 from .hooks import HOOKS
-from .recovery import recover_orphaned_claims
+from .recovery import ReaperLoop, reap_dead_processes, recover_orphaned_claims
 from .scheduler import RecurringTask, Scheduler, SchedulerLoop
 from .worker import Worker
 
@@ -134,6 +138,9 @@ class ThreadSupervisor:
         self.process_id: int | None = None
 
     def start(self) -> None:
+        # Reap before the absent-row sweep: a hard-killed predecessor leaves a stale-heartbeat
+        # row that shields its claims from recover_orphaned_claims' absent-row filter.
+        reap_dead_processes(self.runtime, self.config.alive_threshold)
         recover_orphaned_claims(self.runtime)
         self.process_id = process_registry.register(
             self.runtime.engine,
@@ -161,6 +168,16 @@ class ThreadSupervisor:
         )
         heartbeat.start()
         self._loops.append(heartbeat)
+        # Fork mode reaps in _supervise; thread mode needs its own reaper or a hard-killed
+        # peer's (or predecessor's) claims are never recovered while we run.
+        reaper = ReaperLoop(
+            self.runtime,
+            self.config.heartbeat_interval,
+            self.config.alive_threshold,
+            on_error=HOOKS.fire_error,
+        )
+        reaper.start()
+        self._loops.append(reaper)
 
     def stop(self) -> None:
         for loop in reversed(self._loops):
@@ -251,6 +268,7 @@ class ForkSupervisor:
 
     def start(self) -> None:
         """Fork children and supervise until a shutdown signal; blocks the caller."""
+        reap_dead_processes(self.runtime, self.config.alive_threshold)
         recover_orphaned_claims(self.runtime)
         self.process_id = process_registry.register(
             self.runtime.engine,
@@ -295,9 +313,7 @@ class ForkSupervisor:
             self._reap_and_restart()
             now = time.monotonic()
             if now - last_prune >= self.config.heartbeat_interval:
-                dead = process_registry.prune_dead(self.runtime.engine, self.config.alive_threshold)
-                if dead:
-                    recover_orphaned_claims(self.runtime, dead)
+                reap_dead_processes(self.runtime, self.config.alive_threshold)
                 last_prune = now
             self._stop.wait(0.2)
 

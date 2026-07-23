@@ -13,7 +13,7 @@ from firm._core import process as pr
 from firm._core.clock import now_utc
 from firm._core.config import Runtime
 from firm.queue import schema
-from firm.queue.recovery import recover_orphaned_claims
+from firm.queue.recovery import ReaperLoop, reap_dead_processes, recover_orphaned_claims
 
 
 def test_register_heartbeat_deregister(engine: Engine, count: Callable[..., int]) -> None:
@@ -125,4 +125,71 @@ def test_recover_specific_process_ids(
         ).inserted_primary_key[0]
         conn.execute(insert(schema.claimed_executions).values(job_id=job_id, process_id=pid))
     assert recover_orphaned_claims(runtime, [pid]) == 1
+    assert count(schema.ready_executions) == 1
+
+
+def _claim_under_stale_process(engine: Engine) -> int:
+    """Simulate a hard-killed worker: a claim whose process row survives with a stale heartbeat."""
+    pid = pr.register(engine, pr.ProcessInfo(kind="Worker", name="crashed", pid=1))
+    with engine.begin() as conn:
+        job_id = conn.execute(
+            insert(schema.jobs).values(queue_name="default", class_name="J")
+        ).inserted_primary_key[0]
+        conn.execute(insert(schema.claimed_executions).values(job_id=job_id, process_id=pid))
+        conn.execute(
+            update(schema.processes)
+            .where(schema.processes.c.id == pid)
+            .values(last_heartbeat_at=now_utc() - timedelta(seconds=600))
+        )
+    return pid
+
+
+def test_reap_dead_processes_recovers_stale_heartbeat_claims(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """Q-R1: a SIGKILLed process leaves a stale-heartbeat row that shields its claims from the
+    absent-row sweep; reap_dead_processes prunes the row and re-readies the claims."""
+    _claim_under_stale_process(engine)
+
+    # The absent-row sweep alone cannot see it: the stale row still exists.
+    assert recover_orphaned_claims(runtime) == 0
+    assert count(schema.ready_executions) == 0
+
+    assert reap_dead_processes(runtime, alive_threshold_s=300) == 1
+    assert count(schema.processes) == 0
+    assert count(schema.claimed_executions) == 0
+    assert count(schema.ready_executions) == 1
+
+
+def test_reap_dead_processes_spares_fresh_heartbeats(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    pid = pr.register(engine, pr.ProcessInfo(kind="Worker", name="alive", pid=1))
+    with engine.begin() as conn:
+        job_id = conn.execute(
+            insert(schema.jobs).values(queue_name="default", class_name="J")
+        ).inserted_primary_key[0]
+        conn.execute(insert(schema.claimed_executions).values(job_id=job_id, process_id=pid))
+
+    assert reap_dead_processes(runtime, alive_threshold_s=300) == 0
+    assert count(schema.processes) == 1
+    assert count(schema.claimed_executions) == 1
+
+
+def test_reaper_loop_recovers_while_running(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """The poller form used by thread mode and `firm-queue work` reaps periodically."""
+    _claim_under_stale_process(engine)
+
+    loop = ReaperLoop(runtime, interval=0.01, alive_threshold_s=300)
+    loop.start()
+    try:
+        deadline = now_utc() + timedelta(seconds=5)
+        while count(schema.ready_executions) == 0 and now_utc() < deadline:
+            threading.Event().wait(0.02)
+    finally:
+        loop.stop()
+
+    assert count(schema.claimed_executions) == 0
     assert count(schema.ready_executions) == 1
