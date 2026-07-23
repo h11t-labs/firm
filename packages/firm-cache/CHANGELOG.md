@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Fixed
+
+- `increment` (and `decrement`, which delegates to it) now triggers auto-expiry after committing,
+  matching every other write path. An increment-only workload (rate limiters, counters) previously
+  grew the table unbounded because no eviction pass was ever scheduled.
+
+### Added
+
+- `firm-cache trim` accepts `--max-age`, `--max-size`, `--max-entries`, and `--batch-size` so a
+  one-shot eviction can target specific limits instead of only the process defaults.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

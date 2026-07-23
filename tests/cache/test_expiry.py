@@ -306,6 +306,34 @@ def test_maybe_trigger_skips_when_random_above_threshold(db_url: str, monkeypatc
         cache.close()
 
 
+def test_increment_triggers_expiry(db_url: str, monkeypatch) -> None:
+    """An increment-only workload (rate limiters, counters) must trigger eviction like every
+    other write path — otherwise the table grows unbounded. ``increment`` (and ``decrement``,
+    which delegates to it) calls ``maybe_trigger`` after committing, exactly as ``set`` does."""
+    cache = Cache(database_url=db_url, max_size=None, max_age=None, auto_expire=True)
+    try:
+        calls: list[int] = []
+        monkeypatch.setattr(cache.expiry, "maybe_trigger", lambda n: calls.append(n))
+        cache.increment("n")
+        cache.decrement("n")
+        assert calls == [1, 1]
+    finally:
+        cache.close()
+
+
+def test_increment_skips_expiry_when_auto_expire_off(db_url: str, monkeypatch) -> None:
+    """With ``auto_expire=False`` (e.g. the one-shot CLI or a caller driving eviction manually)
+    increment must not trigger a background pass."""
+    cache = Cache(database_url=db_url, max_size=None, max_age=None, auto_expire=False)
+    try:
+        calls: list[int] = []
+        monkeypatch.setattr(cache.expiry, "maybe_trigger", lambda n: calls.append(n))
+        cache.increment("n")
+        assert calls == []
+    finally:
+        cache.close()
+
+
 def test_maybe_trigger_scales_with_write_count(db_url: str, monkeypatch) -> None:
     """Upstream: expiry_test.rb "triggers multiple expiry tasks when there are many writes". A bulk
     write count triggers proportionally (writes * 2 / batch_size base runs)."""

@@ -33,3 +33,25 @@ def test_channel_hash_can_be_negative() -> None:
 def test_normalize_channel_encodes_str() -> None:
     assert normalize_channel("x") == b"x"
     assert normalize_channel(b"x") == b"x"
+
+
+def test_normalize_channel_leaves_short_names_untouched() -> None:
+    assert normalize_channel("room:42") == b"room:42"
+    assert normalize_channel(b"x" * 1024) == b"x" * 1024  # exactly at the limit
+
+
+def test_long_channel_is_truncated_to_fit_column() -> None:
+    # Over the 1024-byte column bound, the name is truncated with a hash suffix so it fits the
+    # MySQL VARBINARY(1024) column instead of erroring or silently truncating.
+    normalized = normalize_channel("c" * 5000)
+    assert len(normalized) <= 1024
+    assert b":hash:" in normalized
+
+
+def test_distinct_long_channels_stay_distinct() -> None:
+    # Two long names sharing a prefix must not collapse onto one channel: the hash suffix is over
+    # the full original bytes, so both the normalized bytes and the derived channel_hash differ.
+    a = normalize_channel("c" * 5000 + "-a")
+    b = normalize_channel("c" * 5000 + "-b")
+    assert a != b
+    assert channel_hash(a) != channel_hash(b)

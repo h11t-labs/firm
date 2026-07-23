@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Fixed
+
+- Channel names longer than the 1024-byte `channel` column are now truncated with a hash suffix
+  (mirroring the cache's key normalization) so they stay unique and fit. Previously an over-long
+  name raised a MySQL "Data too long" error or was silently truncated, while SQLite/Postgres
+  accepted it — an inconsistency across backends.
+
+### Added
+
+- `firm-channel stats` now also reports an estimated total payload size (`SUM(length(payload))`),
+  matching `firm-cache stats`'s count-plus-size output.
+
+### Changed
+
+- `firm-channel trim` builds its one-shot `Channel` with `auto_trim=False`, so the command no
+  longer spins up a background trimmer thread pool it never uses (matching `firm-cache`'s one-shot
+  commands, which pass `auto_expire=False`).
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the
