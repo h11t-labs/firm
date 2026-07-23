@@ -1079,12 +1079,17 @@ def test_non_ascii_db_seal_mac_does_not_raise_out_of_retention(tmp_path: Path) -
     try:
         audit.record("a")
         assert audit.sealer.run_once() == 1
+        target = (_range_seals(audit)[0].to_id,)
         with transaction(audit.engine) as conn:
             conn.execute(
                 update(_seals).where(_seals.c.kind == "seal").values(seal_mac="café" + "x" * 60)
             )
         assert audit.verify(full=True).outcome == "tampered"
-        audit.retention.run_once()  # refuses; must not raise
+        # Retention must REFUSE (not raise, and not launder): prune nothing, flag the refusal, and
+        # leave the tampered evidence in place even though max_age=0 makes the range expired.
+        assert audit.retention.run_once() == 0
+        assert audit.retention.last_refused_tampered == 1
+        assert _present_ids(audit, target) == set(target)
     finally:
         audit.close()
 

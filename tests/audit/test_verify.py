@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import DBAPIError
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
@@ -708,17 +709,21 @@ def test_status_row_records_affected_identifiers_on_tampering(db_url: str) -> No
 
 
 def test_malformed_seal_field_is_tampered_not_crash(db_url: str, is_sqlite: bool) -> None:
-    if not is_sqlite:
-        pytest.skip("strict dialects reject a non-date sealed_at at the DB before verify sees it")
     audit = _make(db_url)
     try:
         audit.record("a")
         audit.sealer.run_once()
         audit.verify(full=True)
-        with transaction(audit.engine) as conn:
-            conn.exec_driver_sql(
-                "UPDATE firm_audit_seals SET sealed_at='not-a-date' WHERE kind='seal'"
-            )
+        try:
+            with transaction(audit.engine) as conn:
+                conn.exec_driver_sql(
+                    "UPDATE firm_audit_seals SET sealed_at='not-a-date' WHERE kind='seal'"
+                )
+        except DBAPIError:
+            # Strict dialects (PostgreSQL/MySQL) reject the non-date at the storage layer, so the
+            # forged value never reaches the verifier — the defense held one level lower.
+            assert not is_sqlite
+            return
         report = audit.verify(full=True)
         assert report.outcome == "tampered"
         assert _status_row(audit.engine).outcome == "tampered"
@@ -768,20 +773,24 @@ def test_unknown_row_tracking_is_bounded_and_reports_overflow(
 def test_oversized_attacker_cell_is_tampered_without_unbounded_recompute(
     db_url: str, is_sqlite: bool
 ) -> None:
-    if not is_sqlite:
-        pytest.skip("strict dialects reject an over-length action at the DB before verify sees it")
     audit = _make(db_url)
     try:
-        with transaction(audit.engine) as conn:
-            conn.execute(
-                _audits.insert().values(
-                    action="x" * 2_000_000,
-                    created_at=now_utc(),
-                    entry_id=new_ulid(),
-                    row_mac="0" * 64,
-                    key_id=_KEY.id,
+        try:
+            with transaction(audit.engine) as conn:
+                conn.execute(
+                    _audits.insert().values(
+                        action="x" * 2_000_000,
+                        created_at=now_utc(),
+                        entry_id=new_ulid(),
+                        row_mac="0" * 64,
+                        key_id=_KEY.id,
+                    )
                 )
-            )
+        except DBAPIError:
+            # Strict dialects reject the over-length value at the storage layer (the action column
+            # is length-bounded), so the oversized cell never reaches the verifier.
+            assert not is_sqlite
+            return
         assert audit.verify(full=True).outcome == "tampered"
     finally:
         audit.close()
