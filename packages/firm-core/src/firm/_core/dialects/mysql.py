@@ -42,4 +42,12 @@ class MysqlDialect(Dialect):
     def insert_ignore(
         self, table: Table, values: Mapping[str, Any], *, index_elements: Sequence[str]
     ) -> Insert:
-        return mysql_insert(table).values(**values).prefix_with("IGNORE")
+        # NOT `INSERT IGNORE`: that downgrades *every* error (NOT NULL, FK, truncation) to a
+        # warning, whereas PG/SQLite scope their DO NOTHING to the named unique index. Match
+        # that by only swallowing the duplicate-key conflict via a no-op upsert. Setting a key
+        # column to its own existing value (`col = col`) changes nothing, so MySQL's
+        # affected-rows stays 1 on insert and 0 on conflict — exactly the rowcount contract
+        # inserted_count() reads (no RETURNING needed here, unlike Postgres).
+        index_col = index_elements[0]
+        stmt = mysql_insert(table).values(**values)
+        return stmt.on_duplicate_key_update({index_col: table.c[index_col]})
