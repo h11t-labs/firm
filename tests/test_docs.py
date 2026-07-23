@@ -17,6 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
+EXAMPLES = ROOT / "examples"
 # Modules used only as illustrative placeholders in multi-file examples.
 _PLACEHOLDER_MODS = {"myapp", "jobs", "shared", "app", "worker", "tasks", "pipeline", "models"}
 
@@ -32,6 +33,7 @@ def _blocks() -> list[tuple[str, str]]:
 
 
 _BLOCKS = _blocks()
+_EXAMPLES = sorted(EXAMPLES.glob("*.py"))
 
 
 def _is_submodule(module: str, name: str) -> bool:
@@ -42,9 +44,13 @@ def _is_submodule(module: str, name: str) -> bool:
         return False
 
 
-@pytest.mark.parametrize("code", [b[1] for b in _BLOCKS], ids=[b[0] for b in _BLOCKS])
-def test_doc_python_block(code: str) -> None:
-    tree = ast.parse(code)  # a SyntaxError here fails the test
+def _check_imports(tree: ast.Module) -> None:
+    """Assert every non-placeholder import target in *tree* resolves.
+
+    Optional-dependency imports (croniter, fastapi, ...) are skipped when that dependency isn't
+    installed, so the check stays meaningful under any extras combination. Only import *targets*
+    are imported — the parsed source itself is never executed.
+    """
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -70,6 +76,18 @@ def test_doc_python_block(code: str) -> None:
                 assert hasattr(module, alias.name) or _is_submodule(node.module, alias.name), (
                     f"{node.module}.{alias.name} does not exist"
                 )
+
+
+@pytest.mark.parametrize("code", [b[1] for b in _BLOCKS], ids=[b[0] for b in _BLOCKS])
+def test_doc_python_block(code: str) -> None:
+    tree = ast.parse(code)  # a SyntaxError here fails the test
+    _check_imports(tree)
+
+
+@pytest.mark.parametrize("path", _EXAMPLES, ids=[p.name for p in _EXAMPLES])
+def test_example_imports(path: Path) -> None:
+    """Every import in examples/ must parse and resolve (the file itself is never executed)."""
+    _check_imports(ast.parse(path.read_text()))  # a SyntaxError here fails the test
 
 
 def _load_generator():

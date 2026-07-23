@@ -1,9 +1,10 @@
 # Improvements & roadmap
 
-A prioritized, honest list of what would make `firm-queue` / `firm-cache` better. Each
-item notes rough effort (**S**mall / **M**edium / **L**arge) and where it lives. Nothing here is a
-known correctness bug in the current code — the test suite passes on SQLite, PostgreSQL, and
-MySQL/MariaDB — these are hardening, performance, features, and polish.
+A prioritized, honest list of what would make the `firm` workspace (queue / cache / channel /
+audit / ui, on `firm-core`) better. Each item notes rough effort (**S**mall / **M**edium /
+**L**arge) and where it lives. Nothing here is a known correctness bug in the current code — the
+test suite passes on SQLite, PostgreSQL, and MySQL/MariaDB — these are hardening, performance,
+features, and polish.
 
 ## 1. Correctness & robustness
 
@@ -98,16 +99,15 @@ MySQL/MariaDB — these are hardening, performance, features, and polish.
 
 - **(S) Concurrency stress tests on PG/MySQL.** A high-parallelism no-double-claim / no-lost-counter
   test against live Postgres/MySQL (beyond the 2-thread SQLite test) to harden the locking paths.
-- **(S) CI matrix.** GitHub Actions across Python 3.11–3.14 (incl. a free-threaded job) and
-  SQLite/Postgres/MySQL service containers; run ruff + ty + pytest.
+- **(S) Free-threaded CI job.** The CI matrix already runs Python 3.11–3.14 against
+  SQLite/Postgres/MySQL service containers with ruff + ty + pytest (`.github/workflows/ci.yml`);
+  what's still missing is a free-threaded (`3.13t`/`3.14t`) job to lock in no-GIL support.
 - **(M) Benchmarks.** Throughput/latency numbers per backend, and vs. Procrastinate/PgQueuer, to
   guide tuning and set expectations.
 - **(S) Property-based tests** (Hypothesis) for serialization round-trips and the size estimator.
 
 ## 7. Packaging & docs
 
-- **(S) Publish to PyPI** with a changelog and semantic versioning.
-- **(S) Build & publish the docs site** (the `zensical.toml` config is ready) to GitHub Pages.
 - **(S) Docker-compose for Postgres/MySQL** to make the live-backend tests easy to run locally.
 
 ---
@@ -117,5 +117,4 @@ MySQL/MariaDB — these are hardening, performance, features, and polish.
 1. Scope recovery's lock to `claimed_executions` (S, robustness).
 2. Bulk enqueue (S/M, perf).
 3. Per-exception retry/discard (M, the most-requested parity gap).
-4. CI matrix + PyPI publish (S, makes it usable by others).
-5. Postgres `LISTEN/NOTIFY` (L, the biggest latency win).
+4. Postgres `LISTEN/NOTIFY` (L, the biggest latency win).

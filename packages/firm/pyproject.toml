@@ -22,6 +22,10 @@ classifiers = [
 # Extras-only meta-package: `pip install "firm[queue]"` really does install just that module
 # (each module is its own PyPI package; they share the `firm.*` namespace). A bare
 # `pip install firm` installs no modules — pick at least one extra.
+#
+# `firm-stack` is the interim name for this meta-package while the PyPI name transfer is pending
+# (PEP 541, https://github.com/pypi/support/issues/11384). Keep this file and
+# packages/firm-stack/pyproject.toml in lockstep: same extras, same pins.
 dependencies = []
 
 [project.optional-dependencies]
