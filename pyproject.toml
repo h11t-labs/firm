@@ -34,6 +34,8 @@ dev = [
     "psycopg[binary]>=3.3.4",
     "pymysql>=1.1",
     "flask>=3.0",
+    # Higher than firm-queue's published `fastapi>=0.110` extra floor on purpose: the dev/test
+    # suite runs against a recent FastAPI, while the shipped floor stays low for compatibility.
     "fastapi>=0.139.2",
     "httpx>=0.27",
     "pre-commit>=3.7",

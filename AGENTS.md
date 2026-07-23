@@ -55,7 +55,8 @@ module carries its own.
 ## Conventions
 
 - **Lineage:** name `solid_queue`/`solid_cache`/`solid_cable` ONLY in `README.md`,
-  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`, and the packages'
+  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`,
+  `docs/testing-and-contributing.md` (the upstream-parity discussion), and the packages'
   PyPI `keywords`/`description` metadata (discoverability). Elsewhere — code, comments,
   every other doc — use firm's own voice. All tables/indexes are `firm_*`.
 - **Independence:** queue/cache/channel never import each other; importing `firm.queue` pulls no
