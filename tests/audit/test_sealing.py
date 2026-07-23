@@ -269,7 +269,7 @@ def test_sealer_locks_activation_before_reading_hwm(db_url: str) -> None:
     activation = next(
         index
         for index, statement in enumerate(statements)
-        if "from firm_audit_seals" in statement and "kind =" in statement
+        if "from firm_audit_seals" in statement and "from_id =" in statement
     )
     hwm = next(
         index

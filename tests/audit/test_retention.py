@@ -453,7 +453,7 @@ def test_retention_locks_activation_before_loading_floor_state(db_url: str, at_t
     activation = next(
         index
         for index, statement in enumerate(statements)
-        if "from firm_audit_seals" in statement and "kind =" in statement
+        if "from firm_audit_seals" in statement and "from_id =" in statement
     )
     side_table_page = next(
         index

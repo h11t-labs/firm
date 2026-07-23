@@ -206,10 +206,12 @@ def test_anchor_compact_writes_signed_checkpoint_and_preserves_verification(
         ],
     )
     assert result.exit_code == 0
-    assert "coverage=1, floor=0" in result.output
+    # The CLI compacts with its default grace (60s), so the just-written seal is still young: its
+    # coverage is not yet settled (checkpoint coverage=0) but its SEAL line is RETAINED so the
+    # coverage is not lost — it will fold on a later compaction once it ages past grace.
+    assert "coverage=0, floor=0" in result.output
     lines = anchor.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    assert lines[0].split()[1] == "CHECKPOINT"
+    assert [line.split()[1] for line in lines] == ["CHECKPOINT", "SEAL"]
 
     verifier = AuditLog(
         database_url=db_url,

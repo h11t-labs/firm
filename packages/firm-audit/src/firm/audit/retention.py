@@ -28,6 +28,7 @@ from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
 from .integrity import HmacSigner
+from .sealing import _ACTIVATION_FROM_ID
 from .verify import (
     _read_anchor,
     load_seal_records,
@@ -126,7 +127,9 @@ class Retention:
             # SQLite is serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL lock the never-deleted
             # activation row before either side computes a shared high-water mark / floor.
             activation_lock = dialect.with_row_lock(
-                select(_seals.c.id).where(_seals.c.kind == "activation").limit(1)
+                # Lock by the reserved, uniquely-indexed ``from_id`` (not the un-indexed ``kind``):
+                # on MySQL a FOR UPDATE over a non-indexed predicate escalates to a table/gap lock.
+                select(_seals.c.id).where(_seals.c.from_id == _ACTIVATION_FROM_ID).limit(1)
             )
             conn.execute(activation_lock).first()
             # The first database read fixes the snapshot before the external anchor is consumed.

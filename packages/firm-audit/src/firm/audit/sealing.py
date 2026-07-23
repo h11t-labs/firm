@@ -51,6 +51,21 @@ _seals = schema.seals
 _ACTIVATION_FROM_ID = -1
 
 
+def _is_young_seal_line(line: str, cutoff: datetime) -> bool:
+    """Whether a raw anchor line is a well-formed SEAL still newer than ``cutoff`` — i.e. one whose
+    coverage compaction must retain rather than fold, because verify does not yet enforce it."""
+    parts = line.split()
+    if len(parts) != 5 or parts[1] != "SEAL":
+        return False
+    try:
+        at = datetime.fromisoformat(parts[0])
+        from_id = int(parts[2])
+        to_id = int(parts[3])
+    except ValueError:
+        return False
+    return at > cutoff and 0 <= from_id < to_id
+
+
 class Sealer:
     """Activate sealing once, then write independent seals over settled rows."""
 
@@ -219,7 +234,9 @@ class Sealer:
             # SQLite is already serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL hold this
             # never-deleted activation row FOR UPDATE until the new seal commits.
             activation_lock = dialect.with_row_lock(
-                select(_seals.c.id).where(_seals.c.kind == "activation").limit(1)
+                # Lock by the reserved, uniquely-indexed ``from_id`` (not the un-indexed ``kind``):
+                # on MySQL a FOR UPDATE over a non-indexed predicate escalates to a table/gap lock.
+                select(_seals.c.id).where(_seals.c.from_id == _ACTIVATION_FROM_ID).limit(1)
             )
             if conn.execute(activation_lock).first() is None:
                 return None
@@ -322,39 +339,50 @@ class Sealer:
         return accepted
 
     def compact_anchor(self, path: str) -> tuple[int, int]:
-        """Replace a mutable anchor with one signed CHECKPOINT carrying the same watermarks."""
+        """Fold settled history into one signed CHECKPOINT, keeping the still-young SEAL tail.
+
+        The checkpoint carries only *settled* coverage (seals older than ``grace``), which verify
+        enforces immediately; SEAL lines younger than ``grace`` are retained verbatim so their
+        coverage is not lost when they later age past the grace window. Returns the checkpoint's
+        (settled coverage, floor). All work runs under an exclusive ``flock`` so a concurrent
+        append is either folded or kept, never dropped (TOCTOU-safe)."""
         key = self.audit._seal_key
         if key is None:
             raise RuntimeError("anchor compaction needs a configured seal key")
         at = now_utc()
-        anchor = _read_anchor(
-            path,
-            coverage_cutoff=at,
-            seal_keyring=self.audit.verifier.seal_keyring,
-        )
+        cutoff = at - timedelta(seconds=self.audit.grace)
         signer = HmacSigner(key)
-        mac = signer.sign(
-            integrity.checkpoint_mac_input(
-                coverage_id=anchor.coverage_watermark,
-                floor_id=anchor.floor_watermark,
-                at=at,
-                key_id=signer.key_id,
-            )
-        )
-        line = (
-            _format_checkpoint(
-                at=at,
-                coverage_id=anchor.coverage_watermark,
-                floor_id=anchor.floor_watermark,
-                mac=mac,
-            )
-            + "\n"
-        )
-        encoded = line.encode("utf-8")
         descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
         with os.fdopen(descriptor, "r+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
+                # Settled, validated watermarks for the checkpoint (read under the lock).
+                anchor = _read_anchor(
+                    path, coverage_cutoff=cutoff, seal_keyring=self.audit.verifier.seal_keyring
+                )
+                # Raw SEAL lines still younger than the cutoff, kept so their coverage survives
+                # compaction and is enforced once they age (floors are folded into the checkpoint's
+                # floor watermark, so no floor line is retained).
+                handle.seek(0)
+                raw = handle.read().decode("utf-8", "surrogateescape")
+                young = [line for line in raw.splitlines() if _is_young_seal_line(line, cutoff)]
+                mac = signer.sign(
+                    integrity.checkpoint_mac_input(
+                        coverage_id=anchor.coverage_watermark,
+                        floor_id=anchor.floor_watermark,
+                        at=at,
+                        key_id=signer.key_id,
+                    )
+                )
+                checkpoint = _format_checkpoint(
+                    at=at,
+                    coverage_id=anchor.coverage_watermark,
+                    floor_id=anchor.floor_watermark,
+                    mac=mac,
+                )
+                encoded = ("\n".join([checkpoint, *young]) + "\n").encode("utf-8")
+                # Append the new content first (a crash before the truncate leaves the old lines
+                # plus the checkpoint — still a valid superset), then rewrite from the start.
                 handle.seek(0, os.SEEK_END)
                 separator = b""
                 if handle.tell() > 0:

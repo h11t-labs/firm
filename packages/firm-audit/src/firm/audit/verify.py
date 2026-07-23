@@ -433,7 +433,10 @@ def _read_anchor(
 ) -> AnchorData:
     """Stream one anchor into monotonic watermarks without retaining per-line state."""
     try:
-        with open(path, encoding="utf-8") as handle:
+        # ``surrogateescape`` so one invalid UTF-8 byte becomes a single unparseable line (skipped)
+        # rather than a whole-file ``UnicodeError`` that would zero every watermark — realistic on
+        # remote/WORM anchor storage where a partial write or transport corruption can occur.
+        with open(path, encoding="utf-8", errors="surrogateescape") as handle:
             return _parse_anchor_stream(
                 _bounded_anchor_lines(handle),
                 coverage_cutoff=coverage_cutoff,
@@ -511,12 +514,18 @@ def _parse_anchor_stream(
                     )
                 ):
                     raise ValueError
-                if at <= coverage_cutoff:
-                    coverage = max(coverage, checkpoint_coverage)
+                # A CHECKPOINT summarizes already-committed, already-visible history
+                # (compaction reads only settled coverage), so — unlike a live SEAL line — it is
+                # not grace-gated; gating it would zero the watermark for `grace` after a compaction
+                # and blind truncation detection during that window.
+                coverage = max(coverage, checkpoint_coverage)
                 floor = max(floor, checkpoint_floor)
             else:
                 raise ValueError
-        except (IndexError, ValueError):
+        except (IndexError, ValueError, TypeError):
+            # TypeError guards a non-ASCII byte reaching ``hmac.compare_digest`` via a MAC field:
+            # a corrupt/partial anchor line must degrade to one skipped line, never escape as a
+            # whole-log false TAMPERED (verify) or raise out of ``Retention.run_once`` (contract).
             unreadable += 1
             continue
         if newest is None or at > newest:
@@ -716,6 +725,9 @@ class Verifier:
                 last_full_coverage_at=now if full else None,
                 anchor_configured=anchor_path is not None,
                 affected_identifiers=_affected_json([finding], 1),
+                # Preserve the monotonic guard: a transient storage error must not reset
+                # ``sealing_observed`` to False and silently disable the no-anchor wipe guard.
+                sealing_observed=self._prior_sealing_observed(),
             )
         report.duration_seconds = time.monotonic() - started
         try:

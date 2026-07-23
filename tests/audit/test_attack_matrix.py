@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
@@ -991,5 +992,105 @@ def test_activation_boundary_uses_grace_cutoff_and_young_row_is_later_sealed(
             assert audit.sealer.run_once() == 1
         assert _range_seals(audit)[-1].to_id == 2
         assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+
+def test_compaction_at_nonzero_grace_still_detects_truncation(tmp_path: Path) -> None:
+    """A seal settled past ``grace`` folds into the CHECKPOINT even when compaction runs with a
+    nonzero grace; deleting it afterward is still TAMPERED. Guards the compaction/grace blackout
+    where a fresh checkpoint's coverage was grace-gated to zero for ``grace`` seconds."""
+    database_url = f"sqlite:///{tmp_path / 'compact-grace.db'}"
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=database_url,
+        mac_key=_SINGLE_KEY,
+        grace=60.0,
+        anchor_path=str(anchor),
+        anchor_max_age=48 * 3600.0,
+    )
+    try:
+        # A keyed row recorded two hours ago (via the clock patch), so it seals rather than
+        # setting the activation boundary as a legacy NULL-mac row would.
+        with patch("firm.audit.events.now_utc", lambda: now_utc() - timedelta(hours=2)):
+            audit.record("covered")
+        # Seal an hour ago so the seal is > grace old by the time we compact/verify at "now".
+        with patch("firm.audit.sealing.now_utc", lambda: now_utc() - timedelta(hours=1)):
+            assert audit.sealer.run_once() == 1
+        assert audit.verify(full=True).outcome == "ok"
+
+        coverage, _floor = audit.sealer.compact_anchor(str(anchor))
+        assert coverage > 0  # the settled seal folded into the checkpoint, not grace-gated to 0
+        assert anchor.read_text(encoding="utf-8").splitlines()[0].split()[1] == "CHECKPOINT"
+        assert audit.verify(full=True).outcome == "ok"
+
+        seal = _range_seals(audit)[-1]
+        with transaction(audit.engine) as conn:
+            conn.execute(
+                delete(_audits).where(_audits.c.id > seal.from_id, _audits.c.id <= seal.to_id)
+            )
+            conn.execute(delete(_seals).where(_seals.c.id == seal.id))
+        assert audit.verify(full=True).outcome == "tampered"
+    finally:
+        audit.close()
+
+
+def test_malformed_anchor_line_is_skipped_not_raised(tmp_path: Path) -> None:
+    """A non-ASCII byte in a MAC field and an invalid UTF-8 byte must each degrade to one skipped
+    line — never a raised TypeError/UnicodeError that flips verify to a false whole-log TAMPERED
+    or escapes Retention.run_once (the no-raise contract on remote/WORM anchor storage)."""
+    database_url = f"sqlite:///{tmp_path / 'bad-anchor.db'}"
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=database_url,
+        mac_key=_SINGLE_KEY,
+        grace=0.0,
+        max_age=48 * 3600.0,
+        anchor_path=str(anchor),
+        anchor_max_age=48 * 3600.0,
+        on_error=lambda _e: None,
+    )
+    try:
+        audit.record("covered")
+        assert audit.sealer.run_once() == 1
+        assert audit.verify(full=True).outcome == "ok"
+        with anchor.open("ab") as handle:
+            handle.write(f"{now_utc().isoformat()} FLOOR 0 café\n".encode())  # non-ASCII MAC
+            handle.write(b"\xff\xfe not valid utf-8\n")  # invalid UTF-8 byte
+        # Neither raises, and the still-present valid seal keeps the verdict off TAMPERED.
+        assert audit.verify(full=True).outcome in {"ok", "warning"}
+        audit.retention.run_once()  # must not raise on the same malformed anchor
+    finally:
+        audit.close()
+
+
+def test_transient_verify_error_preserves_sealing_observed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient storage error during verify must not reset the persisted ``sealing_observed``
+    flag to False and silently disable the no-anchor wipe guard on the next clean run."""
+    database_url = f"sqlite:///{tmp_path / 'flag.db'}"
+    audit = AuditLog(
+        database_url=database_url, mac_key=_SINGLE_KEY, grace=0.0, on_error=lambda _e: None
+    )
+    try:
+        audit.record("a")
+        assert audit.sealer.run_once() == 1
+        assert audit.verify(full=True).outcome == "ok"  # sets sealing_observed = True
+
+        def boom(_conn: object) -> object:
+            raise SQLAlchemyError("transient blip")
+
+        monkeypatch.setattr(verify, "load_seal_records", boom)
+        assert audit.verify(full=True).outcome == "tampered"
+        monkeypatch.undo()
+
+        with transaction(audit.engine) as conn:
+            row = conn.execute(
+                select(schema.verify_status.c.sealing_observed).where(
+                    schema.verify_status.c.id == 1
+                )
+            ).first()
+        assert row is not None and bool(row.sealing_observed) is True
     finally:
         audit.close()
