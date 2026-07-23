@@ -106,6 +106,48 @@ prune.
 database), materialize that history as the canonical line format and supply it to verification via
 `anchor_path`; the callback alone cannot be read back to detect truncation or reset.
 
+### Turning it on, level by level
+
+Each layer is a flag on top of the previous one. This walkthrough is runnable end to end (SQLite,
+`grace=0` so seals happen immediately — in production keep the default grace and let the background
+loop seal):
+
+```python
+from firm.audit import AuditLog
+
+# Level 1 — integrity. A row key makes every row self-authenticating (HMAC).
+audit = AuditLog(database_url="sqlite:///audit.db", mac_key="a-32+char-row-secret-................")
+audit.record("invoice.paid", subject=("Invoice", 42), actor=("User", 7), data={"amount": 4200})
+assert audit.verify(full=True).outcome == "ok"
+# An edit to any column is now caught:
+#   UPDATE firm_audit_events SET action='forged' WHERE id=1   ->  verify() == "tampered"
+
+# Level 2 — deletion/insertion. Sealing signs exact id ranges, so a *deleted* row is caught too.
+audit = AuditLog(
+    database_url="sqlite:///audit.db",
+    mac_key="a-32+char-row-secret-................",
+    seal_key="a-DISTINCT-32+char-seal-secret-.....",   # two-key split (optional; omit for single-key)
+    grace=0.0,
+    anchor_path="/var/lib/firm/audit.anchor",           # Level 3 — external memory (see below)
+)
+audit.record("order.created", subject=("Order", 1001), actor=("worker", "w1"))
+audit.sealer.run_once()          # or background_sealing=True to run it on a timer
+assert audit.verify(anchor_path="/var/lib/firm/audit.anchor", full=True).outcome == "ok"
+# Deleting a sealed row now fails the seal's rows_mac -> "tampered".
+
+# Level 3 — truncation/reset. The anchor above is a separate trust domain (place it where a DB
+# compromise cannot write it). Deleting a whole seal *and* its rows drops present coverage below the
+# anchor's watermark -> "tampered", which the database alone could not remember.
+
+# Keep checking continuously (pick one): the in-process loop, a firm-queue recurring task, or cron.
+audit = AuditLog(..., background_verification=True, verify_interval=3600.0, verify_full_every=24)
+```
+
+The progression maps onto the [threat model](#threat-model): Level 1 catches modification/forgery,
+Level 2 adds deletion/insertion inside sealed history, and Level 3 adds seal-deletion and
+tail-truncation. Verification is read-only and must be [scheduled](#scheduling-verification-run-it-continuously);
+the [dashboard](../ui.md) then shows the latest verdict.
+
 ### Anchor growth, compaction, and rotation
 
 File length does not affect verification memory or correctness. On a mutable local/separate-host
