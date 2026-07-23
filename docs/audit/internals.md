@@ -2,10 +2,10 @@
 
 ## Schema
 
-One table, `firm_audit_events`:
+The event table, `firm_audit_events`:
 
 ```
-id              autoincrement PK, total event order
+id              autoincrement PK, total event order (strictly monotonic; SQLite AUTOINCREMENT)
 action          VARCHAR(255), not null — what happened
 subject_type    VARCHAR(255) — polymorphic target type
 subject_id      VARCHAR(255) — polymorphic target id
@@ -18,7 +18,17 @@ data            TEXT — JSON-encoded free-form payload
 changes         TEXT — JSON-encoded before/after diff
 context         TEXT — JSON-encoded request metadata
 created_at      timestamp — when the event was recorded
+entry_id        VARCHAR(26) — client ULID, unique; identity + anti-replay (tamper-evidence)
+row_mac         VARCHAR(64) — hex HMAC over the canonical row (tamper-evidence)
+key_id          VARCHAR(16) — which key signed the row, for rotation (tamper-evidence)
 ```
+
+The last three columns are **always present but nullable**: they stay NULL until a key is
+configured, so a no-key deployment behaves exactly as before. Enabling tamper-evidence adds no
+columns — it only starts populating them, and starts writing the two side tables `firm_audit_seals`
+(independent range seals plus the signed activation and floor markers) and
+`firm_audit_verify_status` (the single row the verifier upserts, read by the dashboard). Those side
+tables are detailed in [Tamper-evidence › Schema and migration](tamper-evidence.md#schema-and-migration).
 
 Every part of a reference is nullable: an actor/subject may have a type without an id (a role
 label like `cron`), an id without a type, or neither (a system event) — see

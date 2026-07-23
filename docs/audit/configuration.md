@@ -22,6 +22,10 @@ AuditLog(
     background_verification=False,   # run a verify loop on a timer (the in-process continuous watch)
     verify_interval=3600.0,         # seconds between background tail verifications
     verify_full_every=24,           # every Nth background run is a --full recompute; 0 disables it
+    anchor_max_age=None,            # a newer-than-this anchor is required; None = 3x seal_interval
+    unsealed_tail_max_age=None,     # warn if the oldest unsealed row is older; None = derived
+    on_error=None,                  # callback(exc) for background/anchor failures; None = stderr
+    on_finding=None,                # callback(IntegrityAlert) on a tampered/warning verify run
 )
 ```
 
@@ -33,6 +37,7 @@ AuditLog(
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
 | `background_verification` / `verify_interval` / `verify_full_every` | `False` / `3600.0` / `24` | Opt-in in-process verify loop — see [Scheduling verification](tamper-evidence.md#scheduling-verification-run-it-continuously). |
 | `on_error` | traceback to stderr | Callback for background-pruning, sealing, and anchor-write failures. |
+| `on_finding` | one stderr line | Callback `(IntegrityAlert)` fired once per verify run whose outcome is `tampered`/`warning` — wire it to your log pipeline. See [Alerting](tamper-evidence.md#alerting--log-stream). |
 
 ## Tamper-evidence
 
@@ -50,6 +55,8 @@ evidence columns and side tables.
 | `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Append-only Layer-3 source for `SEAL`, `FLOOR`, `ACTIVATION`, and compacted `CHECKPOINT` lines. Mandatory for the full deletion/truncation guarantee; see placement below. |
 | `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping events off-host. Seal failures route to `on_error` and maximum coverage heals later; a floor sink failure refuses the prune. For verification, materialize callback-only history and pass it as `anchor_path`; the callback is a write sink, not a readable Layer-3 source. |
 | `verify_cycle` | `7` | Cost divisor: default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. It is not a period; the conservative rotation bound is `range_count` days. Only `full=True` / `--full` guarantees complete coverage. |
+| `anchor_max_age` | `None` → `3 × seal_interval` | Verify forces a non-zero exit / `WARNING` when the newest anchor event is older than this — a stalled anchor sink or verifier trips the same alarm as tampering. |
+| `unsealed_tail_max_age` | `None` → derived | Verify `WARNING`s when the oldest unsealed row outlives this, surfacing a stalled sealer. Derived from `seal_interval`/`grace` when unset. |
 
 Rotation uses two role-scoped archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
 **row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each

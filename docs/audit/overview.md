@@ -21,7 +21,8 @@ no longer atomic with the business write. See [Configuration](configuration.md).
 
 ## The model
 
-One table, `firm_audit_events`:
+The core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
+it plus two side tables — see [Tamper-evidence](tamper-evidence.md)):
 
 | Column | Purpose |
 |---|---|
@@ -53,6 +54,10 @@ are display-only and, like the JSON payloads, never filtered on in SQL.
 - **Append-only by construction**: the public API has no update or delete. The only thing that
   ever removes a row is opt-in, age-based **retention** — off by default (keep forever) — see
   [Retention & querying](retention-and-querying.md).
+- **Opt-in tamper-evidence** (off until you set a key): each row is HMAC-signed, a background
+  sealer signs independent ranges, and a read-only `verify` detects any modify / delete / insert /
+  truncation by an attacker with database access but not the key — see
+  [Tamper-evidence](tamper-evidence.md).
 
 ```python
 from firm.audit import AuditLog, record
@@ -69,4 +74,5 @@ log.record("sync.ran", actor="cron")  # a non-entity actor — a role, no id
 log.history(action="user.login")
 ```
 
-Read on: **[Getting started](getting-started.md)**.
+Read on: **[Getting started](getting-started.md)**, or **[Tamper-evidence](tamper-evidence.md)** for
+the cryptographic integrity layer.

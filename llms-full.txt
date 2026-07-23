@@ -3000,7 +3000,8 @@ no longer atomic with the business write. See [Configuration](configuration.md).
 
 ## The model
 
-One table, `firm_audit_events`:
+The core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
+it plus two side tables — see [Tamper-evidence](tamper-evidence.md)):
 
 | Column | Purpose |
 |---|---|
@@ -3032,6 +3033,10 @@ are display-only and, like the JSON payloads, never filtered on in SQL.
 - **Append-only by construction**: the public API has no update or delete. The only thing that
   ever removes a row is opt-in, age-based **retention** — off by default (keep forever) — see
   [Retention & querying](retention-and-querying.md).
+- **Opt-in tamper-evidence** (off until you set a key): each row is HMAC-signed, a background
+  sealer signs independent ranges, and a read-only `verify` detects any modify / delete / insert /
+  truncation by an attacker with database access but not the key — see
+  [Tamper-evidence](tamper-evidence.md).
 
 ```python
 from firm.audit import AuditLog, record
@@ -3048,7 +3053,8 @@ log.record("sync.ran", actor="cron")  # a non-entity actor — a role, no id
 log.history(action="user.login")
 ```
 
-Read on: **[Getting started](getting-started.md)**.
+Read on: **[Getting started](getting-started.md)**, or **[Tamper-evidence](tamper-evidence.md)** for
+the cryptographic integrity layer.
 
 
 
@@ -3951,6 +3957,10 @@ AuditLog(
     background_verification=False,   # run a verify loop on a timer (the in-process continuous watch)
     verify_interval=3600.0,         # seconds between background tail verifications
     verify_full_every=24,           # every Nth background run is a --full recompute; 0 disables it
+    anchor_max_age=None,            # a newer-than-this anchor is required; None = 3x seal_interval
+    unsealed_tail_max_age=None,     # warn if the oldest unsealed row is older; None = derived
+    on_error=None,                  # callback(exc) for background/anchor failures; None = stderr
+    on_finding=None,                # callback(IntegrityAlert) on a tampered/warning verify run
 )
 ```
 
@@ -3962,6 +3972,7 @@ AuditLog(
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
 | `background_verification` / `verify_interval` / `verify_full_every` | `False` / `3600.0` / `24` | Opt-in in-process verify loop — see [Scheduling verification](tamper-evidence.md#scheduling-verification-run-it-continuously). |
 | `on_error` | traceback to stderr | Callback for background-pruning, sealing, and anchor-write failures. |
+| `on_finding` | one stderr line | Callback `(IntegrityAlert)` fired once per verify run whose outcome is `tampered`/`warning` — wire it to your log pipeline. See [Alerting](tamper-evidence.md#alerting--log-stream). |
 
 ## Tamper-evidence
 
@@ -3979,6 +3990,8 @@ evidence columns and side tables.
 | `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Append-only Layer-3 source for `SEAL`, `FLOOR`, `ACTIVATION`, and compacted `CHECKPOINT` lines. Mandatory for the full deletion/truncation guarantee; see placement below. |
 | `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping events off-host. Seal failures route to `on_error` and maximum coverage heals later; a floor sink failure refuses the prune. For verification, materialize callback-only history and pass it as `anchor_path`; the callback is a write sink, not a readable Layer-3 source. |
 | `verify_cycle` | `7` | Cost divisor: default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. It is not a period; the conservative rotation bound is `range_count` days. Only `full=True` / `--full` guarantees complete coverage. |
+| `anchor_max_age` | `None` → `3 × seal_interval` | Verify forces a non-zero exit / `WARNING` when the newest anchor event is older than this — a stalled anchor sink or verifier trips the same alarm as tampering. |
+| `unsealed_tail_max_age` | `None` → derived | Verify `WARNING`s when the oldest unsealed row outlives this, surfacing a stalled sealer. Derived from `seal_interval`/`grace` when unset. |
 
 Rotation uses two role-scoped archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
 **row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
@@ -4176,10 +4189,10 @@ non-zero when `--anchor` is given but the newest anchor is older than `anchor_ma
 
 ## Schema
 
-One table, `firm_audit_events`:
+The event table, `firm_audit_events`:
 
 ```
-id              autoincrement PK, total event order
+id              autoincrement PK, total event order (strictly monotonic; SQLite AUTOINCREMENT)
 action          VARCHAR(255), not null — what happened
 subject_type    VARCHAR(255) — polymorphic target type
 subject_id      VARCHAR(255) — polymorphic target id
@@ -4192,7 +4205,17 @@ data            TEXT — JSON-encoded free-form payload
 changes         TEXT — JSON-encoded before/after diff
 context         TEXT — JSON-encoded request metadata
 created_at      timestamp — when the event was recorded
+entry_id        VARCHAR(26) — client ULID, unique; identity + anti-replay (tamper-evidence)
+row_mac         VARCHAR(64) — hex HMAC over the canonical row (tamper-evidence)
+key_id          VARCHAR(16) — which key signed the row, for rotation (tamper-evidence)
 ```
+
+The last three columns are **always present but nullable**: they stay NULL until a key is
+configured, so a no-key deployment behaves exactly as before. Enabling tamper-evidence adds no
+columns — it only starts populating them, and starts writing the two side tables `firm_audit_seals`
+(independent range seals plus the signed activation and floor markers) and
+`firm_audit_verify_status` (the single row the verifier upserts, read by the dashboard). Those side
+tables are detailed in [Tamper-evidence › Schema and migration](tamper-evidence.md#schema-and-migration).
 
 Every part of a reference is nullable: an actor/subject may have a type without an id (a role
 label like `cron`), an id without a type, or neither (a system event) — see
