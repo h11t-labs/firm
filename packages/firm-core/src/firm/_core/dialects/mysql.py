@@ -42,12 +42,16 @@ class MysqlDialect(Dialect):
     def insert_ignore(
         self, table: Table, values: Mapping[str, Any], *, index_elements: Sequence[str]
     ) -> Insert:
-        # NOT `INSERT IGNORE`: that downgrades *every* error (NOT NULL, FK, truncation) to a
-        # warning, whereas PG/SQLite scope their DO NOTHING to the named unique index. Match
-        # that by only swallowing the duplicate-key conflict via a no-op upsert. Setting a key
-        # column to its own existing value (`col = col`) changes nothing, so MySQL's
-        # affected-rows stays 1 on insert and 0 on conflict — exactly the rowcount contract
-        # inserted_count() reads (no RETURNING needed here, unlike Postgres).
-        index_col = index_elements[0]
-        stmt = mysql_insert(table).values(**values)
-        return stmt.on_duplicate_key_update({index_col: table.c[index_col]})
+        # `INSERT ... IGNORE` is the only MySQL form that satisfies inserted_count()'s rowcount
+        # contract (1 on insert, 0 on conflict). The obvious alternative — a no-op
+        # `ON DUPLICATE KEY UPDATE col = col` scoped to the key — does NOT: SQLAlchemy's MySQL
+        # dialects always set CLIENT.FOUND_ROWS (see sqlalchemy/dialects/mysql/base.py), and
+        # under that flag MySQL reports affected-rows *1* for a row "set to its current values"
+        # (per the manual), making a conflict indistinguishable from an insert. There is no
+        # IODKU variant that yields 0-on-conflict under FOUND_ROWS.
+        #
+        # Known downside / divergence: unlike PG/SQLite's index-scoped DO NOTHING, IGNORE also
+        # downgrades unrelated errors (NOT NULL, FK, truncation) to warnings. firm's only caller
+        # is schema_setup's auto-create race, where the row is fully-formed and the sole possible
+        # failure is the duplicate-key conflict, so the broader swallow is harmless there.
+        return mysql_insert(table).values(**values).prefix_with("IGNORE")

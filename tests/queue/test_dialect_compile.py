@@ -59,24 +59,18 @@ def test_insert_ignore_renders_native_conflict_handling() -> None:
     cases = [
         # Postgres also RETURNINGs the PK: inserted_count() relies on it because psycopg
         # reports rowcount -1 for compiled single-row INSERTs.
+        # Postgres also RETURNINGs the PK: inserted_count() relies on it because psycopg
+        # reports rowcount -1 for compiled single-row INSERTs.
         (PostgresDialect(), postgresql.dialect(), "ON CONFLICT (class_name) DO NOTHING"),
         (PostgresDialect(), postgresql.dialect(), "RETURNING firm_queue_jobs.id"),
-        # MySQL scopes DO NOTHING to the key with a `col = col` no-op upsert (never bare
-        # INSERT IGNORE, which would also swallow NOT NULL / FK / truncation errors).
-        (
-            MysqlDialect(),
-            mysql.dialect(),
-            "ON DUPLICATE KEY UPDATE class_name = firm_queue_jobs.class_name",
-        ),
+        # MySQL uses INSERT IGNORE — the only form that meets the 1/0 rowcount contract under
+        # the CLIENT.FOUND_ROWS flag SQLAlchemy always sets (see Dialect.insert_ignore).
+        (MysqlDialect(), mysql.dialect(), "INSERT IGNORE"),
         (SqliteDialect(), sqlite.dialect(), "ON CONFLICT (class_name) DO NOTHING"),
     ]
     for firm_dialect, sa_dialect, marker in cases:
         stmt = firm_dialect.insert_ignore(schema.jobs, values, index_elements=("class_name",))
         assert marker in str(stmt.compile(dialect=sa_dialect))
-
-    # Never the old prefix form that swallows NOT NULL / FK / truncation errors too.
-    mysql_stmt = MysqlDialect().insert_ignore(schema.jobs, values, index_elements=("class_name",))
-    assert "INSERT IGNORE" not in str(mysql_stmt.compile(dialect=mysql.dialect()))
 
 
 def test_bare_urls_normalize_to_shipped_drivers() -> None:
