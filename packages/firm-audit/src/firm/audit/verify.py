@@ -777,7 +777,8 @@ class Verifier:
                 )
                 counters.warning += 1
             intact = self._check_records(records, keyring, seal_keyring, counters, findings)
-            floor = self._resolve_floor(records, intact, anchor, counters, findings)
+            database_floor, floor = self._resolve_floor(records, intact, anchor, counters, findings)
+            floor = self._reconcile_pending_prune(conn, database_floor, floor, counters, findings)
             boundary = self._resolve_activation(records, intact, counters, findings)
             sealing_observed = bool(prior and prior.sealing_observed) or any(
                 record.id in intact and record.kind in {"activation", "seal"} for record in records
@@ -909,7 +910,9 @@ class Verifier:
         anchor: AnchorData | None,
         counters: _Counters,
         findings: list[Finding],
-    ) -> int:
+    ) -> tuple[int, int]:
+        """Return ``(database_floor, effective_floor)`` — the highest intact floor row in the
+        database, and the maximum of that and the anchor's floor watermark."""
         valid = [record for record in records if record.kind == "floor" and record.id in intact]
         previous = -1
         for record in valid:
@@ -927,7 +930,51 @@ class Verifier:
 
         database_floor = max((record.to_id or 0 for record in valid), default=0)
         anchor_floor = anchor.floor_watermark if anchor is not None else 0
-        return max(database_floor, anchor_floor)
+        return database_floor, max(database_floor, anchor_floor)
+
+    def _reconcile_pending_prune(
+        self,
+        conn: Connection,
+        database_floor: int,
+        floor: int,
+        counters: _Counters,
+        findings: list[Finding],
+    ) -> int:
+        """Resolve an anchor floor that leads the database floor.
+
+        An aligned prune appends its anchor FLOOR line *before* its database transaction commits
+        (the anchor is the hard gate). If that transaction then rolls back — a serialization
+        retry — or the process dies before commit, the anchor floor leads the database while the
+        rows *and their covering seals* are all still present, exactly as before the attempted
+        prune. That is an interrupted prune, not tampering: verify the region as ordinary sealed
+        history from the database floor and surface a warning; retention resumes the prune on its
+        next run. The fail-closed paths are untouched — rows below the *database* floor still
+        trip the pruned-region check, and gap rows whose covering seals are missing (a forged
+        "restore") still verify as tampered through the anchor-coverage and contiguity checks.
+        The one indistinguishable case is a byte-exact resurrection of legitimately retired rows
+        *and* their seals: it surfaces as this same warning and is re-pruned by the next
+        retention run.
+        """
+        if floor <= database_floor:
+            return floor
+        pending = conn.execute(
+            select(_audits.c.id)
+            .where(_audits.c.id > database_floor, _audits.c.id <= floor)
+            .limit(1)
+        ).first()
+        if pending is None:
+            return floor
+        findings.append(
+            Finding(
+                "warning",
+                f"anchor floor {floor} leads database floor {database_floor} and rows in "
+                "between are still present: an anchored prune was interrupted before its "
+                "database commit and is pending retry",
+                "anchor-floor",
+            )
+        )
+        counters.warning += 1
+        return database_floor
 
     def _resolve_activation(
         self,
