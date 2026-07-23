@@ -108,6 +108,43 @@ def test_thread_supervisor_runs_immediate_and_scheduled(
     assert count(schema.processes) == 0
 
 
+def test_thread_supervisor_recovers_predecessor_stale_claims(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """Q-R1: thread mode never pruned stale-heartbeat processes, so a hard-killed
+    predecessor's claim was shielded from the absent-row sweep and stranded forever. The
+    supervisor now reaps at startup (and periodically via ReaperLoop) in thread mode too."""
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from firm._core import process as process_registry
+    from firm._core.clock import now_utc
+    from firm._core.process import ProcessInfo
+    from firm.queue.claim import claim_ready
+
+    _SINK.clear()
+    e2e_job.enqueue(42)
+    dead_pid = process_registry.register(
+        engine, ProcessInfo(kind="Supervisor", name="crashed-predecessor", pid=1)
+    )
+    assert len(claim_ready(engine, runtime.dialect, ["*"], 5, dead_pid)) == 1
+    with engine.begin() as conn:
+        conn.execute(
+            update(schema.processes)
+            .where(schema.processes.c.id == dead_pid)
+            .values(last_heartbeat_at=now_utc() - timedelta(seconds=600))
+        )
+
+    config = SupervisorConfig(workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[])
+    with ThreadSupervisor(runtime, config):
+        assert _wait_until(lambda: _finished_jobs(engine) == 1)
+
+    assert _SINK == [42]
+    assert count(schema.claimed_executions) == 0
+    assert count(schema.processes) == 0
+
+
 def test_fork_shutdown_recovers_sigkilled_children_claims(
     runtime: Runtime, engine: Engine, add_ready, count: Callable[..., int]
 ) -> None:

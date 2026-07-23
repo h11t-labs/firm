@@ -45,6 +45,38 @@ def test_drain_claims_under_a_registered_process(runtime, engine, db_url) -> Non
         assert conn.execute(select(schema.processes.c.id)).first() is None
 
 
+def test_drain_recovers_stale_predecessor_claims(runtime, engine, db_url) -> None:
+    """Q-R1: with no supervisor around, nothing reaped stale-heartbeat processes, so a
+    hard-killed predecessor's claim was stranded forever. Standalone commands now prune and
+    recover at startup, and drain then processes the re-readied job like any other."""
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from firm._core import process as pr
+    from firm._core.clock import now_utc
+    from firm.queue.claim import claim_ready
+
+    _DRAIN_SEEN.clear()
+    drain_probe_job.enqueue()
+    dead_pid = pr.register(engine, pr.ProcessInfo(kind="Worker", name="crashed", pid=1))
+    assert len(claim_ready(engine, runtime.dialect, ["*"], 5, dead_pid)) == 1
+    with engine.begin() as conn:
+        conn.execute(
+            update(schema.processes)
+            .where(schema.processes.c.id == dead_pid)
+            .values(last_heartbeat_at=now_utc() - timedelta(seconds=600))
+        )
+
+    result = CliRunner().invoke(cli.main, ["drain", "--database-url", db_url])
+
+    assert result.exit_code == 0, result.output
+    assert "processed 1 job(s)" in result.output
+    with engine.connect() as conn:
+        assert conn.execute(select(schema.claimed_executions.c.id)).first() is None
+        assert conn.execute(select(schema.processes.c.id)).first() is None
+
+
 def test_work_registers_a_heartbeated_process(db_url, engine, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
