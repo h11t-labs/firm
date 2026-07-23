@@ -1,6 +1,6 @@
 [project]
 name = "firm-queue"
-version = "0.1.0"
+version = "1.0.0"
 description = "Database-backed background jobs (a pure-Python port of Rails' Solid Queue). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = ["jobs", "queue", "background", "tasks", "sqlite", "postgresql", "mysql", "solid_queue"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
@@ -17,8 +17,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=0.1.0",
-    "croniter>=6.2.3",
+    "firm-core~=1.0.0",
+    "croniter>=6.2.4",
     "click>=8.1",
 ]
 
@@ -38,7 +38,7 @@ Repository = "https://github.com/h11t-labs/firm"
 Issues = "https://github.com/h11t-labs/firm/issues"
 
 [build-system]
-requires = ["uv_build>=0.11,<0.12"]
+requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 # firm-queue ships two namespace sub-packages: firm.queue and firm.contrib

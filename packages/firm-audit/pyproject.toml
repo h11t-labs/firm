@@ -1,6 +1,6 @@
 [project]
 name = "firm-audit"
-version = "0.1.0"
+version = "1.0.0"
 description = "Database-backed append-only audit log. No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,14 +9,14 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = ["audit", "log", "sqlite", "postgresql", "mysql"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=0.1.0",
+    "firm-core~=1.0.0",
     "click>=8.1",
 ]
 
@@ -35,7 +35,7 @@ Issues = "https://github.com/h11t-labs/firm/issues"
 Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-audit/CHANGELOG.md"
 
 [build-system]
-requires = ["uv_build>=0.11.27,<0.12"]
+requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

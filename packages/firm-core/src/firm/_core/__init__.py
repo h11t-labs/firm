@@ -8,6 +8,6 @@ channel, audit, ui) depends on it; nothing here imports those modules.
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 __all__ = ["__version__"]

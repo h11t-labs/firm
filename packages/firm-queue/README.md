@@ -18,9 +18,11 @@ import firm.queue as bq
 
 bq.configure(database_url="postgresql://localhost/myapp")
 
+
 @bq.job()
 def greet(name):
     print(f"hi {name}")
+
 
 greet.enqueue("Ada")
 ```

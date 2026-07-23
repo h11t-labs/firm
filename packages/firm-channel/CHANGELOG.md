@@ -1,10 +1,15 @@
 # Changelog — firm-channel
 
 All notable changes to `firm-channel` are documented here.
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are semver-ish
-pre-1.0 (breaking changes bump the minor version).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-07-23
+
+First stable release: the PyPI classifier moves to **Production/Stable** and the
+inter-package pins to `~=1.0.0`.
 
 ### Changed
 
@@ -25,5 +30,6 @@ pre-1.0 (breaking changes bump the minor version).
 - Broadcast/subscribe over the database with a polling listener and automatic message trimming,
   plus a `firm-channel` CLI.
 
-[Unreleased]: https://github.com/h11t-labs/firm/compare/firm-channel-v0.1.0...HEAD
+[Unreleased]: https://github.com/h11t-labs/firm/compare/firm-channel-v1.0.0...HEAD
+[1.0.0]: https://github.com/h11t-labs/firm/compare/firm-channel-v0.1.0...firm-channel-v1.0.0
 [0.1.0]: https://github.com/h11t-labs/firm/releases/tag/firm-channel-v0.1.0

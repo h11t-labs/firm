@@ -19,7 +19,7 @@ from firm.cache import Cache
 cache = Cache(database_url="postgresql://localhost/myapp")
 
 cache.set("greeting", "hello")
-cache.get("greeting")                        # "hello"
+cache.get("greeting")  # "hello"
 cache.fetch("expensive", lambda: compute())  # compute once, then cached
 ```
 

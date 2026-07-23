@@ -1,6 +1,6 @@
 [project]
 name = "firm-core"
-version = "0.1.0"
+version = "1.0.0"
 description = "Shared internal infrastructure for the firm packages (engine/connection handling, dialects, poller, config). Not intended for direct use."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = ["sqlalchemy", "alembic", "sqlite", "postgresql", "mysql"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
@@ -32,7 +32,7 @@ Issues = "https://github.com/h11t-labs/firm/issues"
 Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-core/CHANGELOG.md"
 
 [build-system]
-requires = ["uv_build>=0.11,<0.12"]
+requires = ["uv_build>=0.11.29,<0.12"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
