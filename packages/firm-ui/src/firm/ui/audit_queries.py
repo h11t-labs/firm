@@ -1,21 +1,40 @@
 """Read-only queries for the audit part.
 
 Unlike :func:`firm.audit.events.history`, ``audit_search`` here needs UI-shaped pagination and
-column sorting, so it queries ``schema.audits`` directly rather than going through that helper —
-the same division the queue/cache/channel query modules already draw against their own parts.
+column sorting, so it queries ``schema.audit_events`` directly rather than going through that
+helper — the same division the queue/cache/channel query modules already draw against their parts.
+
+The tail of this module (:func:`verify_status_row`, :func:`integrity_config`,
+:func:`integrity_state`) feeds the dashboard's tamper-evidence panel (design review D22-D25). It
+reads the single ``firm_audit_verify_status`` row the verifier upserts and derives the *display*
+state the panel renders. That derivation is a pure function so the six state-table rows can be
+unit-tested without a database; the presentation (prose, links, colours) stays in
+:mod:`.render` / the ``Integrity`` component.
 """
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.engine import Connection
 
+from firm._core.clock import now_utc
 from firm.audit import events, schema
 from firm.audit.serialization import load_json
 
-_audits = schema.audits
+_audits = schema.audit_events
+_seals = schema.seals
+_verify_status = schema.verify_status
+
+#: The fixed primary key of the single ``firm_audit_verify_status`` row the verifier upserts (it
+#: mirrors :data:`firm.audit.verify._STATUS_ID`). The dashboard reads *this* row by id, never the
+#: newest by ``ran_at`` — an attacker with DB write access could otherwise insert a second,
+#: future-dated ``outcome="ok"`` row and pin the panel green forever (Bug #2).
+_STATUS_ID = 1
 
 # Sortable columns, in table order. Each maps to one or more real columns (composite for
 # subject/actor, so e.g. sorting by "subject" groups same-type rows together); always a plain
@@ -53,6 +72,9 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         "correlation_id": row.correlation_id,
         "data": load_json(row.data),
         "created_at": row.created_at,
+        # Layer-1 signature — present once a key is configured, NULL on legacy/pre-key rows. Read
+        # by :func:`row_status` to tell "sealed/signed" apart from "unprotected".
+        "row_mac": row.row_mac,
     }
 
 
@@ -138,4 +160,272 @@ def audit_search(
 
 
 def audit_detail(conn: Connection, event_id: int) -> dict[str, Any] | None:
-    return events.get(conn, event_id)
+    event = events.get(conn, event_id)
+    if event is None:
+        return None
+    # ``events.get`` maps the display columns but not ``row_mac``; add it here (single-row, cheap)
+    # so :func:`row_status` can classify the detail page without reaching back into firm-audit.
+    event["row_mac"] = conn.execute(
+        select(_audits.c.row_mac).where(_audits.c.id == event_id)
+    ).scalar_one_or_none()
+    return event
+
+
+# -- per-row tamper-evidence status ------------------------------------------------------------
+# The integrity *panel* (above) reports the deployment-wide verdict; this pair reports the status
+# of one audit row for the events table / detail page, so a row reads as sealed / signed-not-sealed
+# / unprotected / tampered at a glance. :func:`row_integrity_context` gathers the two cheap signals
+# once per page; :func:`row_status` is pure over a single row + that context, so the priority table
+# is unit-testable without a database.
+
+
+#: Hard cap on the ``affected_identifiers`` JSON the dashboard will parse. The verifier bounds it to
+#: :data:`firm.audit.verify._MAX_AFFECTED` small findings, so anything larger is corrupt or hostile.
+#: Rejecting it before ``json.loads`` (and catching ``RecursionError`` below) keeps a DB-write
+#: attacker from 500-ing every audit-page render with an oversized or deeply-nested blob (Bug #3):
+#: the page is re-rendered on every request, so an uncaught parse crash is a persistent DoS.
+_MAX_AFFECTED_JSON = 64 * 1024
+
+
+def _tampered_row_ids(raw: str | None) -> set[int]:
+    """The integer row ids the latest verify run flagged as tampered, from its
+    ``affected_identifiers`` JSON. Parses defensively — malformed/absent/oversized/deeply-nested
+    data yields an empty set, never an exception (booleans are excluded even though ``bool`` is an
+    ``int`` subclass)."""
+    if not raw or len(raw) > _MAX_AFFECTED_JSON:
+        return set()
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        return set()
+    if not isinstance(items, list):
+        return set()
+    ids: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict) or item.get("verdict") != "tampered":
+            continue
+        id_ = item.get("id")
+        if isinstance(id_, int) and not isinstance(id_, bool):
+            ids.add(id_)
+    return ids
+
+
+def _affected_is_truncated(raw: str | None) -> bool:
+    """Whether the verifier truncated its ``affected_identifiers`` — i.e. more rows were flagged
+    tampered than the JSON carries individual ids for (the ``kind="more"`` overflow marker). When it
+    did, the set from :func:`_tampered_row_ids` is *incomplete*, so a sealed row not in it may
+    still be one of the un-listed tampered rows — the table must not vouch for it as verified
+    (Bug #8)."""
+    if not raw or len(raw) > _MAX_AFFECTED_JSON:
+        return False
+    try:
+        items = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        return False
+    if not isinstance(items, list):
+        return False
+    return any(isinstance(i, dict) and i.get("kind") == "more" for i in items)
+
+
+def row_integrity_context(conn: Connection) -> dict[str, Any]:
+    """The signals :func:`row_status` needs, gathered once per page: whether tamper-evidence is in
+    use at all (``active`` — any seal/activation/floor record exists or a verify run has happened),
+    the newest covering seal's ``to_id`` (``max_sealed_to_id``, 0 when nothing is sealed), and the
+    set of row ids the latest verify flagged tampered (``tampered_ids``). When ``active`` is False
+    the table adds no status column at all, so a plain audit log looks exactly as it did before
+    tamper-evidence existed."""
+    any_record = conn.execute(select(_seals.c.id).limit(1)).first() is not None
+    max_to = conn.execute(select(func.max(_seals.c.to_id)).where(_seals.c.kind == "seal")).scalar()
+    status = verify_status_row(conn)
+    affected = status["affected_identifiers"] if status else None
+    # When the latest run is tampered AND its affected list was truncated, the known tampered-id set
+    # is incomplete — a sealed row not in it may still be one of the un-listed tampered rows, so the
+    # table must not render it as "Sealed & verified" (Bug #8).
+    truncated = bool(
+        status and status["outcome"] == "tampered" and _affected_is_truncated(affected)
+    )
+    return {
+        "active": any_record or status is not None,
+        "max_sealed_to_id": max_to or 0,
+        "tampered_ids": _tampered_row_ids(affected),
+        "tampered_truncated": truncated,
+    }
+
+
+def row_status(row: dict[str, Any], ctx: dict[str, Any]) -> str | None:
+    """One row's tamper-evidence status, or ``None`` when tamper-evidence is not in use (so the
+    caller renders nothing). Priority, top wins: ``tampered`` (verify flagged this row id) >
+    ``unprotected`` (no signature — a legacy pre-key row) > ``unsealed`` (signed but past the newest
+    seal — the grace-window tail) > ``sealed`` (signed and within a seal).
+
+    When the latest run flagged more tampered rows than its ``affected_identifiers`` lists ids for
+    (``ctx["tampered_truncated"]`` — Bug #8), a sealed row not in the known set may still be one of
+    the un-listed tampered rows, so it degrades to ``unverified`` (honest: "sealed, but this run
+    could not vouch for it") instead of falsely reading ``sealed`` & verified."""
+    if not ctx["active"]:
+        return None
+    if row["id"] in ctx["tampered_ids"]:
+        return "tampered"
+    if row["row_mac"] is None:
+        return "unprotected"
+    if row["id"] > ctx["max_sealed_to_id"]:
+        return "unsealed"
+    if ctx.get("tampered_truncated"):
+        return "unverified"  # a truncated tamper run cannot vouch for this sealed row
+    return "sealed"
+
+
+# -- integrity (tamper-evidence) panel ---------------------------------------------------------
+# The verifier (opt-in) upserts one ``firm_audit_verify_status`` row after each run; this tail
+# reads it and folds it — together with whether integrity is switched on at all — into the single
+# display state the panel renders (design review D22-D25). Nothing here presents anything: the
+# prose, links, and colours live in :mod:`.render`; this layer only decides *which* of the six
+# states applies, so the whole state table is unit-testable without a database.
+
+# Liveness thresholds (seconds). Independent of the stored verdict, the panel forces amber when
+# the last verify run — or the newest anchor — is older than these, so a verify cron or anchor
+# sink that quietly died surfaces within one threshold rather than ageing behind a stale green
+# (design "Staleness" / review D16). Both are overridable by the caller.
+DEFAULT_VERIFY_MAX_AGE = 24 * 60 * 60.0  # a nightly verify that skips a whole day goes amber
+DEFAULT_ANCHOR_MAX_AGE = 3 * 60.0  # 3x the 60s seal interval, matching the CLI's ``anchor_max_age``
+
+
+@dataclass(frozen=True)
+class IntegrityConfig:
+    """Whether tamper-evidence is switched on for this deployment — the signal that tells
+    "configured but never verified" apart from "no key at all" (design D22). ``key_configured``
+    is supplied by the *server context* (the dashboard process's ``FIRM_AUDIT_KEY``), never
+    inferred from whether a status row happens to exist; ``sealing_active`` / ``sealing_since``
+    come from the explicit signed activation marker written by the first sealer pass."""
+
+    key_configured: bool
+    sealing_active: bool
+    sealing_since: datetime | None
+
+
+@dataclass(frozen=True)
+class IntegrityState:
+    """The derived display state — one of the six rows of the design's state table. ``tone`` is
+    the pill/strip colour token (``ok``/``warn``/``danger``/``neutral``); ``escalate`` is whether
+    this state also renders at the top of the overview page (TAMPERED and amber-liveness do, the
+    calm OK strip does not — review D23); ``causes`` are machine tokens (``stale``,
+    ``sealer_stalled``, ``anchor_stale``, ``verify_warnings``) that :mod:`.render` turns into the
+    itemized WARNING/ERROR prose. ``status``/``config`` carry the raw values render reads for
+    timestamps, counts, and affected-range links; ``verify_max_age``/``anchor_max_age`` are the
+    thresholds this state was derived under, so the prose can name them honestly."""
+
+    state: str
+    tone: str
+    escalate: bool
+    causes: tuple[str, ...]
+    status: dict[str, Any] | None
+    config: IntegrityConfig
+    verify_max_age: float
+    anchor_max_age: float
+
+
+def verify_status_row(conn: Connection) -> dict[str, Any] | None:
+    """The single ``firm_audit_verify_status`` row the verifier upserts, as a plain dict, or
+    ``None`` when verify has never run. Read by its fixed primary key (:data:`_STATUS_ID`) — the one
+    canonical row the verifier upserts — **not** the newest by ``ran_at``. Ordering by ``ran_at``
+    would let a DB-write attacker insert a second, far-future ``outcome="ok"`` row and keep the
+    dashboard green even after real verifies flagged tampering (Bug #2); the id-keyed read always
+    reflects the last genuine verify run."""
+    row = conn.execute(select(_verify_status).where(_verify_status.c.id == _STATUS_ID)).first()
+    if row is None:
+        return None
+    return {
+        "ran_at": row.ran_at,
+        "outcome": row.outcome,
+        "ok_count": row.ok_count,
+        "warning_count": row.warning_count,
+        "unprotected_count": row.unprotected_count,
+        "tampered_count": row.tampered_count,
+        "error_message": row.error_message,
+        "last_full_coverage_at": row.last_full_coverage_at,
+        "newest_anchor_at": row.newest_anchor_at,
+        "anchor_configured": row.anchor_configured,
+        "unsealed_tail_count": row.unsealed_tail_count,
+        "unsealed_tail_oldest_at": row.unsealed_tail_oldest_at,
+        # JSON list of ``{"kind", "label", "id"?, "message"?, "verdict"}`` on tampering; see
+        # ``render._affected_cells``.
+        "affected_identifiers": row.affected_identifiers,
+        "duration_seconds": row.duration_seconds,
+    }
+
+
+def integrity_config(conn: Connection, *, key_configured: bool) -> IntegrityConfig:
+    """Whether integrity is switched on. ``key_configured`` is the server's own
+    ``FIRM_AUDIT_KEY`` presence (passed in, not read here); sealing state comes only from the
+    explicit signed ``kind="activation"`` marker, whose ``sealed_at`` is the activation moment."""
+    since = conn.execute(
+        select(func.min(_seals.c.sealed_at)).where(_seals.c.kind == "activation")
+    ).scalar_one()
+    return IntegrityConfig(
+        key_configured=key_configured, sealing_active=since is not None, sealing_since=since
+    )
+
+
+def _age(now: datetime, value: datetime | None) -> float | None:
+    """Seconds between ``now`` and ``value`` (both timezone-naive UTC per :func:`now_utc`), or
+    ``None`` when ``value`` is absent."""
+    return None if value is None else (now - value).total_seconds()
+
+
+def integrity_state(
+    status: dict[str, Any] | None,
+    config: IntegrityConfig,
+    *,
+    now: datetime | None = None,
+    verify_max_age: float = DEFAULT_VERIFY_MAX_AGE,
+    anchor_max_age: float = DEFAULT_ANCHOR_MAX_AGE,
+) -> IntegrityState:
+    """Fold the status row + config into a display state (pure — no I/O, so the whole state
+    table is unit-tested directly). Priority: proven tampering dominates everything; then the
+    "configured but never ran" vs "not configured" split on ``config`` (never on whether a status
+    row exists); then verdict plus the liveness/anchor staleness that forces amber regardless of
+    the stored verdict (a dead verify cron cannot record its own death)."""
+    now = now or now_utc()
+    configured = config.key_configured or config.sealing_active
+
+    def make(state: str, tone: str, escalate: bool, causes: tuple[str, ...] = ()) -> IntegrityState:
+        return IntegrityState(
+            state, tone, escalate, causes, status, config, verify_max_age, anchor_max_age
+        )
+
+    if status is None:
+        return (
+            make("never_ran", "warn", True)
+            if configured
+            else make("not_configured", "neutral", False)
+        )
+
+    if status["outcome"] == "tampered" or status["tampered_count"]:
+        return make("tampered", "danger", True)
+
+    # Liveness / staleness — these force amber even over a stored ``ok`` (design "Staleness").
+    causes: list[str] = []
+    ran_age = _age(now, status["ran_at"])
+    if ran_age is not None and ran_age > verify_max_age:
+        causes.append("stale")
+    tail_age = _age(now, status["unsealed_tail_oldest_at"])
+    if tail_age is not None and tail_age > verify_max_age:
+        causes.append("sealer_stalled")
+    anchor_age = _age(now, status["newest_anchor_at"])
+    # anchor-absent-by-design (``anchor_configured`` False) never reads as "stale" (review D22).
+    if status["anchor_configured"] and anchor_age is not None and anchor_age > anchor_max_age:
+        causes.append("anchor_stale")
+    if status["warning_count"]:
+        causes.append("verify_warnings")
+
+    if status["outcome"] == "error":
+        # ERROR (verify itself failed, e.g. unknown key_id) is amber and counts toward liveness
+        # so it escalates; red stays reserved for proven tampering (design D24).
+        return make("error", "warn", True, tuple(causes))
+    if status["outcome"] == "warning" or causes:
+        # Only a stalled pipeline (verify not running, sealer behind) is "amber liveness" and
+        # escalates to the overview; a verifier / stale-anchor warning stays on the audit tab
+        # (review D23).
+        liveness = bool({"stale", "sealer_stalled"}.intersection(causes))
+        return make("warning", "warn", liveness, tuple(causes))
+    return make("ok", "ok", False)

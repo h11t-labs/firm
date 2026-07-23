@@ -317,7 +317,7 @@ def mark_invoice_paid(engine, invoice, user, amount):
 
 ```python
 # standalone (or a separate audit database) — AuditLog manages its own connection
-audit = AuditLog(database_url="sqlite:///audit.db")   # create_schema=True auto-creates firm_audits
+audit = AuditLog(database_url="sqlite:///audit.db")   # create_schema=True auto-creates firm_audit_events
 
 audit.record("user.login", actor=("User", 7), context={"ip": "127.0.0.1"})
 audit.record(

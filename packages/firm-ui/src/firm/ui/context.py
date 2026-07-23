@@ -26,7 +26,7 @@ from firm.queue import schema as queue_schema
 _QUEUE_TABLE = queue_schema.jobs.name
 _CACHE_TABLE = cache_schema.entries.name
 _CHANNEL_TABLE = channel_schema.messages.name
-_AUDIT_TABLE = audit_schema.audits.name
+_AUDIT_TABLE = audit_schema.audit_events.name
 
 
 def _has_table(engine: Engine, table: str) -> bool:

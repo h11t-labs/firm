@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 from click.testing import CliRunner
 from sqlalchemy import update
@@ -100,8 +101,8 @@ def test_prune_with_max_age_flag_deletes_old_rows(db_url: str) -> None:
     audit.record("old")
     with transaction(audit.engine) as conn:
         conn.execute(
-            update(schema.audits)
-            .where(schema.audits.c.action == "old")
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action == "old")
             .values(created_at=now_utc() - timedelta(hours=2))
         )
     audit.close()
@@ -109,6 +110,54 @@ def test_prune_with_max_age_flag_deletes_old_rows(db_url: str) -> None:
     result = CliRunner().invoke(main, ["prune", "--database-url", db_url, "--max-age", "3600"])
     assert result.exit_code == 0
     assert "pruned 1 events" in result.output
+
+
+def test_prune_prints_skipped_unsealed_count(db_url: str, monkeypatch) -> None:
+    secret = "cli-prune-test-key-padding-0123456789"  # noqa: S105  (throwaway)
+    audit = AuditLog(database_url=db_url, mac_key=secret, grace=0.0)
+    audit.sealer.run_once()  # explicit activation on an empty log
+    audit.record("sealed")
+    audit.sealer.run_once()
+    audit.record("old.a")
+    audit.record("old.b")
+    with transaction(audit.engine) as conn:
+        conn.execute(
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action.in_(["old.a", "old.b"]))
+            .values(created_at=now_utc() - timedelta(hours=2))
+        )
+    audit.close()
+    monkeypatch.setenv("FIRM_AUDIT_KEY", secret)
+
+    result = CliRunner().invoke(main, ["prune", "--database-url", db_url, "--max-age", "3600"])
+    assert result.exit_code == 0
+    assert "skipped" in result.output
+    assert "UNSEALED" in result.output
+
+
+def test_prune_reports_refused_tampered_range(db_url: str, monkeypatch, at_time) -> None:
+    secret = "cli-refuse-test-key-padding-0123456789"  # noqa: S105  (throwaway)
+    audit = AuditLog(database_url=db_url, mac_key=secret, grace=0.0)
+    audit.sealer.run_once()
+    old = now_utc() - timedelta(hours=2)
+    with at_time(old):
+        audit.record("sealed")
+    with patch("firm.audit.sealing.now_utc", lambda: old):
+        audit.sealer.run_once()
+    # Tamper the sealed row's content with a plain UPDATE (row_mac column left untouched).
+    with transaction(audit.engine) as conn:
+        conn.execute(
+            update(schema.audit_events)
+            .where(schema.audit_events.c.action == "sealed")
+            .values(action="sealed.TAMPERED")
+        )
+    audit.close()
+    monkeypatch.setenv("FIRM_AUDIT_KEY", secret)
+
+    result = CliRunner().invoke(main, ["prune", "--database-url", db_url, "--max-age", "3600"])
+    assert result.exit_code == 0
+    assert "pruned 0 events" in result.output
+    assert "REFUSED" in result.output
 
 
 def test_env_var_supplies_url(db_url: str, monkeypatch) -> None:
@@ -123,3 +172,56 @@ def test_missing_url_is_a_usage_error(monkeypatch) -> None:
     monkeypatch.delenv("FIRM_AUDIT_DATABASE_URL", raising=False)
     result = CliRunner().invoke(main, ["stats"])
     assert result.exit_code != 0
+
+
+def test_anchor_compact_writes_signed_checkpoint_and_preserves_verification(
+    db_url: str, tmp_path, monkeypatch
+) -> None:
+    secret = "cli-anchor-compact-key-padding-0123456789"  # noqa: S105
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=secret,
+        grace=0.0,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+    )
+    try:
+        audit.sealer.run_once()
+        audit.record("covered")
+        assert audit.sealer.run_once() == 1
+        assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+    monkeypatch.setenv("FIRM_AUDIT_KEY", secret)
+    result = CliRunner().invoke(
+        main,
+        [
+            "anchor-compact",
+            "--database-url",
+            db_url,
+            "--anchor",
+            str(anchor),
+        ],
+    )
+    assert result.exit_code == 0
+    # The CLI compacts with its default grace (60s), so the just-written seal is still young: its
+    # coverage is not yet settled (checkpoint coverage=0) but its SEAL line is RETAINED so the
+    # coverage is not lost — it will fold on a later compaction once it ages past grace.
+    assert "coverage=0, floor=0" in result.output
+    lines = anchor.read_text(encoding="utf-8").splitlines()
+    assert [line.split()[1] for line in lines] == ["CHECKPOINT", "SEAL"]
+
+    verifier = AuditLog(
+        database_url=db_url,
+        create_schema=False,
+        mac_key=secret,
+        grace=0.0,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+    )
+    try:
+        assert verifier.verify(full=True).outcome == "ok"
+    finally:
+        verifier.close()

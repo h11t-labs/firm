@@ -19,10 +19,11 @@ from urllib.parse import quote, urlencode
 from jinja2 import Environment, PackageLoader, select_autoescape
 from jinjax import Catalog
 from jinjax.jinjax import JinjaX
-from markupsafe import Markup
+from markupsafe import Markup, escape
 
 from firm._core.clock import now_utc
 
+from .audit_queries import IntegrityState, row_status
 from .queries import STATES
 
 _PART_NAV = {
@@ -48,6 +49,14 @@ _ICONS = {
     "sun": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     "moon": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     "monitor": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    # Shield state marks for the tamper-evidence panel (stroke = currentColor, tinted per state
+    # by the .integrity-icon medallion). A crisp icon beats the emoji glyphs that render
+    # inconsistently across platforms; the verdict word travels alongside, so meaning never
+    # rides on the icon (or colour) alone.
+    "shield-check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="m8.8 11.3 2.2 2.2 4.2-4.5"/></svg>',
+    "shield-alert": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="M12 7.7v3.6"/><path d="M12 14.4h.01"/></svg>',
+    "shield-x": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="m10 9.4 4 4.4M14 9.4l-4 4.4"/></svg>',
+    "shield": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/></svg>',
 }
 
 # The auto-refresh interval choices, in display order; 0 means off. Shared by the header control
@@ -420,6 +429,7 @@ def overview_page(
     processes: list[dict[str, Any]],
     recurring: list[dict[str, Any]],
     *,
+    integrity: IntegrityState | None = None,
     refresh: int = 5,
     request_path: str = "/",
     theme: str = "system",
@@ -449,6 +459,7 @@ def overview_page(
         refresh=refresh,
         request_path=request_path,
         theme=theme,
+        integrity_view=_integrity_view(integrity),
         cards=cards,
         counts=counts,
         queue_rows=queue_rows,
@@ -753,12 +764,262 @@ def _sort_columns(
     return columns
 
 
+# -- integrity (tamper-evidence) panel ---------------------------------------------------------
+# :func:`audit_queries.integrity_state` decides *which* of the six states applies; this section
+# turns that state into the ready-made strings/markup the <Integrity/> component renders (design
+# review D22-D25). Every state carries a shield icon + a word, never colour alone, so the verdict
+# still reads with images off (the word) and without colour vision (icon shape + word).
+_INTEGRITY_ICON = {
+    "ok": "shield-check",
+    "warning": "shield-alert",
+    "error": "shield-alert",
+    "tampered": "shield-x",
+    "never_ran": "shield-alert",
+    "not_configured": "shield",  # plain outline — neutral, no alarm
+}
+# The status word paired with the "Integrity" label, e.g. "Integrity  OK". TAMPERED stays
+# upper-case: it is the one alarm state, rendered as a banner where the shout is the point.
+_INTEGRITY_WORD = {
+    "ok": "OK",
+    "warning": "Warning",
+    "error": "Error",
+    "tampered": "TAMPERED",
+    "never_ran": "Never verified",
+    "not_configured": "Not configured",
+}
+# The panel's tone class drives both the background tint and the medallion colour; the neutral
+# case (legacy / not-configured) is named explicitly so it reads as "no alarm", not "unstyled".
+_INTEGRITY_STRIP = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": "neutral"}
+
+# The tamper-evidence docs (design/threat model + the "what to do when it's red" runbook).
+_TAMPER_DOCS_URL = "https://github.com/h11t-labs/firm/blob/main/docs/audit/tamper-evidence.md"
+
+#: Hard cap on the ``affected_identifiers`` JSON this page will parse (mirrors
+#: :data:`firm.ui.audit_queries._MAX_AFFECTED_JSON`). The verifier bounds the column to a handful of
+#: small findings, so a larger blob is corrupt or hostile — rejected before ``json.loads`` and paired
+#: with a ``RecursionError`` guard so a deeply-nested payload cannot 500 every render (Bug #3).
+_MAX_AFFECTED_JSON = 64 * 1024
+
+
+def _cause_text(
+    cause: str, status: dict[str, Any], verify_max_age: float, anchor_max_age: float
+) -> str:
+    """The itemized WARNING/ERROR line for one machine cause token — distinct prose per cause so
+    the amber strip never reads as one undifferentiated colour (design D22)."""
+    if cause == "stale":
+        return (
+            f"verify last ran {_reltime(status['ran_at'])} "
+            f"(expected within {_humanize(verify_max_age)})"
+        )
+    if cause == "sealer_stalled":
+        return (
+            f"sealer stalled — oldest unsealed row {_reltime(status['unsealed_tail_oldest_at'])} "
+            f"({_num(status['unsealed_tail_count'])} rows)"
+        )
+    if cause == "anchor_stale":
+        return (
+            f"anchor stale — newest anchor {_reltime(status['newest_anchor_at'])} "
+            f"(expected within {_humanize(anchor_max_age)})"
+        )
+    if cause == "verify_warnings":
+        n = status["warning_count"]
+        count = f"{_num(n)} warning{'' if n == 1 else 's'}"
+        return f"verify reported {count} — check sealer and anchor liveness"
+    return cause
+
+
+def _affected_cells(raw: str | None) -> list[dict[str, Any]]:
+    """Parse the verifier's ``affected_identifiers`` — a JSON list of
+    ``{"kind", "label", "id"?, "message"?, "verdict"?}`` — into render-ready rows. Each row carries a
+    ``chip`` (a link into ``/audit/<id>`` when the finding names a specific row id, else the plain
+    label) and the finding's human ``message`` (the "what/why" the banner surfaces). Malformed or
+    absent data degrades to a single plain chip rather than hiding the finding; oversized or
+    deeply-nested data (a DB-write attacker's DoS attempt — this render runs on every request)
+    degrades to one neutral chip without echoing the blob or raising (Bug #3)."""
+    if not raw:
+        return []
+    if len(raw) > _MAX_AFFECTED_JSON:
+        return [{"kind": "affected", "chip": "integrity findings unavailable", "message": ""}]
+    try:
+        items = json.loads(raw)
+    except RecursionError:
+        return [{"kind": "affected", "chip": "integrity findings unavailable", "message": ""}]
+    except (ValueError, TypeError):
+        return [{"kind": "affected", "chip": raw, "message": ""}]
+    if not isinstance(items, list):
+        items = [items]
+    cells: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            kind = str(item.get("kind", "affected"))
+            label = str(item.get("label", ""))
+            message = str(item["message"]) if item.get("message") else ""
+            id_ = item.get("id")
+            chip: Any = (
+                Markup(f'<a href="/audit/{id_}">{escape(label)}</a>')
+                if isinstance(id_, int)
+                else label
+            )
+            cells.append({"kind": kind, "chip": chip, "message": message})
+        else:
+            cells.append({"kind": "affected", "chip": str(item), "message": ""})
+    return cells
+
+
+def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
+    """Build the <Integrity/> component's ready-made data from a derived state, or ``None`` when
+    there is no audit part to report on. The component stays dumb: every string, link, and colour
+    token it renders is decided here."""
+    if state is None:
+        return None
+    s = state.status
+    view: dict[str, Any] = {
+        "state": state.state,
+        "strip_class": _INTEGRITY_STRIP[state.tone],
+        "icon": Markup(_ICONS[_INTEGRITY_ICON[state.state]]),
+        "word": _INTEGRITY_WORD[state.state],
+        "escalate": state.escalate,
+        "role_alert": state.state == "tampered",
+        "layout": "banner" if state.state == "tampered" else "strip",
+        "when": None,
+        "when_label": "",
+        "detail": "",
+        "facts": [],
+        "cause_lines": [],
+        "headline": "",
+        "meaning": "",
+        "findings": [],
+        "next_step": None,
+    }
+
+    if state.state == "not_configured":
+        view["detail"] = "set FIRM_AUDIT_KEY to enable tamper-evidence"
+        return view
+
+    if state.state == "never_ran":
+        since = state.config.sealing_since
+        if since is not None:
+            view["detail"] = (
+                f"key + sealing active {_reltime(since)} — schedule a firm-audit verify cron"
+            )
+        else:
+            view["detail"] = (
+                "key configured — enable sealing, then schedule a firm-audit verify cron"
+            )
+        return view
+
+    assert s is not None  # ok/warning/error/tampered always carry a status row
+
+    if state.state == "tampered":
+        n = s["tampered_count"]
+        view["when"] = _when(s["ran_at"])
+        view["when_label"] = "first detected"
+        view["headline"] = f"{_num(n)} finding{'' if n == 1 else 's'}"
+        # What it means, in plain language — the framing sentence, true for every tamper class
+        # (modify / delete / insert / invalid seal or marker), kept as the lead so a non-expert
+        # reads the category first.
+        view["meaning"] = (
+            "Sealed audit data no longer matches its signatures — it was modified, deleted, or "
+            "inserted after being recorded."
+        )
+        # One line per finding: the affected record (a chip linking into /audit/<id> when the
+        # verifier named a row id) next to its plain-language reason. A single list, so nothing is
+        # said twice — no separate pill row echoing the same labels. Absent per-finding data leaves
+        # the generic ``meaning`` above to stand alone.
+        view["findings"] = [
+            {"ref": c["chip"], "why": c["message"]}
+            for c in _affected_cells(s["affected_identifiers"])
+        ]
+        # What to do: verify it yourself, and don't disturb the evidence.
+        view["next_step"] = Markup(
+            '<span class="integrity-verify">Verify it yourself: '
+            "<code>firm-audit verify --full</code></span>"
+            '<span class="integrity-caution">Keep the database unchanged — it is the evidence.'
+            "</span>"
+            f'<a href="{_TAMPER_DOCS_URL}">read the runbook</a>'
+        )
+        return view
+
+    if state.state == "ok":
+        # Distinct facts, each with its own label so they don't blur into one grey run-on,
+        # ordered by what matters most at a glance: is the check fresh, how complete is its
+        # coverage, is the anchor current, how much recent data isn't sealed yet.
+        facts: list[dict[str, Any]] = [{"label": "verified", "value": _when(s["ran_at"])}]
+        if s["last_full_coverage_at"] is not None:
+            cov = _reltime(s["last_full_coverage_at"])
+        else:
+            cov = "pending"
+        facts.append({"label": "full coverage", "value": cov})
+        if s["anchor_configured"]:
+            facts.append({"label": "anchor", "value": _reltime(s["newest_anchor_at"])})
+        facts.append({"label": "unsealed tail", "value": f"{_num(s['unsealed_tail_count'])} rows"})
+        view["facts"] = facts
+        return view
+
+    view["when"] = _when(s["ran_at"])
+    view["when_label"] = "verified"
+
+    # warning / error: itemize the causes; ERROR leads with the failure message itself (D24).
+    items: list[str] = []
+    if state.state == "error" and s["error_message"]:
+        items.append(f"verify failed: {s['error_message']}")
+    items.extend(
+        _cause_text(token, s, state.verify_max_age, state.anchor_max_age) for token in state.causes
+    )
+    view["cause_lines"] = items
+    return view
+
+
+# -- per-row tamper-evidence status ------------------------------------------------------------
+# :func:`audit_queries.row_status` decides a row's status token; this maps it to the small tinted
+# shield the events table / detail page shows. Icon shape + tooltip word both carry the meaning, so
+# it never rides on colour alone. Tone classes reuse the table's --ok/--warn/--danger/--text-3.
+_ROW_STATUS = {
+    #  token          icon            tone      word
+    "sealed": ("shield-check", "ok", "Sealed & verified"),
+    "unsealed": ("shield-alert", "warn", "Signed, not yet sealed"),
+    "unprotected": ("shield", "muted", "Unprotected — recorded before tamper-evidence"),
+    "tampered": ("shield-x", "danger", "Tampered — failed verification"),
+    # A sealed row on a run whose tamper findings were truncated: it is within a seal, but the run
+    # flagged more tampered rows than it listed ids for, so the table cannot vouch for THIS row
+    # (Bug #8). Warn tone + neutral shield — honest "sealed, not individually verified", not green.
+    "unverified": (
+        "shield-alert",
+        "warn",
+        "Sealed, but this run couldn't verify it (findings truncated)",
+    ),
+}
+# Shorter words for the detail page's integrity cell, where the icon already sits beside a label.
+_ROW_STATUS_WORD = {
+    "sealed": "Sealed & verified",
+    "unsealed": "Signed, not yet sealed",
+    "unprotected": "Unprotected",
+    "tampered": "Tampered",
+    "unverified": "Sealed, not individually verified",
+}
+
+
+def _row_status_icon(status: str) -> Markup:
+    """The bare tinted shield for a table cell — its ``title`` carries the verdict word."""
+    icon, tone, tooltip = _ROW_STATUS[status]
+    return Markup('<span class="row-status {}" title="{}">{}</span>').format(
+        tone, tooltip, Markup(_ICONS[icon])
+    )
+
+
+def _row_status_cell(status: str) -> Markup:
+    """The detail page's integrity value: the tinted shield followed by its word."""
+    return Markup("{} {}").format(_row_status_icon(status), _ROW_STATUS_WORD[status])
+
+
 def audit_page(
     parts: list[str],
     stats: dict[str, Any],
     rows: list[dict[str, Any]],
     filters: dict[str, str],
     *,
+    integrity: IntegrityState | None = None,
+    row_ctx: dict[str, Any] | None = None,
     total: int = 0,
     page: int = 1,
     per_page: int = AUDIT_DEFAULT_PER_PAGE,
@@ -773,11 +1034,17 @@ def audit_page(
         _card("actions", _num(stats["actions"])),
         _card("last event", _reltime(stats["last_event_at"])),
     ]
+    # The per-row status column only appears when tamper-evidence is actually in use; a plain
+    # audit log adds no column, no icon (audit_queries.row_status returns None when inactive).
+    integrity_active = bool(row_ctx and row_ctx["active"])
     for r in rows:
         r["subject_display"] = _ref_display(r["subject_type"], r["subject_id"], r["subject_label"])
         r["subject_filter"] = _ref_filter(r["subject_type"], r["subject_id"])
         r["actor_display"] = _ref_display(r["actor_type"], r["actor_id"], r["actor_label"])
         r["actor_filter"] = _ref_filter(r["actor_type"], r["actor_id"])
+        if row_ctx is not None and row_ctx["active"]:
+            status = row_status(r, row_ctx)  # never None here (row_ctx active)
+            r["status_icon"] = _row_status_icon(status) if status else Markup("")
     return _render(
         "audit.html",
         title="Audit",
@@ -786,6 +1053,8 @@ def audit_page(
         refresh=refresh,
         request_path=request_path,
         theme=theme,
+        integrity_view=_integrity_view(integrity),
+        integrity_active=integrity_active,
         cards=cards,
         rows=rows,
         filters=filters,
@@ -806,7 +1075,12 @@ def audit_page(
 
 
 def audit_detail_page(
-    parts: list[str], event: dict[str, Any], *, theme: str = "system", request_path: str = ""
+    parts: list[str],
+    event: dict[str, Any],
+    *,
+    row_ctx: dict[str, Any] | None = None,
+    theme: str = "system",
+    request_path: str = "",
 ) -> str:
     subject = _ref_display(event["subject_type"], event["subject_id"], event["subject_label"])
     actor = _ref_display(event["actor_type"], event["actor_id"], event["actor_label"])
@@ -817,6 +1091,11 @@ def audit_detail_page(
         ("correlation id", event["correlation_id"] if event["correlation_id"] else _dash()),
         ("recorded", _when(event["created_at"])),
     ]
+    # The integrity cell only appears when tamper-evidence is in use (same gate as the table).
+    if row_ctx is not None and row_ctx["active"]:
+        status = row_status(event, row_ctx)
+        if status is not None:
+            cells.append(("integrity", _row_status_cell(status)))
     return _render(
         "audit_detail.html",
         title=f"Event #{event['id']}",

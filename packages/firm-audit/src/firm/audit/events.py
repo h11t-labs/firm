@@ -15,9 +15,67 @@ from sqlalchemy import Connection, select
 
 from .._core.clock import now_utc
 from . import schema
+from .integrity import Key, new_ulid, row_mac
 from .serialization import dump_json, load_json
 
-_audits = schema.audits
+_audits = schema.audit_events
+
+#: The scalar columns that are ``VARCHAR(n)`` on MySQL — a value longer than the column width is
+#: silently truncated under a non-strict ``sql_mode``, leaving the *stored* bytes different
+#: from the *signed* bytes and make an untouched row verify as TAMPERED. Each mapped to its width,
+#: read from the schema (not hard-coded) so the guard tracks the column definition if it is widened.
+_VARCHAR_SIGNED_COLUMNS = (
+    "action",
+    "subject_type",
+    "subject_id",
+    "subject_label",
+    "actor_type",
+    "actor_id",
+    "actor_label",
+    "correlation_id",
+)
+#: ``name -> max character width`` for the columns above, resolved once from the schema. ``getattr``
+#: keeps the type checker happy (only ``String`` carries ``length``) and skips any non-length type.
+_VARCHAR_LIMITS: dict[str, int] = {
+    name: length
+    for name in _VARCHAR_SIGNED_COLUMNS
+    if isinstance(length := getattr(_audits.c[name].type, "length", None), int)
+}
+
+#: The JSON payload columns are ``TEXT``; MySQL ``TEXT`` holds at most 65535 **bytes** and silently
+#: truncates a longer value under a non-strict ``sql_mode``. ``Text`` carries no length in the
+#: SQLAlchemy column definition, so this dialect limit lives here as a constant.
+_JSON_SIGNED_COLUMNS = ("data", "changes", "context")
+_TEXT_MAX_BYTES = 65535
+
+
+def _validate_signed_lengths(values: dict[str, Any]) -> None:
+    """Reject a value MySQL would silently truncate, *before* the insert (fail loud, not silent).
+
+    Runs only on the signed write path (a key is configured): under tamper-evidence a truncated
+    value makes the untouched row verify as TAMPERED, so a length that would be clipped is a hard
+    :class:`ValueError` at ``record()`` time rather than silent corruption discovered later by a
+    false alarm. The un-keyed path never calls this — its behavior stays byte-identical to the
+    pre-tamper-evidence insert (a non-strict MySQL truncates as it always did, no MAC to break).
+    """
+    for name, limit in _VARCHAR_LIMITS.items():
+        value = values.get(name)
+        if value is not None and len(value) > limit:
+            raise ValueError(
+                f"audit {name} is {len(value)} characters but the {name} column holds at most "
+                f"{limit}; a longer value is silently truncated under a non-strict MySQL and would "
+                "make the row verify as TAMPERED. Shorten it (put large detail in data=)."
+            )
+    for name in _JSON_SIGNED_COLUMNS:
+        value = values.get(name)
+        if value is not None:
+            nbytes = len(value.encode("utf-8"))
+            if nbytes > _TEXT_MAX_BYTES:
+                raise ValueError(
+                    f"audit {name} JSON is {nbytes} bytes but MySQL TEXT holds at most "
+                    f"{_TEXT_MAX_BYTES}; a longer payload is silently truncated under a non-strict "
+                    "MySQL and would make the row verify as TAMPERED. Store less, or split it."
+                )
 
 
 class Ref(NamedTuple):
@@ -94,12 +152,47 @@ def append(
     changes: dict[str, Any] | None = None,
     correlation_id: str | None = None,
     context: dict[str, Any] | None = None,
+    key: Key | None = None,
 ) -> None:
-    """Insert one audit row on ``conn``. The sole mutating call on the write path."""
+    """Insert one audit row on ``conn``. The sole mutating call on the write path.
+
+    Without ``key`` this is exactly the pre-tamper-evidence insert: the same columns, one
+    statement, no extra reads or round-trips, ``entry_id``/``row_mac``/``key_id`` left NULL.
+
+    With ``key`` (Layer 1) the writer additionally, still in this one INSERT and without any
+    coordination: mints a ULID ``entry_id``, captures ``created_at`` **once** and feeds that
+    same value to both the MAC input and the row (two ``now_utc()`` calls would differ by
+    microseconds and make the row verify as TAMPERED), and computes ``row_mac`` over the
+    canonical row. The JSON payloads are serialized once and fed verbatim to both the MAC and
+    the insert, so the signed bytes are exactly the bytes stored.
+    """
     subject_type, subject_id, subject_label = _ref(subject)
     actor_type, actor_id, actor_label = _ref(actor)
-    conn.execute(
-        _audits.insert().values(
+    data_json = dump_json(data)
+    changes_json = dump_json(changes)
+    context_json = dump_json(context)
+    values: dict[str, Any] = {
+        "action": action,
+        "subject_type": subject_type,
+        "subject_id": subject_id,
+        "subject_label": subject_label,
+        "actor_type": actor_type,
+        "actor_id": actor_id,
+        "actor_label": actor_label,
+        "correlation_id": correlation_id,
+        "data": data_json,
+        "changes": changes_json,
+        "context": context_json,
+        "created_at": now_utc(),
+    }
+    if key is not None:
+        _validate_signed_lengths(values)
+        entry_id = new_ulid(values["created_at"])
+        values["entry_id"] = entry_id
+        values["key_id"] = key.id
+        values["row_mac"] = row_mac(
+            key,
+            entry_id=entry_id,
             action=action,
             subject_type=subject_type,
             subject_id=subject_id,
@@ -108,12 +201,12 @@ def append(
             actor_id=actor_id,
             actor_label=actor_label,
             correlation_id=correlation_id,
-            data=dump_json(data),
-            changes=dump_json(changes),
-            context=dump_json(context),
-            created_at=now_utc(),
+            data=data_json,
+            changes=changes_json,
+            context=context_json,
+            created_at=values["created_at"],
         )
-    )
+    conn.execute(_audits.insert().values(**values))
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:

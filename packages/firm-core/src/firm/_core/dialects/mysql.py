@@ -23,6 +23,9 @@ class MysqlDialect(Dialect):
     def with_skip_locked(self, stmt: Select) -> Select:
         return stmt.with_for_update(skip_locked=True)
 
+    def with_row_lock(self, stmt: Select) -> Select:
+        return stmt.with_for_update()
+
     def upsert(
         self,
         table: Table,

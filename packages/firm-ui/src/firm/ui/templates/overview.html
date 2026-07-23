@@ -1,6 +1,9 @@
 {% extends "layout.html" %}
 {% block content %}
 <h1>Overview</h1>
+{# Integrity escalation (design D23): a TAMPERED or amber-liveness state surfaces here too, so the
+   alarm can't hide behind the audit tab; the calm OK strip stays audit-only. #}
+{% if integrity_view and integrity_view.escalate %}<Integrity view={{ integrity_view }} />{% endif %}
 <div class="cards">
 {% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
 </div>

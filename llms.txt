@@ -36,7 +36,7 @@ Not a Solid port — an original firm module. Record who did what, to what, in t
 domain object, a `("Type", id)` tuple, a bare `"label"` role string, or a `Ref(type, id, name)` —
 type and id are each optional.
 
-- [Overview](docs/audit/overview.md) · [Getting started](docs/audit/getting-started.md) · [Retention & querying](docs/audit/retention-and-querying.md) · [Configuration](docs/audit/configuration.md) · [CLI](docs/audit/cli.md) · [Internals](docs/audit/internals.md)
+- [Overview](docs/audit/overview.md) · [Getting started](docs/audit/getting-started.md) · [Retention & querying](docs/audit/retention-and-querying.md) · [Tamper-evidence](docs/audit/tamper-evidence.md) · [Configuration](docs/audit/configuration.md) · [CLI](docs/audit/cli.md) · [Internals](docs/audit/internals.md)
 
 ## Integration & operations
 

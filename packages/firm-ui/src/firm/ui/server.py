@@ -7,6 +7,7 @@ route is guarded by whether that part (queue / cache / channel) is enabled on th
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import traceback
@@ -15,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from typing import cast
 from urllib.parse import parse_qs, unquote, urlsplit
+
+from sqlalchemy.engine import Connection
 
 from firm._core.clock import now_utc
 
@@ -33,6 +36,10 @@ _THEME_VALID = frozenset(value for value, _, _ in render.THEME_OPTIONS)
 _PREF_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year — refresh + theme preferences persist
 # Dashboard POSTs carry at most a tiny settings form; anything bigger is abuse of the buffer.
 _MAX_BODY_BYTES = 1 << 20
+# Whether audit tamper-evidence is configured is read from *this* process's environment — the
+# server-context signal that tells "configured but never verified" apart from a plain no-key
+# deployment (design D22). A truthy value is enough; the writer validates the key's length.
+_AUDIT_KEY_ENV = "FIRM_AUDIT_KEY"
 
 # Read once at import time -- the dashboard is a short-lived local process, not a place where
 # hot-reloading the stylesheet from disk on every request would buy anything.
@@ -336,6 +343,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._server_error(dash, exc)
 
+    def _integrity(self, conn: Connection) -> audit_queries.IntegrityState:
+        """Derive the tamper-evidence panel's state from an audit connection (shared with the
+        page's own query so the panel costs no extra round-trip). ``key_configured`` comes from
+        this process's ``FIRM_AUDIT_KEY``."""
+        key_configured = bool(os.environ.get(_AUDIT_KEY_ENV))
+        status = audit_queries.verify_status_row(conn)
+        config = audit_queries.integrity_config(conn, key_configured=key_configured)
+        return audit_queries.integrity_state(status, config, now=now_utc())
+
     # -- pages ---------------------------------------------------------------------------------
 
     def _landing(self) -> None:
@@ -355,6 +371,12 @@ class Handler(BaseHTTPRequestHandler):
         dash = self._dash
         assert dash.queue is not None  # guarded by the route check before this is called
         now = now_utc()
+        # The integrity strip escalates onto the overview (D23) only when the audit part is
+        # present; its data lives in the audit database, so it needs its own connection.
+        integrity = None
+        if dash.audit is not None:
+            with dash.audit.connect() as audit_conn:
+                integrity = self._integrity(audit_conn)
         with dash.queue.engine.connect() as conn:
             body = render.overview_page(
                 dash.parts,
@@ -362,6 +384,7 @@ class Handler(BaseHTTPRequestHandler):
                 queries.queue_rows(conn, now),
                 queries.processes(conn, now),
                 queries.recurring(conn),
+                integrity=integrity,
                 refresh=self._refresh_seconds("queue"),
                 request_path=self.path,
                 theme=self._theme(),
@@ -501,6 +524,8 @@ class Handler(BaseHTTPRequestHandler):
                     "actor": actor or "",
                     "correlation_id": correlation_id or "",
                 },
+                integrity=self._integrity(conn),
+                row_ctx=audit_queries.row_integrity_context(conn),
                 total=total,
                 page=page,
                 per_page=per_page_n,
@@ -517,12 +542,17 @@ class Handler(BaseHTTPRequestHandler):
         assert dash.audit is not None
         with dash.audit.connect() as conn:
             event = audit_queries.audit_detail(conn, event_id)
+            row_ctx = audit_queries.row_integrity_context(conn) if event is not None else None
         if event is None:
             self._not_found()
         else:
             self._html(
                 render.audit_detail_page(
-                    dash.parts, event, theme=self._theme(), request_path=self.path
+                    dash.parts,
+                    event,
+                    row_ctx=row_ctx,
+                    theme=self._theme(),
+                    request_path=self.path,
                 )
             )
 
