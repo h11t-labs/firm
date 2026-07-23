@@ -18,13 +18,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .._core.clock import now_utc
 from .._core.config import Runtime
 from .._core.poller import InterruptiblePoller
-from . import schema
+from . import enqueue, schema
 from .hooks import HOOKS
 
 try:
@@ -73,18 +73,33 @@ class Scheduler:
                 stale = stale.where(_tasks.c.key.not_in(keys))
             conn.execute(stale)
             for task in self.tasks:
-                exists = conn.execute(select(_tasks.c.id).where(_tasks.c.key == task.key)).first()
-                if exists is None:
-                    conn.execute(
-                        insert(_tasks).values(
-                            key=task.key,
-                            schedule=task.schedule,
-                            class_name=task.job.class_name,
-                            queue_name=task.job.queue_name,
-                            priority=task.job.priority,
-                            static=True,
-                        )
-                    )
+                # Upsert: insert a new key, or update an existing row's mutable columns when the
+                # configured schedule/class/queue/priority has changed. recurring_tasks is a
+                # documented read surface (dashboard/CLI), so a stale row would misreport the
+                # live schedule.
+                mutable = {
+                    "schedule": task.schedule,
+                    "class_name": task.job.class_name,
+                    "queue_name": task.job.queue_name,
+                    "priority": task.job.priority,
+                }
+                existing = conn.execute(
+                    select(
+                        _tasks.c.schedule,
+                        _tasks.c.class_name,
+                        _tasks.c.queue_name,
+                        _tasks.c.priority,
+                    ).where(_tasks.c.key == task.key)
+                ).first()
+                if existing is None:
+                    conn.execute(insert(_tasks).values(key=task.key, static=True, **mutable))
+                elif tuple(existing) != (
+                    task.schedule,
+                    task.job.class_name,
+                    task.job.queue_name,
+                    task.job.priority,
+                ):
+                    conn.execute(update(_tasks).where(_tasks.c.key == task.key).values(**mutable))
 
     def tick(self, at: datetime | None = None) -> int:
         """Enqueue any tasks due for the current period; return how many were enqueued."""
@@ -111,25 +126,48 @@ class Scheduler:
             return False
 
         args_blob = serialize(task.args, task.kwargs)
+        spec = task.job.concurrency
         try:
-            with rt.engine.begin() as conn:
-                inserted = conn.execute(
-                    insert(_jobs).values(
-                        queue_name=task.job.queue_name,
-                        class_name=task.job.class_name,
-                        arguments=args_blob,
-                        priority=task.job.priority,
-                        scheduled_at=run_at,
+            if spec is None:
+                with rt.engine.begin() as conn:
+                    inserted = conn.execute(
+                        insert(_jobs).values(
+                            queue_name=task.job.queue_name,
+                            class_name=task.job.class_name,
+                            arguments=args_blob,
+                            priority=task.job.priority,
+                            scheduled_at=run_at,
+                        )
                     )
-                )
-                primary_key = inserted.inserted_primary_key
-                assert primary_key is not None
-                job_id = primary_key[0]
-                conn.execute(
-                    insert(_ready).values(
-                        job_id=job_id, queue_name=task.job.queue_name, priority=task.job.priority
+                    primary_key = inserted.inserted_primary_key
+                    assert primary_key is not None
+                    job_id = primary_key[0]
+                    conn.execute(
+                        insert(_ready).values(
+                            job_id=job_id,
+                            queue_name=task.job.queue_name,
+                            priority=task.job.priority,
+                        )
                     )
+                    conn.execute(
+                        insert(_rec).values(job_id=job_id, task_key=task.key, run_at=run_at)
+                    )
+                return True
+
+            # Concurrency-limited recurring job: acquire the semaphore and route to ready or
+            # blocked exactly like a normal enqueue (matching solid_queue, where recurring tasks
+            # honor concurrency controls). The serialized begin_claim_tx is required by the
+            # semaphore ops; the recurring_executions unique index still dedupes concurrent
+            # schedulers via the IntegrityError below.
+            key = spec.key_for(task.args, task.kwargs)
+            with rt.dialect.begin_claim_tx(rt.engine) as conn:
+                job_id = enqueue.route_concurrent(
+                    conn, task.job, args_blob, run_at, spec, key, now_utc()
                 )
+                if job_id is None:
+                    # Key was full and the job opted out (on_conflict="discard"): nothing to
+                    # record for this period.
+                    return False
                 conn.execute(insert(_rec).values(job_id=job_id, task_key=task.key, run_at=run_at))
             return True
         except IntegrityError:

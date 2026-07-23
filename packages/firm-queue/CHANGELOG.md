@@ -6,6 +6,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Fixed
+
+- Recurring tasks now honor their job's concurrency controls. A scheduled job with
+  `@job(concurrency={...})` is routed through the same semaphore acquire/block logic as a normal
+  enqueue, stamping `jobs.concurrency_key` and landing in `blocked_executions` when the key is
+  full — previously it was pushed straight to `ready_executions` and ran unbounded.
+- `discard_job` no longer leaks a concurrency slot when a dispatcher promotes the same scheduled
+  job concurrently. The job row is now locked `FOR UPDATE` before reading its state, so discard
+  serializes against the promotion and forfeits the slot deterministically (on SQLite,
+  `BEGIN IMMEDIATE` already serializes writers).
+- `Scheduler.sync_tasks` now upserts: a changed `schedule`/`class_name`/`queue_name`/`priority`
+  for an existing task key updates the stored `recurring_tasks` row instead of leaving it stale.
+- `retry_all_failed` now processes failed jobs in batches (one transaction per chunk) instead of
+  one transaction per job, so "Retry all" over a large backlog no longer fans out into thousands
+  of serial commits.
+
+### Changed
+
+- Documented that recurring cron schedules are evaluated in UTC (unlike solid_queue's
+  timezone-aware fugit schedules).
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the
