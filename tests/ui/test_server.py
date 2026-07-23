@@ -266,6 +266,94 @@ def test_channels_page_and_trim(base_url, seed) -> None:
     assert status == 200
 
 
+# -- post-action flash notices -----------------------------------------------------------------
+
+
+def test_retry_missing_job_shows_nothing_to_retry_notice(base_url, seed) -> None:
+    """A refused retry (the job is not failed / does not exist) must be visibly distinguishable
+    from a successful one — the old code redirected identically either way."""
+    status, body = _post(base_url + "/job/999999/retry")  # nonexistent -> retry() returns False
+    assert status == 200
+    assert "Nothing to retry" in body
+    assert 'class="notice warn"' in body
+
+
+def test_retry_success_shows_retried_notice(base_url, seed) -> None:
+    job_id = seed.failed()
+    status, body = _post(f"{base_url}/job/{job_id}/retry")
+    assert status == 200
+    assert "re-enqueued for retry" in body
+    assert 'class="notice ok"' in body
+
+
+def test_discard_missing_job_shows_nothing_notice(base_url, seed) -> None:
+    status, body = _post(base_url + "/job/999999/discard")
+    assert status == 200
+    assert "Nothing to discard" in body
+    assert 'class="notice warn"' in body
+
+
+def test_retry_all_shows_count_notice(base_url, seed) -> None:
+    for _ in range(3):
+        seed.failed()
+    status, body = _post(base_url + "/failed/retry-all")
+    assert status == 200
+    assert "Re-enqueued 3 failed jobs." in body
+    assert 'class="notice ok"' in body
+
+
+def test_clear_cache_shows_count_notice(base_url, seed) -> None:
+    seed.cache_entry(key=b"a")
+    seed.cache_entry(key=b"b")
+    status, body = _post(base_url + "/cache/clear")
+    assert status == 200
+    assert "Cleared 2 cache entries." in body
+    assert 'class="notice ok"' in body
+
+
+def test_clear_empty_cache_shows_zero_count_as_warning(base_url, seed) -> None:
+    """ "Cleared 0 entries" must not masquerade as a green success — a zero count reads as warn."""
+    status, body = _post(base_url + "/cache/clear")
+    assert status == 200
+    assert "Cleared 0 cache entries." in body
+    assert 'class="notice warn"' in body
+
+
+def test_pause_action_shows_notice(base_url, seed) -> None:
+    seed.ready(queue="default")
+    status, body = _post(base_url + "/queue/default/pause")
+    assert status == 200
+    assert "Queue paused." in body
+
+
+def test_notice_dismiss_link_strips_notice_params(base_url, seed) -> None:
+    seed.cache_entry(key=b"a")
+    status, body = _post(base_url + "/cache/clear")
+    assert status == 200
+    # the dismiss X reloads the page without the notice params (no JS needed)
+    assert 'class="notice-x" href="/cache"' in body
+
+
+def test_unknown_notice_token_renders_no_bar(base_url, seed) -> None:
+    """The token is whitelisted render-side, so a crafted ``?notice=`` value renders nothing —
+    no reflected free text ever reaches the page (XSS discipline)."""
+    status, body = _get(base_url + "/cache?notice=<script>alert(1)</script>&n=9")
+    assert status == 200
+    assert 'class="notice' not in body
+    assert "<script>alert(1)</script>" not in body
+
+
+def test_giant_job_id_returns_404_not_500(base_url) -> None:
+    """A digit run past CPython's int-string limit must 404 cleanly, not 500 with a traceback."""
+    huge = "9" * 5000
+    try:
+        _get(f"{base_url}/job/{huge}")
+    except HTTPError as exc:
+        assert exc.code == 404
+    else:
+        raise AssertionError("expected an HTTP 404")
+
+
 def test_cache_page_size_selector_and_pagination(base_url, seed) -> None:
     for i in range(60):
         seed.cache_entry(key=f"key-{i:02d}".encode())

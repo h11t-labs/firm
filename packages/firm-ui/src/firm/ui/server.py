@@ -88,6 +88,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", location)
         self.end_headers()
 
+    def _redirect_notice(self, location: str, notice: str, count: int | None = None) -> None:
+        """Redirect back to a page carrying a post-action flash. ``location`` is a fixed same-site
+        path (built here, never from the request), ``notice`` a fixed token from the render-side
+        whitelist, and ``count`` an integer — so the landing page can tell a refused/no-op action
+        from a success without ever reflecting request input."""
+        sep = "&" if "?" in location else "?"
+        query = f"notice={notice}"
+        if count is not None:
+            query += f"&n={count}"
+        self._redirect(f"{location}{sep}{query}")
+
     def _server_error(self, dash, exc: BaseException) -> None:
         # Full traceback to stderr for the operator; a generic body for the client — the
         # repr leaked query fragments and paths to anyone who could reach the port.
@@ -174,6 +185,17 @@ class Handler(BaseHTTPRequestHandler):
         return "system"
 
     @staticmethod
+    def _notice(params: dict[str, list[str]]) -> tuple[str | None, int | None]:
+        """The post-action flash carried by ``?notice=<token>[&n=<count>]`` on a page load, if any.
+        The render layer whitelists the token and ignores anything unknown, so this passes the raw
+        value straight through; the count is coerced to a non-negative int or dropped."""
+        notice = params.get("notice", [None])[0]
+        if notice is None:
+            return None, None
+        count = _to_int(params.get("n", [""])[0], -1)
+        return notice, (count if count >= 0 else None)
+
+    @staticmethod
     def _per_page(raw: str | None, default: int) -> int:
         """Validate a ``per_page`` query param against the shared table-size allowlist, falling
         back to ``default`` when it's missing or not one of the offered choices."""
@@ -232,14 +254,18 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         try:
             if parsed.path in ("/", ""):
-                self._landing()
+                self._landing(params)
             elif parsed.path == "/static/style.css":
                 self._static_css()
             elif parsed.path == "/jobs" and dash.queue is not None:
                 state = params.get("state", ["ready"])[0]
                 page = max(1, _to_int(params.get("page", ["1"])[0], 1))
                 self._jobs(
-                    state, page, params.get("queue", [None])[0], params.get("per_page", [None])[0]
+                    state,
+                    page,
+                    params.get("queue", [None])[0],
+                    params.get("per_page", [None])[0],
+                    self._notice(params),
                 )
             elif (match := re.fullmatch(r"/job/(\d+)", parsed.path)) and dash.queue is not None:
                 job_id = _parse_id(match.group(1))
@@ -251,6 +277,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._cache(
                     max(1, _to_int(params.get("page", ["1"])[0], 1)),
                     params.get("per_page", [None])[0],
+                    self._notice(params),
                 )
             elif parsed.path == "/channels" and dash.channel is not None:
                 self._channels(
@@ -258,6 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                     params.get("top_per_page", [None])[0],
                     max(1, _to_int(params.get("page", ["1"])[0], 1)),
                     params.get("per_page", [None])[0],
+                    self._notice(params),
                 )
             elif parsed.path == "/audit" and dash.audit is not None:
                 self._audit(
@@ -310,34 +338,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._set_theme(parse_qs(raw_body.decode("utf-8")))
             elif (m := re.fullmatch(r"/queue/(.+)/pause", path)) and dash.queue is not None:
                 actions.pause(dash.queue, unquote(m.group(1)))
-                self._redirect("/")
+                self._redirect_notice("/", "paused")
             elif (m := re.fullmatch(r"/queue/(.+)/resume", path)) and dash.queue is not None:
                 actions.resume(dash.queue, unquote(m.group(1)))
-                self._redirect("/")
+                self._redirect_notice("/", "resumed")
             elif (m := re.fullmatch(r"/job/(\d+)/retry", path)) and dash.queue is not None:
                 job_id = _parse_id(m.group(1))
                 if job_id is None:
                     self._not_found()
                     return
-                actions.retry(dash.queue, job_id)
-                self._redirect("/jobs?state=failed")
+                ok = actions.retry(dash.queue, job_id)
+                self._redirect_notice("/jobs?state=failed", "retried" if ok else "nothing-to-retry")
             elif (m := re.fullmatch(r"/job/(\d+)/discard", path)) and dash.queue is not None:
                 job_id = _parse_id(m.group(1))
                 if job_id is None:
                     self._not_found()
                     return
-                actions.discard(dash.queue, job_id)
-                self._redirect("/jobs?state=failed")
+                ok = actions.discard(dash.queue, job_id)
+                self._redirect_notice(
+                    "/jobs?state=failed", "discarded" if ok else "nothing-to-discard"
+                )
             elif path == "/failed/retry-all" and dash.queue is not None:
-                actions.retry_all(dash.queue)
-                self._redirect("/jobs?state=failed")
+                n = actions.retry_all(dash.queue)
+                self._redirect_notice("/jobs?state=failed", "retried-all", n)
             elif path == "/cache/clear" and dash.cache is not None:
-                actions.clear_cache(dash.cache)
-                self._redirect("/cache")
+                n = actions.clear_cache(dash.cache)
+                self._redirect_notice("/cache", "cache-cleared", n)
             elif path == "/channels/trim" and dash.channel is not None:
                 server = cast(DashboardServer, self.server)
-                actions.trim_channel(dash.channel, retention=server.channel_trim_retention)
-                self._redirect("/channels")
+                n = actions.trim_channel(dash.channel, retention=server.channel_trim_retention)
+                self._redirect_notice("/channels", "channel-trimmed", n)
             else:
                 self._not_found()
         except Exception as exc:
@@ -354,10 +384,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- pages ---------------------------------------------------------------------------------
 
-    def _landing(self) -> None:
+    def _landing(self, params: dict[str, list[str]]) -> None:
         dash = self._dash
         if dash.queue is not None:
-            self._overview()
+            self._overview(self._notice(params))
         elif dash.cache is not None:
             self._redirect("/cache")
         elif dash.channel is not None:
@@ -367,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._html(render.empty_page(dash.parts, theme=self._theme()))
 
-    def _overview(self) -> None:
+    def _overview(self, notice: tuple[str | None, int | None] = (None, None)) -> None:
         dash = self._dash
         assert dash.queue is not None  # guarded by the route check before this is called
         now = now_utc()
@@ -388,10 +418,19 @@ class Handler(BaseHTTPRequestHandler):
                 refresh=self._refresh_seconds("queue"),
                 request_path=self.path,
                 theme=self._theme(),
+                notice=notice[0],
+                notice_count=notice[1],
             )
         self._html(body)
 
-    def _jobs(self, state: str, page: int, queue: str | None, per_page: str | None) -> None:
+    def _jobs(
+        self,
+        state: str,
+        page: int,
+        queue: str | None,
+        per_page: str | None,
+        notice: tuple[str | None, int | None] = (None, None),
+    ) -> None:
         dash = self._dash
         assert dash.queue is not None
         if state not in queries.STATES:
@@ -413,6 +452,8 @@ class Handler(BaseHTTPRequestHandler):
             refresh=self._refresh_seconds("queue"),
             request_path=self.path,
             theme=self._theme(),
+            notice=notice[0],
+            notice_count=notice[1],
         )
         self._html(body)
 
@@ -430,7 +471,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
 
-    def _cache(self, page: int, per_page: str | None) -> None:
+    def _cache(
+        self,
+        page: int,
+        per_page: str | None,
+        notice: tuple[str | None, int | None] = (None, None),
+    ) -> None:
         dash = self._dash
         assert dash.cache is not None
         per_page_n = self._per_page(per_page, render.CACHE_DEFAULT_PER_PAGE)
@@ -447,11 +493,18 @@ class Handler(BaseHTTPRequestHandler):
                 refresh=self._refresh_seconds("cache"),
                 request_path=self.path,
                 theme=self._theme(),
+                notice=notice[0],
+                notice_count=notice[1],
             )
         self._html(body)
 
     def _channels(
-        self, top_page: int, top_per_page: str | None, page: int, per_page: str | None
+        self,
+        top_page: int,
+        top_per_page: str | None,
+        page: int,
+        per_page: str | None,
+        notice: tuple[str | None, int | None] = (None, None),
     ) -> None:
         dash = self._dash
         assert dash.channel is not None
@@ -475,6 +528,8 @@ class Handler(BaseHTTPRequestHandler):
                 refresh=self._refresh_seconds("channel"),
                 request_path=self.path,
                 theme=self._theme(),
+                notice=notice[0],
+                notice_count=notice[1],
             )
         self._html(body)
 
@@ -562,8 +617,13 @@ _MAX_ID = 2**63 - 1  # BIGINT PKs; a longer digit run can't be a row id
 
 def _parse_id(raw: str) -> int | None:
     """Parse a route id; None for values no BIGINT column can hold (-> 404, not a DBAPI
-    error surfacing as a 500)."""
-    value = int(raw)
+    error surfacing as a 500). A digit run past CPython's int-string limit (>4300 digits) raises
+    ValueError from ``int()`` itself — caught here so a giant ``/job/<many digits>`` is a clean 404,
+    not a 500 with a traceback."""
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
     return value if value <= _MAX_ID else None
 
 

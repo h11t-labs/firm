@@ -21,9 +21,11 @@ def _decode(raw: Any) -> str:
 
 def channel_stats(conn: Connection) -> dict[str, int]:
     total = conn.execute(select(func.count()).select_from(_messages)).scalar() or 0
-    distinct = (
-        conn.execute(select(func.count(func.distinct(_messages.c.channel_hash)))).scalar() or 0
-    )
+    # Count DISTINCT raw ``channel``, matching how ``channel_top`` GROUPs BY ``channel`` — this is
+    # the pager total for the busiest-channels table, so the two must agree on the key or the last
+    # page shows fewer rows than the count promised (channel_hash can collide, over-merging distinct
+    # channels into one bucket). The raw-``channel`` index keeps the DISTINCT scan index-friendly.
+    distinct = conn.execute(select(func.count(func.distinct(_messages.c.channel)))).scalar() or 0
     return {"messages": total, "channels": distinct}
 
 

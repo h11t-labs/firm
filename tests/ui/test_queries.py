@@ -81,6 +81,60 @@ def test_queue_rows_reports_size_and_paused(runtime, seed) -> None:
     assert rows["default"]["paused"] is False
 
 
+def test_queue_rows_includes_paused_queue_with_zero_ready(runtime, seed) -> None:
+    """A paused queue that has no ready executions still gets a row (size 0) — the paused-name
+    merge must survive the single-query rewrite, not just queues that appear in the grouped scan."""
+    from firm.queue import queues
+
+    seed.ready(queue="default")
+    queues.pause(runtime, "drained")  # paused, but never had ready work
+    with runtime.engine.connect() as conn:
+        rows = {r["name"]: r for r in queries.queue_rows(conn, now_utc())}
+    assert rows["drained"]["size"] == 0
+    assert rows["drained"]["paused"] is True
+    assert rows["drained"]["latency"] == 0.0
+    assert rows["default"]["paused"] is False
+
+
+def test_queue_rows_latency_from_oldest_ready(runtime, seed) -> None:
+    """Latency comes from the oldest ready row's age; the grouped MIN(created_at) must feed it."""
+    from datetime import timedelta
+
+    from sqlalchemy import update
+
+    from firm.queue import schema
+
+    seed.ready(queue="slow")
+    seed.ready(queue="slow")
+    with runtime.engine.begin() as conn:
+        # age the whole queue's ready rows; MIN(created_at) drives latency
+        conn.execute(
+            update(schema.ready_executions)
+            .where(schema.ready_executions.c.queue_name == "slow")
+            .values(created_at=now_utc() - timedelta(seconds=120))
+        )
+    with runtime.engine.connect() as conn:
+        rows = {r["name"]: r for r in queries.queue_rows(conn, now_utc())}
+    assert rows["slow"]["size"] == 2
+    assert rows["slow"]["latency"] >= 119.0
+
+
+def test_queue_rows_issues_two_queries_regardless_of_queue_count(runtime, seed) -> None:
+    """The overview auto-refreshes, so this must stay O(1) queries — one grouped scan plus the
+    paused-names lookup — not two SELECTs per queue as the old per-name loop did."""
+    from sqlalchemy import event
+
+    for i in range(6):
+        seed.ready(queue=f"q{i}")
+    statements: list[str] = []
+    with runtime.engine.connect() as conn:
+        event.listen(conn, "before_cursor_execute", lambda *a: statements.append(a[2]))
+        queries.queue_rows(conn, now_utc())
+    selects = [s for s in statements if s.lstrip().upper().startswith("SELECT")]
+    # one GROUP BY over ready_executions + one scan of pauses == 2, independent of the 6 queues
+    assert len(selects) == 2
+
+
 def test_processes_alive_vs_stale(runtime, seed) -> None:
     seed.process(name="fresh", age_seconds=0.0)
     seed.process(name="stale", age_seconds=10_000.0)

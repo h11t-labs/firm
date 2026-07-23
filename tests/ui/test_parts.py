@@ -75,6 +75,26 @@ def test_channel_stats_top_and_recent(runtime, seed) -> None:
     assert recent[0]["payload"] == "z"  # most recent first
 
 
+def test_channel_stats_channel_count_matches_top_grouping(runtime, seed) -> None:
+    """The ``channels`` stat is the busiest-channels pager total, and that table GROUPs BY raw
+    ``channel`` — so the stat must count DISTINCT ``channel``, not DISTINCT ``channel_hash``. Two
+    distinct channels that collide on ``channel_hash`` are two rows in ``channel_top`` but would be
+    one bucket under a hash count, leaving the pager promising a row the table can't show."""
+    # Force a hash collision: two distinct raw channels sharing one channel_hash value.
+    with runtime.engine.begin() as conn:
+        for ch in (b"alpha", b"beta"):
+            conn.execute(
+                insert(channel_schema.messages).values(
+                    channel=ch, payload=b"x", channel_hash=42, created_at=now_utc()
+                )
+            )
+    with runtime.engine.connect() as conn:
+        stats = channel_queries.channel_stats(conn)
+        top = channel_queries.channel_top(conn)
+    assert stats["channels"] == 2  # distinct raw channels, not the single shared hash
+    assert stats["channels"] == len(top)  # the pager total agrees with the table's row count
+
+
 def test_channel_top_paginates(runtime, seed) -> None:
     for i in range(30):
         # channel i gets (30 - i) messages, so channels are strictly busiest-first ordered
