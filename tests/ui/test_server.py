@@ -312,7 +312,7 @@ def test_clear_cache_shows_count_notice(base_url, seed) -> None:
 
 
 def test_clear_empty_cache_shows_zero_count_as_warning(base_url, seed) -> None:
-    """"Cleared 0 entries" must not masquerade as a green success — a zero count reads as warn."""
+    """ "Cleared 0 entries" must not masquerade as a green success — a zero count reads as warn."""
     status, body = _post(base_url + "/cache/clear")
     assert status == 200
     assert "Cleared 0 cache entries." in body

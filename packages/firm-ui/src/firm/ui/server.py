@@ -348,9 +348,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._not_found()
                     return
                 ok = actions.retry(dash.queue, job_id)
-                self._redirect_notice(
-                    "/jobs?state=failed", "retried" if ok else "nothing-to-retry"
-                )
+                self._redirect_notice("/jobs?state=failed", "retried" if ok else "nothing-to-retry")
             elif (m := re.fullmatch(r"/job/(\d+)/discard", path)) and dash.queue is not None:
                 job_id = _parse_id(m.group(1))
                 if job_id is None:
