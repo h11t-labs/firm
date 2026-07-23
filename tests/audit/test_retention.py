@@ -230,6 +230,131 @@ def test_anchor_failure_refuses_prune(db_url: str, tmp_path, at_time) -> None:
         audit.close()
 
 
+def _fail_next_seals_insert(engine, exc_factory):
+    """Arm a one-shot failure on the next INSERT into firm_audit_seals (the floor-row write,
+    which in an aligned prune happens right *after* the anchor FLOOR line was fsynced)."""
+    armed = {"on": True}
+
+    def explode(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        if armed["on"] and "insert into firm_audit_seals" in " ".join(statement.lower().split()):
+            armed["on"] = False
+            raise exc_factory()
+
+    event.listen(engine, "before_cursor_execute", explode)
+    return lambda: event.remove(engine, "before_cursor_execute", explode)
+
+
+def test_interrupted_anchored_prune_is_pending_not_tampered(db_url: str, tmp_path, at_time) -> None:
+    """A crash between the anchor FLOOR append and the database commit leaves the anchor floor
+    leading the database, with rows and covering seals still present. That used to wedge both
+    retention and verify into a permanent false TAMPERED; it is an interrupted prune: verify
+    warns, and the next retention run resumes and completes it."""
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        max_age=3600.0,
+        anchor_path=str(anchor),
+        anchor_max_age=36000.0,
+    )
+    try:
+        _activate(audit)
+        _seal_old(audit, at_time, "old0", "old1")
+        old_max = _rows(audit.engine)[-1].id
+
+        remove = _fail_next_seals_insert(audit.engine, lambda: RuntimeError("crashed pre-commit"))
+        try:
+            with pytest.raises(RuntimeError, match="crashed pre-commit"):
+                audit.retention.run_once()
+        finally:
+            remove()
+
+        # The wedge state: anchor has the FLOOR line, the database rolled back completely.
+        assert any(" FLOOR " in line for line in anchor.read_text(encoding="utf-8").splitlines())
+        assert not any(record.kind == "floor" for record in _records(audit.engine))
+        assert len(_rows(audit.engine)) == 2
+
+        report = audit.verify(full=True)
+        assert report.outcome == "warning"
+        assert any("interrupted" in finding.message for finding in report.findings)
+
+        # The next retention run resumes the prune instead of refusing as tampered.
+        assert audit.retention.run_once() == 2
+        assert audit.retention.last_refused_tampered == 0
+        assert _rows(audit.engine) == []
+        floors = [record for record in _records(audit.engine) if record.kind == "floor"]
+        assert len(floors) == 1 and floors[0].to_id == old_max
+        assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+
+def test_interrupted_anchored_prune_retry_resumes_within_run(
+    db_url: str, tmp_path, at_time
+) -> None:
+    """The retryable-rollback variant of the same wedge: the serialization retry inside
+    run_once used to be defeated by its own anchor FLOOR line; now the retry resumes."""
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        max_age=3600.0,
+        anchor_path=str(anchor),
+        anchor_max_age=36000.0,
+    )
+    try:
+        _activate(audit)
+        _seal_old(audit, at_time, "old0", "old1")
+
+        remove = _fail_next_seals_insert(
+            audit.engine,
+            lambda: OperationalError("prune", {}, RuntimeError("serialization failure")),
+        )
+        try:
+            assert audit.retention.run_once() == 2
+        finally:
+            remove()
+        assert audit.retention.last_refused_tampered == 0
+        assert _rows(audit.engine) == []
+        assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+
+def test_restore_below_committed_floor_still_tampered(db_url: str, tmp_path, at_time) -> None:
+    """Fail-closed guard around the interrupted-prune reconciliation: after a *committed*
+    anchored prune, deleting the database floor row and re-inserting history (a forged
+    "restore" — the covering seals are gone) must still verify as tampered."""
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        grace=0.0,
+        max_age=3600.0,
+        anchor_path=str(anchor),
+        anchor_max_age=36000.0,
+    )
+    try:
+        _activate(audit)
+        _seal_old(audit, at_time, "old")
+        assert audit.retention.run_once() == 1
+        assert audit.verify(full=True).outcome == "ok"
+
+        with transaction(audit.engine) as conn:
+            conn.execute(delete(_seals).where(_seals.c.kind == "floor"))
+            conn.execute(
+                _audits.insert().values(id=1, action="forged", created_at=now_utc())
+            )
+
+        assert audit.verify(full=True).outcome == "tampered"
+        assert audit.retention.run_once() == 0
+        assert audit.retention.last_refused_tampered >= 1
+    finally:
+        audit.close()
+
+
 def test_floor_advances_are_append_only_and_monotonic(db_url: str, at_time) -> None:
     audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
     try:

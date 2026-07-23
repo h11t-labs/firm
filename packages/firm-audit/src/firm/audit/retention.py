@@ -9,12 +9,18 @@ For an aligned prune, verification, the new ``floor`` row, event deletion, and c
 deletion share one write transaction. If an anchor sink is configured, the FLOOR line is appended
 first and is a hard gate: a sink failure rolls back/refuses the prune. Floor advances themselves
 are never updated or deleted.
+
+Because the anchor line lands before the database commit, a crash or serialization rollback in
+between leaves the anchor floor leading the database — with the rows and their covering seals
+still fully present. Both retention and verify recognize that state as an interrupted prune
+(rather than tampering): retention resumes it from the database floor after re-validating the
+ranges, and verify reports a warning until it does.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -168,7 +174,8 @@ class Retention:
                     return 0
                 previous = through
 
-            floor = max((record.to_id or 0 for record in floors), default=0)
+            database_floor = max((record.to_id or 0 for record in floors), default=0)
+            floor = database_floor
             if self.audit._anchor_path is not None:
                 anchor = _read_anchor(
                     self.audit._anchor_path,
@@ -190,11 +197,33 @@ class Retention:
                     self._refuse_tampered(floors[-1] if floors else None)
                     return 0
             if (
-                floor > 0
-                and conn.execute(select(_audits.c.id).where(_audits.c.id <= floor).limit(1)).first()
+                database_floor > 0
+                and conn.execute(
+                    select(_audits.c.id).where(_audits.c.id <= database_floor).limit(1)
+                ).first()
             ):
                 self._refuse_tampered(floors[-1] if floors else None)
                 return 0
+            if (
+                floor > database_floor
+                and conn.execute(
+                    select(_audits.c.id)
+                    .where(_audits.c.id > database_floor, _audits.c.id <= floor)
+                    .limit(1)
+                ).first()
+            ):
+                # An earlier prune appended its anchor FLOOR line but its database transaction
+                # never committed (crash, or the serialization rollback this method retries on):
+                # the rows *and their covering seals* in (database_floor, floor] are all still
+                # present. Resume from the database floor — the ranges are re-validated and
+                # pruned again below — instead of refusing forever on a floor the database
+                # never reached. Rows in the gap without contiguous seal coverage are not that
+                # state (a forged restore, or seal loss) and refuse loudly as before.
+                if self._gap_is_seal_covered(records, database_floor, boundary, floor):
+                    floor = database_floor
+                else:
+                    self._refuse_tampered(floors[-1] if floors else None)
+                    return 0
 
             covering = [
                 record
@@ -262,6 +291,25 @@ class Retention:
             conn.execute(delete(_seals).where(_seals.c.kind == "seal", _seals.c.to_id <= through))
 
         return deleted
+
+    @staticmethod
+    def _gap_is_seal_covered(
+        records: Sequence[SealRecord], database_floor: int, boundary: int, floor: int
+    ) -> bool:
+        """True when contiguous seal records span (database_floor, floor] — the signature of an
+        interrupted prune's rollback, which restores the deleted seals along with the rows.
+        Every record was already MAC-verified above, so kind is all that needs checking."""
+        position = max(database_floor, boundary)
+        seals = sorted(
+            (record for record in records if record.kind == "seal"),
+            key=lambda record: (record.from_id or -1, record.id),
+        )
+        for record in seals:
+            if position >= floor:
+                break
+            if record.from_id == position and record.to_id is not None:
+                position = record.to_id
+        return position >= floor
 
     def _refuse_tampered(self, record: SealRecord | None) -> None:
         self.last_refused_tampered += 1

@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Fixed
+
+- An interrupted anchored prune no longer wedges retention and verify into a permanent false
+  `TAMPERED`. Retention appends its anchor `FLOOR` line before its database commit (the anchor
+  is the hard gate), so a crash or serialization rollback in between left the anchor floor
+  leading the database while the rows and their covering seals were still fully present. The
+  retry — or every later run — then refused on the "pruned region must be empty" check against
+  the anchor floor, and verify reported the same rows as tampered, permanently. Both sides now
+  recognize the state: verify reports a warning ("anchored prune was interrupted … pending
+  retry") and retention resumes the prune from the database floor after re-validating that
+  contiguous seals still cover the gap. Rows below the *committed* database floor, and gap rows
+  whose covering seals are missing (a forged restore), still refuse and verify as tampered.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the
