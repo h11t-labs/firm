@@ -77,19 +77,23 @@ def state_counts(conn: Connection, queue: str | None = None) -> dict[str, int]:
 
 
 def queue_rows(conn: Connection, now: datetime) -> list[dict[str, Any]]:
-    ready_names = {r[0] for r in conn.execute(select(_ready.c.queue_name).distinct())}
+    """One row per queue that has ready work or is paused. A single grouped scan of
+    ``firm_queue_ready_executions`` yields every queue's ready count and oldest-ready timestamp;
+    paused queues with zero ready rows are merged back in (size 0). This runs on the overview,
+    which auto-refreshes, so it stays one query regardless of how many queues exist — not the two
+    per queue the per-name loop used to issue."""
+    grouped = conn.execute(
+        select(
+            _ready.c.queue_name,
+            func.count().label("size"),
+            func.min(_ready.c.created_at).label("oldest"),
+        ).group_by(_ready.c.queue_name)
+    ).all()
+    stats = {r.queue_name: (r.size, r.oldest) for r in grouped}
     paused_names = {r[0] for r in conn.execute(select(_pauses.c.queue_name))}
     rows: list[dict[str, Any]] = []
-    for name in sorted(ready_names | paused_names):
-        size = (
-            conn.execute(
-                select(func.count()).select_from(_ready).where(_ready.c.queue_name == name)
-            ).scalar()
-            or 0
-        )
-        oldest = conn.execute(
-            select(func.min(_ready.c.created_at)).where(_ready.c.queue_name == name)
-        ).scalar()
+    for name in sorted(stats.keys() | paused_names):
+        size, oldest = stats.get(name, (0, None))
         latency = 0.0 if oldest is None else max(0.0, (now - oldest).total_seconds())
         rows.append(
             {"name": name, "size": size, "latency": latency, "paused": name in paused_names}

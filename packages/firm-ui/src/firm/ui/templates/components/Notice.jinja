@@ -1,0 +1,5 @@
+{#def view #}
+{# A post-action flash bar. Its tone (ok/warn) is decided in Python; the message is built from a
+   fixed token + integer count, never reflected input. The dismiss link reloads the page without
+   the notice params (no JS needed). role=status so it's announced to assistive tech. #}
+<div class="notice {{ view.tone }}" role="status"><span class="notice-msg">{{ view.message }}</span><a class="notice-x" href="{{ view.dismiss }}" aria-label="Dismiss notice">{{ icons.x }}</a></div>

@@ -169,6 +169,20 @@ tr:hover td { background: var(--surface-2); }
 .pill.danger { background: var(--danger-bg); color: var(--danger); border-color: transparent; }
 .pill.accent { background: var(--accent-bg); color: var(--accent); border-color: transparent; }
 
+/* -- post-action notice bar -------------------------------------------------- */
+/* A flash bar shown after a write action redirects back. Tone-tinted like the pills/integrity
+   strip (ok = green, warn = amber for a refused/no-op action), full container width, with a
+   dismiss X that reloads the page without the notice params. */
+.notice { display: flex; align-items: center; gap: .6rem; margin: .8rem 0 0;
+          padding: .55rem .8rem; border-radius: var(--radius-lg); font-size: var(--fs-sm); }
+.notice.ok { background: var(--ok-bg); color: var(--ok); }
+.notice.warn { background: var(--warn-bg); color: var(--warn); }
+.notice.danger { background: var(--danger-bg); color: var(--danger); }
+.notice-msg { flex: 1; }
+.notice-x { display: inline-flex; align-items: center; color: inherit; opacity: .65; }
+.notice-x:hover { opacity: 1; }
+.notice-x svg { width: 15px; height: 15px; }
+
 /* -- inline progress bar ----------------------------------------------------- */
 .bar { display: block; height: 6px; border-radius: var(--radius-pill); background: var(--surface-3); overflow: hidden; min-width: 48px; }
 .bar i { display: block; height: 100%; width: var(--fill, 0); background: var(--accent); opacity: .5; }
