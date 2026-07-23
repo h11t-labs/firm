@@ -122,9 +122,7 @@ def test_recurring_task_custom_queue_and_priority(
     assert ready_row.priority == 8
 
 
-def test_recurring_task_honors_concurrency(
-    runtime: Runtime, count: Callable[..., int]
-) -> None:
+def test_recurring_task_honors_concurrency(runtime: Runtime, count: Callable[..., int]) -> None:
     # A recurring job with a concurrency limit must not run unbounded: while the first fire
     # holds the only slot, the next period's fire lands in blocked_executions (not ready), and
     # is promoted once the slot frees. Matches solid_queue, where recurring tasks honor
