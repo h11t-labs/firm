@@ -133,9 +133,9 @@ packages and uploads whatever isn't already on PyPI — previously published fil
 the tag is safe even when some packages didn't change (their changelogs already carry the
 section for their current, released version).
 
-Versions follow semver-ish pre-1.0 rules: breaking changes bump the minor version. The `firm`
-meta-package's extras pin modules with `~=`, so a meta-package release is only needed when those
-pins change.
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): breaking changes bump
+the major version. The `firm` meta-package's extras pin modules with `~=`, so a meta-package
+release is only needed when those pins change.
 
 > **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
 > [PEP 541 name-transfer request](https://github.com/pypi/support/issues/11384) is pending.
