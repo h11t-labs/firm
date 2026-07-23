@@ -16,6 +16,17 @@ def test_broadcast_subscribe_roundtrip(channel: Channel, wait_for: Callable) -> 
     assert wait_for(lambda: received == [b"hello"])
 
 
+def test_long_channel_name_roundtrips(channel: Channel, wait_for: Callable) -> None:
+    # A channel name over the 1024-byte column bound is truncated with a hash suffix on both the
+    # subscribe and broadcast paths, so it still matches itself end to end (mirrors the cache's
+    # long-key roundtrip).
+    name = "room:" + "x" * 5000
+    received: list[bytes] = []
+    channel.subscribe(name, received.append)
+    channel.broadcast(name, b"hello")
+    assert wait_for(lambda: received == [b"hello"])
+
+
 def test_string_payload_is_utf8_encoded(channel: Channel, wait_for: Callable) -> None:
     received: list[bytes] = []
     channel.subscribe("room", received.append)

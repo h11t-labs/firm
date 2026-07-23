@@ -35,6 +35,14 @@ def message_count(conn: Connection) -> int:
     return conn.execute(select(func.count()).select_from(_messages)).scalar() or 0
 
 
+def payload_bytes(conn: Connection) -> int:
+    """Total buffered payload size — ``SUM(length(payload))`` across the table. An estimate of
+    the pub/sub buffer's footprint; excludes per-row overhead, so it is a floor, not an exact
+    on-disk figure."""
+    total = func.coalesce(func.sum(func.length(_messages.c.payload)), 0)
+    return int(conn.execute(select(total)).scalar() or 0)
+
+
 def fetch_since(conn: Connection, channel_hashes: Sequence[int], after_id: int) -> Sequence[Row]:
     """Messages on the given channels with ``id > after_id``, oldest first.
 
