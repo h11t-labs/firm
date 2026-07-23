@@ -3723,8 +3723,67 @@ own sink. A sink that raises is routed to `on_error` and never crashes verificat
 
 This fires for both `AuditLog.verify()` and the CLI `firm-audit verify` (the CLI still prints the
 per-finding messages to stdout and returns the exit code; the stderr line is the log-pipeline
-event). There is deliberately **no `VerifyLoop`** yet — the detection cadence is a cron/CLI run or a
-caller-run loop; `on_finding` is what turns each such run into an event.
+event). `on_finding` is what turns each run into an event — so verification has to actually *run*
+on a schedule, which is the subject of the next section.
+
+## Scheduling verification — run it continuously
+
+**You want verification running all the time.** Tamper-evidence is not passive: a modification is
+only detected the next time `verify` recomputes over it, and `on_finding` only fires on a run that
+detects something. A log that is written and sealed but never verified is exactly as forgeable in
+practice as one with no evidence at all — the signatures are there, but nobody is checking them. So
+treat verification like a health check: run it on a short interval, and run `--full` on a longer one.
+
+Unlike the opt-in in-process `SealLoop` / `RetentionLoop`, firm-audit does **not** bundle a
+`VerifyLoop`. That is a packaging choice, not advice to verify rarely: verify is read-only, and its
+cadence, its `--full` schedule, its alert routing, and *where* it runs (often a separate
+verifier/anchor host, not an app instance) are all deployment decisions. Drive it from a scheduler
+you already run. Two natural options:
+
+**Option A — a recurring job on `firm-queue`** (dogfooding: use firm's own queue). `firm-queue`
+ships cron-scheduled [recurring tasks](../queue/recurring.md), so a verifier is a `@bq.job` plus two
+`RecurringTask`s:
+
+```python
+import firm.queue as bq
+from firm.audit import AuditLog, IntegrityAlert
+from firm.queue.scheduler import RecurringTask
+
+def to_logs(alert: IntegrityAlert) -> None:
+    my_logger.error("audit integrity", extra={"severity": alert.severity, **alert.__dict__})
+
+@bq.job(queue="audit")
+def verify_audit(*, full: bool = False) -> None:
+    audit = AuditLog(engine=verifier_engine, mac_key="...", anchor_path="/var/lib/firm/audit.anchor",
+                     on_finding=to_logs)
+    report = audit.verify(full=full)          # to_logs fires on a tampered/warning outcome
+    if report.exit_code != 0:
+        raise RuntimeError(f"audit verify: {report.outcome}")   # job failure surfaces in the queue
+
+tasks = [
+    RecurringTask(key="audit-verify-tail", schedule="*/15 * * * *", job=verify_audit),
+    RecurringTask(key="audit-verify-full", schedule="0 3 * * *", job=verify_audit, kwargs={"full": True}),
+]
+# Hand `tasks` to your SupervisorConfig(recurring=tasks); the scheduler enqueues them on schedule
+# and the unique index on recurring_executions dedupes across schedulers.
+```
+
+The frequent `*/15` run does the always-on invariants plus the rolling slice; the nightly `--full`
+guarantees every sealed range is recomputed (see [Stateless partial coverage](#stateless-partial-coverage)).
+Detection reaches your logs two ways: `on_finding` → `to_logs`, and the raised failure → the queue's
+own failed-job path and alerting.
+
+**Option B — an external scheduler.** If you would rather not run verification inside the queue, any
+cron / systemd timer / CI cron works the same way, using the exit code as the gate:
+
+```cron
+*/15 * * * *  firm-audit verify --database-url "$DB" --anchor /var/lib/firm/audit.anchor || alert
+0    3 * * *  firm-audit verify --database-url "$DB" --anchor /var/lib/firm/audit.anchor --full || alert
+```
+
+Either way, the anchor-age rule (a stale anchor forces a non-zero exit) means a verifier that stops
+running, or an anchor sink that stalls, eventually trips the same alarm as tampering — silence is not
+mistaken for health.
 
 ## Retention and the signed floor
 
