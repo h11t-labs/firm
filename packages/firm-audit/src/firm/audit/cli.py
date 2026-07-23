@@ -1,4 +1,4 @@
-"""Command-line entry point: ``firm-audit stats|history|prune``."""
+"""Command-line entry point for audit inspection, retention, sealing, and verification."""
 
 from __future__ import annotations
 
@@ -142,6 +142,35 @@ def seal(database_url: str | None) -> None:
             click.echo(f"sealed {audit.sealer.run_once()} events")
     finally:
         dispose_engine(engine)
+
+
+@main.command(
+    "anchor-compact",
+    help="Compact a mutable anchor to one signed coverage/floor CHECKPOINT.",
+)
+@_db_option
+@click.option(
+    "--anchor",
+    "anchor_path",
+    default=None,
+    help="Mutable anchor file (defaults to FIRM_AUDIT_ANCHOR_PATH).",
+)
+def anchor_compact(database_url: str | None, anchor_path: str | None) -> None:
+    engine = create_engine_for(_url(database_url))
+    try:
+        with AuditLog(engine=engine, create_schema=False) as audit:
+            path = anchor_path if anchor_path is not None else audit._anchor_path
+            if path is None:
+                raise click.ClickException(
+                    "--anchor or FIRM_AUDIT_ANCHOR_PATH is required for anchor compaction"
+                )
+            try:
+                coverage, floor = audit.sealer.compact_anchor(path)
+            except RuntimeError as exc:
+                raise click.ClickException(str(exc)) from exc
+    finally:
+        dispose_engine(engine)
+    click.echo(f"compacted anchor: coverage={coverage}, floor={floor}")
 
 
 @main.command(help="Verify row MACs, independent seals, markers, and anchor.")

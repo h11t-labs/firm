@@ -664,9 +664,9 @@ def test_anchor_is_read_after_snapshot_opens(db_url: str, tmp_path, monkeypatch)
         with original_snapshot(engine) as conn:
             yield conn
 
-    def tracked_read_anchor(path: str):
+    def tracked_read_anchor(path: str, **kwargs):
         order.append("anchor")
-        return original_read_anchor(path)
+        return original_read_anchor(path, **kwargs)
 
     monkeypatch.setattr(verify_mod, "snapshot_transaction", tracked_snapshot)
     monkeypatch.setattr(verify_mod, "_read_anchor", tracked_read_anchor)
@@ -741,6 +741,56 @@ def test_mass_tamper_keeps_findings_bounded_but_persists_tampered(db_url: str) -
         assert report.tampered_count == count + 1  # rows plus the range mismatch
         assert _status_row(audit.engine).outcome == "tampered"
         assert alerts[0].tampered_count == count + 1
+    finally:
+        audit.close()
+
+
+def test_unknown_row_tracking_is_bounded_and_reports_overflow(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from firm.audit import verify as verify_mod
+
+    monkeypatch.setattr(verify_mod, "_MAX_FINDINGS", 3)
+    audit = _make(db_url)
+    try:
+        for index in range(5):
+            audit.record(f"unknown-{index}")
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).values(key_id="deadbeef"))
+        with pytest.raises(VerifyError, match=r"\(\+2 more unresolved rows\)"):
+            audit.verify(full=True)
+    finally:
+        audit.close()
+
+
+def test_oversized_attacker_cell_is_tampered_without_unbounded_recompute(db_url: str) -> None:
+    audit = _make(db_url)
+    try:
+        with transaction(audit.engine) as conn:
+            conn.execute(
+                _audits.insert().values(
+                    action="x" * 2_000_000,
+                    created_at=now_utc(),
+                    entry_id=new_ulid(),
+                    row_mac="0" * 64,
+                    key_id=_KEY.id,
+                )
+            )
+        assert audit.verify(full=True).outcome == "tampered"
+    finally:
+        audit.close()
+
+
+def test_memory_error_becomes_tampered_report(db_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    audit = _make(db_url)
+    monkeypatch.setattr(
+        "firm.audit.verify.load_seal_records",
+        lambda _conn: (_ for _ in ()).throw(MemoryError("attacker-sized value")),
+    )
+    try:
+        report = audit.verify(full=True)
+        assert report.outcome == "tampered"
+        assert report.exit_code == 1
     finally:
         audit.close()
 

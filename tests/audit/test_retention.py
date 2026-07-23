@@ -7,7 +7,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, event, select, update
 from sqlalchemy.exc import OperationalError
 
 from firm._core.clock import now_utc
@@ -166,16 +166,18 @@ def test_aligned_prune_writes_floor_and_prunes_old_seals(db_url: str, at_time) -
         audit.close()
 
 
-def test_aligned_prune_failure_before_floor_rolls_back(db_url: str, at_time, monkeypatch) -> None:
+def test_aligned_prune_failure_before_floor_rolls_back(db_url: str, at_time) -> None:
     audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
     try:
         _activate(audit)
         _seal_old(audit, at_time, "old0", "old1")
-        monkeypatch.setattr(
-            "firm.audit.retention.integrity.floor_mac",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("floor-fail")),
-        )
-        with pytest.raises(RuntimeError, match="floor-fail"):
+        with (
+            patch(
+                "firm.audit.retention.HmacSigner.sign",
+                side_effect=RuntimeError("floor-fail"),
+            ),
+            pytest.raises(RuntimeError, match="floor-fail"),
+        ):
             audit.retention.run_once()
         assert len(_rows(audit.engine)) == 2
         assert not any(record.kind == "floor" for record in _records(audit.engine))
@@ -431,6 +433,34 @@ def test_aligned_prune_retries_serialization_failure(db_url: str, at_time, monke
         assert attempts == 2
     finally:
         audit.close()
+
+
+def test_retention_locks_activation_before_loading_floor_state(db_url: str, at_time) -> None:
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0, max_age=3600.0)
+    statements: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(" ".join(statement.lower().split()))
+
+    try:
+        _activate(audit)
+        _seal_old(audit, at_time, "old")
+        event.listen(audit.engine, "before_cursor_execute", capture)
+        assert audit.retention._run_aligned_once(now_utc() - timedelta(hours=1)) == 1
+    finally:
+        event.remove(audit.engine, "before_cursor_execute", capture)
+        audit.close()
+    activation = next(
+        index
+        for index, statement in enumerate(statements)
+        if "from firm_audit_seals" in statement and "kind =" in statement
+    )
+    side_table_page = next(
+        index
+        for index, statement in enumerate(statements)
+        if "substr(cast(firm_audit_seals.kind" in statement
+    )
+    assert activation < side_table_page
 
 
 def test_persistent_serialization_failure_is_reported_not_raised(

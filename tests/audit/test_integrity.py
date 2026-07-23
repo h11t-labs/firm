@@ -15,6 +15,7 @@ import pytest
 from firm.audit import integrity
 from firm.audit.integrity import (
     KEY_MIN_LENGTH,
+    HmacSigner,
     Key,
     activation_mac,
     add_key,
@@ -158,6 +159,14 @@ def test_row_mac_depends_on_key() -> None:
     other = load_key("y" * KEY_MIN_LENGTH)
     assert other is not None
     assert row_mac(KEY, **_ROW) != row_mac(other, **_ROW)
+
+
+def test_hmac_signer_implements_thin_sign_verify_seam() -> None:
+    signer = HmacSigner(KEY)
+    tag = signer.sign(b"extension-point")
+    assert signer.key_id == KEY.id
+    assert signer.verify(b"extension-point", tag)
+    assert not signer.verify(b"different", tag)
 
 
 @pytest.mark.parametrize("field", list(_ROW))

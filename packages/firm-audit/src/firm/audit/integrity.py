@@ -33,6 +33,7 @@ import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 from .._core.clock import now_utc
 
@@ -144,6 +145,40 @@ class Key:
 
     secret: bytes
     id: str
+
+
+class Signer(Protocol):
+    """Minimal signing seam; add a new implementation here for a future asymmetric primitive."""
+
+    key_id: str
+
+    def sign(self, message: bytes) -> str:
+        """Return the stable textual signature for ``message``."""
+
+    def verify(self, message: bytes, tag: str) -> bool:
+        """Return whether ``tag`` authenticates ``message``."""
+
+
+@dataclass(frozen=True)
+class HmacSigner:
+    """The current HMAC-SHA256 :class:`Signer`, backed by one configured :class:`Key`."""
+
+    key: Key
+
+    @property
+    def key_id(self) -> str:
+        return self.key.id
+
+    def sign(self, message: bytes) -> str:
+        return _hmac_hex(self.key, message)
+
+    def verify(self, message: bytes, tag: str) -> bool:
+        return hmac.compare_digest(self.sign(message), tag)
+
+    @staticmethod
+    def tags_match(expected: str, actual: str) -> bool:
+        """Constant-time comparison for the streaming rows-MAC recipe."""
+        return hmac.compare_digest(expected, actual)
 
 
 def _make_key(secret: bytes) -> Key:
@@ -264,8 +299,7 @@ def row_mac(
     created_at: datetime,
 ) -> str:
     """Hex ``HMAC-SHA256`` over :func:`row_mac_input` — Layer 1's per-row MAC."""
-    return _hmac_hex(
-        key,
+    return HmacSigner(key).sign(
         row_mac_input(
             entry_id=entry_id,
             action=action,
@@ -310,7 +344,29 @@ def seal_mac(
     key_id: str,
 ) -> str:
     """Hex ``HMAC-SHA256`` over one independent covering seal, including its signer id."""
-    message = CANON_VERSION + b"".join(
+    return HmacSigner(key).sign(
+        seal_mac_input(
+            from_id=from_id,
+            to_id=to_id,
+            row_count=row_count,
+            rows_mac=rows_mac,
+            sealed_at=sealed_at,
+            key_id=key_id,
+        )
+    )
+
+
+def seal_mac_input(
+    *,
+    from_id: int,
+    to_id: int,
+    row_count: int,
+    rows_mac: str,
+    sealed_at: datetime,
+    key_id: str,
+) -> bytes:
+    """Canonical message for one independent covering seal."""
+    return CANON_VERSION + b"".join(
         _field(part)
         for part in (
             "seal",
@@ -322,24 +378,66 @@ def seal_mac(
             canonical_created_at(sealed_at),
         )
     )
-    return _hmac_hex(key, message)
 
 
 def floor_mac(key: Key, *, through_id: int, retired_at: datetime, key_id: str) -> str:
     """Sign one append-only retirement-floor advance, including its signer id."""
-    message = CANON_VERSION + b"".join(
+    return HmacSigner(key).sign(
+        floor_mac_input(through_id=through_id, retired_at=retired_at, key_id=key_id)
+    )
+
+
+def floor_mac_input(*, through_id: int, retired_at: datetime, key_id: str) -> bytes:
+    """Canonical message for one append-only retirement-floor advance."""
+    return CANON_VERSION + b"".join(
         _field(part)
         for part in ("floor", key_id, str(through_id), canonical_created_at(retired_at))
     )
-    return _hmac_hex(key, message)
 
 
 def activation_mac(key: Key, *, boundary_id: int, at: datetime, key_id: str) -> str:
     """Sign the one explicit sealing-activation boundary, including its signer id."""
-    message = CANON_VERSION + b"".join(
+    return HmacSigner(key).sign(activation_mac_input(boundary_id=boundary_id, at=at, key_id=key_id))
+
+
+def activation_mac_input(*, boundary_id: int, at: datetime, key_id: str) -> bytes:
+    """Canonical message for the one explicit sealing-activation boundary."""
+    return CANON_VERSION + b"".join(
         _field(part) for part in ("activation", key_id, str(boundary_id), canonical_created_at(at))
     )
-    return _hmac_hex(key, message)
+
+
+def checkpoint_mac(
+    key: Key,
+    *,
+    coverage_id: int,
+    floor_id: int,
+    at: datetime,
+    key_id: str,
+) -> str:
+    """Sign one compacted anchor checkpoint containing both monotonic watermarks."""
+    return HmacSigner(key).sign(
+        checkpoint_mac_input(
+            coverage_id=coverage_id,
+            floor_id=floor_id,
+            at=at,
+            key_id=key_id,
+        )
+    )
+
+
+def checkpoint_mac_input(*, coverage_id: int, floor_id: int, at: datetime, key_id: str) -> bytes:
+    """Canonical message for a compacted anchor coverage/floor checkpoint."""
+    return CANON_VERSION + b"".join(
+        _field(part)
+        for part in (
+            "checkpoint",
+            key_id,
+            str(coverage_id),
+            str(floor_id),
+            canonical_created_at(at),
+        )
+    )
 
 
 # --- ULIDs -----------------------------------------------------------------------------

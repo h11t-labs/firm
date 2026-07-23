@@ -43,13 +43,29 @@ evidence columns and side tables.
 | `background_sealing` / `seal_interval` | `False` / `60.0` | Opt-in timer-based sealing (Layer 2), signing with the seal key. Enable only after the key is deployed fleet-wide — see the [two-phase rollout](tamper-evidence.md#rolling-it-out-key-first-then-sealing). |
 | `grace` | `60.0` | Seals cover only rows older than this. The default `record()` path commits in its own short transaction; if you pass `conn=`, this window **must exceed that caller transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
 | `seal_batch_size` | `10_000` | Max rows sealed per transaction, so a sealer backlog becomes several seals, never one monster transaction. |
-| `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Local append-only file that records every `SEAL`, `FLOOR`, and `ACTIVATION` event (Layer 3). |
-| `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping the same events off-host (S3, a second DB, a webhook). Seal/activation failures route to `on_error` and are healed on a later sealer pass; a floor sink failure refuses the prune. For verification, materialize callback-only history and pass it as `anchor_path`; the callback is a write sink, not a readable Layer 3 source. |
+| `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Append-only Layer-3 source for `SEAL`, `FLOOR`, `ACTIVATION`, and compacted `CHECKPOINT` lines. Mandatory for the full deletion/truncation guarantee; see placement below. |
+| `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping events off-host. Seal failures route to `on_error` and maximum coverage heals later; a floor sink failure refuses the prune. For verification, materialize callback-only history and pass it as `anchor_path`; the callback is a write sink, not a readable Layer-3 source. |
 | `verify_cycle` | `7` | Cost divisor: default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. It is not a period; the conservative rotation bound is `range_count` days. Only `full=True` / `--full` guarantees complete coverage. |
 
 Rotation uses two role-scoped archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
 **row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
 `"label=secret,label2=secret2"` — see [Key rotation](tamper-evidence.md#rotation).
+
+### Anchor placement
+
+Hard requirement: **DB compromise must not grant anchor write.** Choose the boundary appropriate
+to the deployment:
+
+1. A local app-host file is the weakest option. It is acceptable with a managed remote DB when
+   compromised DB credentials cannot reach the app filesystem; it is risky on an all-in-one host.
+2. A separate host or append-only mount is better because the DB attacker is outside that
+   filesystem.
+3. S3 Object Lock / WORM is strongest because storage enforces immutability.
+
+Mutable files can be rotated with `firm-audit anchor-compact`, which replaces old history with one
+signed coverage/floor `CHECKPOINT`. Do not compact WORM objects; rotate objects and expire older
+ones through lifecycle policy. Without any anchor, a total wipe of hidden events, seals, and
+verify status is undetectable.
 
 ### Environment variables
 

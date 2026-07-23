@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, event, func, select
 
 from firm._core.clock import now_utc
 from firm._core.database import transaction
@@ -17,6 +17,7 @@ from firm.audit.integrity import load_key
 
 _SECRET = "sealing-secret-key-padding-0123456789"  # noqa: S105
 _SEAL_SECRET = "separate-seal-key-padding-0123456789ab"  # noqa: S105
+_SEAL_SECRET_2 = "rotated-seal-key-padding-0123456789abcd"  # noqa: S105
 _KEY = load_key(_SECRET)
 assert _KEY is not None
 _audits = schema.audit_events
@@ -249,6 +250,35 @@ def test_two_concurrent_sealers_keep_ranges_contiguous(db_url: str) -> None:
         audit.close()
 
 
+def test_sealer_locks_activation_before_reading_hwm(db_url: str) -> None:
+    """SQLite lock-order guard for the stale-HWM sealer/retention interleave."""
+    audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=0.0)
+    statements: list[str] = []
+
+    def capture(_conn, _cursor, statement, _parameters, _context, _executemany) -> None:
+        statements.append(" ".join(statement.lower().split()))
+
+    try:
+        _activate(audit)
+        audit.record("next")
+        event.listen(audit.engine, "before_cursor_execute", capture)
+        assert audit.sealer._seal_next_batch(_KEY) is not None
+    finally:
+        event.remove(audit.engine, "before_cursor_execute", capture)
+        audit.close()
+    activation = next(
+        index
+        for index, statement in enumerate(statements)
+        if "from firm_audit_seals" in statement and "kind =" in statement
+    )
+    hwm = next(
+        index
+        for index, statement in enumerate(statements)
+        if "max(firm_audit_seals.to_id)" in statement
+    )
+    assert activation < hwm
+
+
 def test_anchor_file_uses_new_format_for_activation_and_seals(db_url: str, tmp_path) -> None:
     anchor = tmp_path / "anchor.log"
     audit = AuditLog(
@@ -346,11 +376,45 @@ def test_row_only_host_refuses_mixed_signer_records(db_url: str) -> None:
             row_only.record("second")
             assert row_only.sealer.run_once() == 0
             assert len(_records(owner.engine)) == before
-            assert errors and "mixed-signer" in str(errors[0])
+            assert errors and "REFUSED to extend Layer-2" in str(errors[0])
         finally:
             row_only.close()
     finally:
         owner.close()
+
+
+def test_retired_seal_signer_allows_rotation_and_new_sealing(
+    db_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = AuditLog(
+        database_url=db_url,
+        mac_key=_SECRET,
+        seal_key=_SEAL_SECRET,
+        grace=0.0,
+    )
+    try:
+        _activate(original)
+        original.record("before-rotation")
+        assert original.sealer.run_once() == 1
+    finally:
+        original.close()
+
+    monkeypatch.setenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", f"old={_SEAL_SECRET}")
+    rotated = AuditLog(
+        database_url=db_url,
+        create_schema=False,
+        mac_key=_SECRET,
+        seal_key=_SEAL_SECRET_2,
+        grace=0.0,
+    )
+    try:
+        rotated.record("after-rotation")
+        assert rotated.sealer.run_once() == 1
+        signer_ids = {record.key_id for record in _records(rotated.engine)}
+        assert len(signer_ids) == 2
+        assert rotated.verify(full=True).outcome == "ok"
+    finally:
+        rotated.close()
 
 
 def test_anchor_file_append_is_fsynced(db_url: str, tmp_path, monkeypatch) -> None:

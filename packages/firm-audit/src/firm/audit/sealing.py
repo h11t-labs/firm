@@ -18,6 +18,7 @@ sealer pass nor ``verify(full=True)`` can self-heal it.
 
 from __future__ import annotations
 
+import fcntl
 import os
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -30,11 +31,11 @@ from .._core.clock import now_utc
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
-from .integrity import Key
+from .integrity import HmacSigner, Key
 from .verify import (
     _format_anchor_event,
+    _format_checkpoint,
     _read_anchor,
-    _record_matches_anchor,
     load_seal_records,
     seal_is_intact,
 )
@@ -60,8 +61,8 @@ class Sealer:
         """Activate if needed, seal the eligible backlog, and return the sealed row count.
 
         Activation and each covering seal commit in their own short transaction. Before writing,
-        an anchor-heal pass re-emits any intact committed record absent from the configured file.
-        New anchor emission follows the commit and is best-effort; a sink failure is routed through
+        an anchor-heal pass ensures the current maximum committed coverage is present. New anchor
+        emission follows the commit and is best-effort; a sink failure is routed through
         ``on_error`` and leaves the signed database record intact. A racing insert loses via the
         unique ``from_id`` constraint and is retried on a later poll.
         """
@@ -97,19 +98,18 @@ class Sealer:
                 return total
 
     def _heal_anchor(self) -> None:
-        """Re-append every intact committed record missing from the configured anchor.
-
-        Malformed input, including a partial tail, is deliberately ignored here: exact parsed
-        events are enough to identify what is absent, and appending the canonical replacement turns
-        a partial tail into a reconstructible benign fragment without rewriting prior bytes.
-        """
+        """Ensure the current maximum committed seal coverage is present in the anchor."""
         path = self.audit._anchor_path
         assert path is not None
         try:
-            anchor = _read_anchor(path)
             seal_keyring = self.audit.verifier.seal_keyring
             with self.audit.engine.connect() as conn:
                 records = load_seal_records(conn)
+            anchor = _read_anchor(
+                path,
+                coverage_cutoff=now_utc(),
+                seal_keyring=seal_keyring,
+            )
         except Exception as exc:
             self.audit.on_error(exc)
             return
@@ -120,29 +120,42 @@ class Sealer:
             )
             return
 
-        for record in records:
-            if not seal_is_intact(record, seal_keyring):
-                continue
-            if any(_record_matches_anchor(record, event) for event in anchor.events):
-                continue
-            assert record.to_id is not None
-            assert record.seal_mac is not None
-            assert record.sealed_at is not None
-            self._emit_anchor(
-                kind=record.kind,
-                from_id=record.from_id,
-                to_id=record.to_id,
-                mac=record.seal_mac,
-                at=record.sealed_at,
-            )
+        seals = [
+            record
+            for record in records
+            if record.kind == "seal" and seal_is_intact(record, seal_keyring)
+        ]
+        if not seals:
+            return
+        newest = max(seals, key=lambda record: (record.to_id or 0, record.id))
+        assert newest.to_id is not None
+        if anchor.coverage_watermark >= newest.to_id:
+            return
+        assert newest.seal_mac is not None
+        assert newest.sealed_at is not None
+        self._emit_anchor(
+            kind="seal",
+            from_id=newest.from_id,
+            to_id=newest.to_id,
+            mac=newest.seal_mac,
+            at=newest.sealed_at,
+        )
 
     def _signer_matches_existing_records(self, key: Key) -> bool:
-        """Refuse a mixed-signer Layer-2 history before writing anything."""
+        """Accept current/retired seal signers; refuse unknown or row-only signers."""
         try:
+            seal_keyring = self.audit.verifier.seal_keyring
+            row_keyring = self.audit.verifier.keyring
+            allowed = tuple(seal_keyring)
             with self.audit.engine.connect() as conn:
                 mismatch = conn.execute(
                     select(_seals.c.key_id)
-                    .where(or_(_seals.c.key_id != key.id, _seals.c.key_id.is_(None)))
+                    .where(
+                        or_(
+                            _seals.c.key_id.is_(None),
+                            _seals.c.key_id.not_in(allowed),
+                        )
+                    )
                     .limit(1)
                 ).first()
         except Exception as exc:
@@ -152,8 +165,10 @@ class Sealer:
             return True
         self.audit.on_error(
             RuntimeError(
-                "audit sealer REFUSED to write mixed-signer Layer-2 history: existing "
-                f"key_id={mismatch.key_id!r}, configured signer key_id={key.id!r}"
+                "audit sealer REFUSED to extend Layer-2 history: existing "
+                f"key_id={mismatch.key_id!r} is "
+                f"{'known only as a row key' if mismatch.key_id in row_keyring else 'unknown'}; "
+                f"configured signer key_id={key.id!r}"
             )
         )
         return False
@@ -177,7 +192,10 @@ class Sealer:
                 ).scalar_one()
                 or 0
             )
-            mac = integrity.activation_mac(key, boundary_id=boundary, at=at, key_id=key.id)
+            signer = HmacSigner(key)
+            mac = signer.sign(
+                integrity.activation_mac_input(boundary_id=boundary, at=at, key_id=signer.key_id)
+            )
             conn.execute(
                 _seals.insert().values(
                     kind="activation",
@@ -196,7 +214,15 @@ class Sealer:
         """Insert one independent covering seal, or return ``None`` when no rows are eligible."""
         cutoff = now_utc() - timedelta(seconds=self.audit.grace)
         engine = self.audit.engine
-        with get_dialect(engine).begin_claim_tx(engine) as conn:
+        dialect = get_dialect(engine)
+        with dialect.begin_claim_tx(engine) as conn:
+            # SQLite is already serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL hold this
+            # never-deleted activation row FOR UPDATE until the new seal commits.
+            activation_lock = dialect.with_row_lock(
+                select(_seals.c.id).where(_seals.c.kind == "activation").limit(1)
+            )
+            if conn.execute(activation_lock).first() is None:
+                return None
             hwm = (
                 conn.execute(
                     select(func.max(_seals.c.to_id)).where(
@@ -237,14 +263,16 @@ class Sealer:
         at = now_utc()
         aggregate = integrity.rows_mac(key, rows)
         row_count = len(rows)
-        mac = integrity.seal_mac(
-            key,
-            from_id=from_id,
-            to_id=to_id,
-            row_count=row_count,
-            rows_mac=aggregate,
-            sealed_at=at,
-            key_id=key.id,
+        signer = HmacSigner(key)
+        mac = signer.sign(
+            integrity.seal_mac_input(
+                from_id=from_id,
+                to_id=to_id,
+                row_count=row_count,
+                rows_mac=aggregate,
+                sealed_at=at,
+                key_id=signer.key_id,
+            )
         )
         conn.execute(
             _seals.insert().values(
@@ -280,17 +308,7 @@ class Sealer:
         path = self.audit._anchor_path
         if path is not None:
             try:
-                encoded = line.encode("utf-8")
-                with open(path, "ab+") as handle:
-                    handle.seek(0, os.SEEK_END)
-                    separator = b""
-                    if handle.tell() > 0:
-                        handle.seek(-1, os.SEEK_END)
-                        if handle.read(1) not in {b"\n", b"\r"}:
-                            separator = b"\n"
-                    handle.write(separator + encoded)
-                    handle.flush()
-                    os.fsync(handle.fileno())
+                self._append_anchor_line(path, line)
             except Exception as exc:
                 accepted = False
                 self.audit.on_error(exc)
@@ -302,6 +320,77 @@ class Sealer:
                 accepted = False
                 self.audit.on_error(exc)
         return accepted
+
+    def compact_anchor(self, path: str) -> tuple[int, int]:
+        """Replace a mutable anchor with one signed CHECKPOINT carrying the same watermarks."""
+        key = self.audit._seal_key
+        if key is None:
+            raise RuntimeError("anchor compaction needs a configured seal key")
+        at = now_utc()
+        anchor = _read_anchor(
+            path,
+            coverage_cutoff=at,
+            seal_keyring=self.audit.verifier.seal_keyring,
+        )
+        signer = HmacSigner(key)
+        mac = signer.sign(
+            integrity.checkpoint_mac_input(
+                coverage_id=anchor.coverage_watermark,
+                floor_id=anchor.floor_watermark,
+                at=at,
+                key_id=signer.key_id,
+            )
+        )
+        line = (
+            _format_checkpoint(
+                at=at,
+                coverage_id=anchor.coverage_watermark,
+                floor_id=anchor.floor_watermark,
+                mac=mac,
+            )
+            + "\n"
+        )
+        encoded = line.encode("utf-8")
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+        with os.fdopen(descriptor, "r+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0, os.SEEK_END)
+                separator = b""
+                if handle.tell() > 0:
+                    handle.seek(-1, os.SEEK_END)
+                    if handle.read(1) not in {b"\n", b"\r"}:
+                        separator = b"\n"
+                handle.seek(0, os.SEEK_END)
+                handle.write(separator + encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+                handle.seek(0)
+                handle.write(encoded)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return anchor.coverage_watermark, anchor.floor_watermark
+
+    @staticmethod
+    def _append_anchor_line(path: str, line: str) -> None:
+        encoded = line.encode("utf-8")
+        with open(path, "ab+") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.seek(0, os.SEEK_END)
+                separator = b""
+                if handle.tell() > 0:
+                    handle.seek(-1, os.SEEK_END)
+                    if handle.read(1) not in {b"\n", b"\r"}:
+                        separator = b"\n"
+                handle.write(separator + encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 class SealLoop(InterruptiblePoller):

@@ -73,6 +73,7 @@ def test_upgrade_head_creates_tamper_evidence_schema(tmp_path) -> None:
         seal_idx = {i["name"]: i for i in insp.get_indexes("firm_audit_seals")}
         assert seal_idx["index_firm_audit_seals_on_from_id"]["unique"]
         status_cols = {c["name"] for c in insp.get_columns("firm_audit_verify_status")}
+        assert "sealing_observed" in status_cols
         assert {"cycle_position", "cycle_length"}.isdisjoint(status_cols)
     finally:
         engine.dispose()

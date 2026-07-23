@@ -59,8 +59,8 @@ behind. Successful pruning advances a signed retirement floor. See
 ### `seal` — run the seal loop (tamper-evidence)
 
 Writes independent seals over settled id ranges (Layer 2), then exports each seal to the anchor
-(Layer 3). The first pass also writes and exports the signed activation marker; later passes heal
-any intact committed seal/marker absent from the anchor. Requires a seal key (the row key in
+(Layer 3). The first pass also writes and exports the signed activation marker; later passes ensure
+the current maximum committed seal coverage is anchored. Requires a seal key (the row key in
 single-key mode). Run it on a timer (cron, or `background_sealing=True` in-process); it is
 idempotent and safe to run on more than one host at once — the loser of a `from_id` race retries.
 
@@ -68,6 +68,20 @@ idempotent and safe to run on more than one host at once — the loser of a `fro
 firm-audit seal --database-url sqlite:///audit.db
 # sealed 2841 events
 ```
+
+### `anchor-compact` — rotate a mutable anchor
+
+Streams a local/separate-host anchor, signs one `CHECKPOINT` with its current coverage and floor
+watermarks, appends and `fsync`s it, then removes strictly older lines under the file lock.
+
+```bash
+firm-audit anchor-compact --database-url sqlite:///audit.db \
+  --anchor /var/lib/firm/audit.anchor
+# compacted anchor: coverage=12040, floor=9000
+```
+
+Use this only for mutable anchors. With S3 Object Lock or WORM storage, rotate objects and use
+lifecycle expiry instead.
 
 ### `verify` — check the audit trail for tampering
 

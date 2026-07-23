@@ -127,6 +127,7 @@ def _create_verify_status() -> None:
         sa.Column("last_full_coverage_at", dt_type()),
         sa.Column("newest_anchor_at", dt_type()),
         sa.Column("anchor_configured", sa.Boolean(), nullable=False),
+        sa.Column("sealing_observed", sa.Boolean(), nullable=False),
         sa.Column("unsealed_tail_count", sa.Integer(), nullable=False),
         sa.Column("unsealed_tail_oldest_at", dt_type()),
         sa.Column("affected_identifiers", sa.Text()),

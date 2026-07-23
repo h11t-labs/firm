@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.dialects import mysql, postgresql
 from sqlalchemy.schema import CreateTable
 
@@ -29,3 +30,10 @@ def test_verify_status_compiles_for_pg_and_mysql() -> None:
 def test_mysql_created_at_is_datetime6() -> None:
     ddl = str(CreateTable(schema.audit_events).compile(dialect=mysql.dialect()))
     assert "DATETIME(6)" in ddl
+
+
+def test_activation_coordination_lock_compiles_for_pg_and_mysql() -> None:
+    stmt = select(schema.seals.c.id).where(schema.seals.c.kind == "activation")
+    for dialect in (postgresql.dialect(), mysql.dialect()):
+        sql = str(stmt.with_for_update().compile(dialect=dialect)).upper()
+        assert "FOR UPDATE" in sql

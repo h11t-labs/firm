@@ -30,15 +30,20 @@ Rows stay plaintext — this is integrity, not confidentiality.
 
 ### What the anchor is worth depends on where it lives
 
-Detection of tail-truncation and wholesale reset is the anchor's job (Layer 3, below), and the
-anchor is only as strong as its distance from the attacker. Read this table before you trust it:
+Detection of deletion, tail-truncation, and wholesale reset needs external memory. The anchor is
+therefore **mandatory for the full guarantee**, and only works when this hard requirement holds:
+**DB compromise must not grant anchor write.** Placement is the deployer's choice:
 
-| Deployment | Anchor | Guarantee |
+| Safety level | Placement | Guarantee / tradeoff |
 |---|---|---|
-| Anchor shipped off-host (S3, second DB, log pipeline) | remote | full Layer 3 — truncation + reset detected |
-| Anchor file on an app host, DB elsewhere | local file | protects against a DB-only compromise |
-| Everything on one host (typical SQLite setup) | local file | Layer 3 is nominal — whoever owns the host owns DB, key, *and* anchor. Layers 1+2 still stop the DB-credentials-only attacker |
-| No anchor configured | none | Layers 1+2 only — row/seal modification and row deletion under a surviving seal are detected; seal deletion, ordering, and tail truncation are not |
+| Weakest | **Local file on the app host** | Safe against a database-only compromise when the DB is managed elsewhere (for example RDS) and those credentials cannot write the app filesystem. Risky on one all-in-one host |
+| Better | **Separate host or append-only mount** | The DB attacker is outside the anchor filesystem's write boundary |
+| Strongest | **S3 Object Lock / WORM** | Storage enforces immutability; use object lifecycle expiry rather than rewriting old objects |
+| Documented-weak mode | **No anchor** | Layers 1+2 detect modification and deletion under surviving seals, but not a total wipe of hidden events plus seals plus verify status |
+
+Whoever can compromise the database must not be able to write the anchor. A local path is not
+automatically unsafe; the trust boundary matters. Conversely, an off-host sink reachable with the
+same compromised credentials is not independent.
 
 ## The three layers
 
@@ -49,7 +54,7 @@ slow path (proving ordering) needs no coordination.
 |---|---|---|
 | **1 — row MAC** | every row self-authenticates with `HMAC-SHA256(key, canonical(row))` | modify, forge, replay |
 | **2 — seals** | a background loop independently signs exact id ranges | delete/insert inside a range, seal-tampering |
-| **3 — anchor** | every seal, floor, and activation event is exported outside the database | missing/reordered seals, tail truncation, table drop |
+| **3 — anchor** | monotonic signed coverage/floor watermarks live outside the database | seal-tail truncation, deletion, table reset |
 
 **Layer 1 — per-row MAC.** At insert time, when a key is configured, the writer generates a ULID
 (`entry_id`, unique-indexed — identity and anti-replay) and stores `row_mac`, a keyed HMAC over the
@@ -82,18 +87,40 @@ append-only and has one canonical line per event:
 <sealed_at> SEAL <from_id> <to_id> <seal_mac>
 <retired_at> FLOOR <through_id> <floor_mac>
 <at> ACTIVATION <boundary_id> <activation_mac>
+<at> CHECKPOINT <coverage_id> <floor_id> <checkpoint_mac>
 ```
 
-The anchor supplies ordering and external memory: verification can detect a database seal that
-vanished, an unexpected seal, a forged floor advance, or a reset that the database alone cannot
-remember. Parsers treat malformed attacker-controlled lines as findings, never exceptions. Seal
-and activation emission happens after the database commit and is best-effort; before doing new
-work, the sealer heals the append window by re-emitting any intact committed record missing from
-the anchor. A floor is stricter: retention must append it successfully before the prune commits.
+Verification streams the file once in O(1) memory. It keeps only (1) the greatest mature
+`SEAL.to_id` coverage and (2) the greatest authentic `FLOOR.through_id`; a signed `CHECKPOINT`
+contains the same values after compaction. Coverage below the anchor watermark is `TAMPERED`.
+Rows at/below the floor are `TAMPERED`, while missing rows and seals there are an authorized
+prune. Malformed or partial lines cannot lower a maximum, so they are skipped and collapsed into
+one `WARNING`, never treated as tampering by themselves.
+
+Seal and activation emission happens after the database commit and is best-effort. Before new
+work, the sealer only ensures that the current maximum seal coverage is anchored. A floor is
+stricter: retention appends and `fsync`s it before the prune commits; append failure refuses the
+prune.
 
 `on_anchor` is a write-only delivery callback. If it is your only sink (for example S3 or another
 database), materialize that history as the canonical line format and supply it to verification via
 `anchor_path`; the callback alone cannot be read back to detect truncation or reset.
+
+### Anchor growth, compaction, and rotation
+
+File length does not affect verification memory or correctness. On a mutable local/separate-host
+anchor, compact it to one signed watermark when needed:
+
+```bash
+firm-audit anchor-compact --database-url "$FIRM_AUDIT_DATABASE_URL" \
+  --anchor /var/lib/firm/audit.anchor
+```
+
+The command first appends and `fsync`s a signed `CHECKPOINT`, then removes strictly older lines
+under the same file lock. Verification accepts the compacted file like the full history. Keep the
+current and retired seal keys available while compacting and reading checkpoints. For S3 Object
+Lock or other WORM storage, do not rewrite an object: rotate to new objects and use lifecycle
+expiry for old ones. Growth is harmless to verifier memory.
 
 ## Rolling it out — key first, then sealing
 
@@ -188,8 +215,8 @@ audit = AuditLog(engine=app_engine, mac_key="a-32-char-or-longer-secret-here!!")
 Rotate without re-signing — re-signing would require an `UPDATE`, which the append-only contract
 forbids. New writes use the new key; the **retired** key stays on the verifier so its old objects
 still verify. Retired keys live in two **role-scoped** archives. Verification and retention read
-them; the sealer's anchor-heal pass reads the retired seal archive. Writers never use them to sign
-new evidence:
+them; the sealer accepts old Layer-2 records signed by the retired seal archive while writing new
+records with the current seal key. Writers never use retired keys to sign new evidence:
 
 - **`FIRM_AUDIT_RETIRED_KEYS`** — retired **row** keys. Eligible to validate row MACs only, and
   **never** a seal, in any mode.
@@ -288,7 +315,8 @@ role to place.
 
 The first-ever activation has no existing signer from which to infer deployment intent. In a
 two-key deployment, run both the sealer and retention only on the seal-key host from the start.
-After activation, a mixed `key_id` history is a structural backstop: the sealer refuses to write.
+After a seal-key rotation, mixed current+retired seal `key_id` history is expected. The sealer
+refuses only an unknown signer or one available solely as a row key.
 
 ## Verifying
 
@@ -299,13 +327,14 @@ bounded memory), independent Layer 2 seals plus the signed activation/floor reco
 | Verdict | Meaning |
 |---|---|
 | `OK` | rows, seals, activation/floor records, and anchor all consistent |
-| `WARNING` | recoverable liveness/crash evidence: old unsealed tail, stale anchor, missing/empty anchor still within its lag window, orphan floor intent already superseded or still backed by intact seals, interrupted final/strict-prefix anchor append, or a bounded scan cap |
+| `WARNING` | liveness or non-authoritative input issue: old unsealed tail, stale/missing anchor, unreadable anchor lines, or a bounded side-table scan |
 | `UNPROTECTED` | NULL-MAC rows at or below the activation boundary — written before the key existed |
 | `TAMPERED` | invalid/missing MAC after activation, exact-range mismatch, invalid/non-contiguous seal or marker, a row at/below the floor, or an anchor contradiction |
 
-A signed-record or anchor field an attacker can edit but not re-sign is treated as a tampering
-**finding**, never an uncaught parse exception: verify persists `TAMPERED` and returns, so malformed
-attacker-controlled content cannot freeze the dashboard's last status at `OK`. An unknown row
+A signed database record an attacker can edit but not re-sign is a tampering **finding**, never an
+uncaught parse exception. Malformed anchor lines are warning-only because they cannot lower a
+monotonic maximum. Verify persists the result, so malformed attacker-controlled content cannot
+freeze the dashboard's last status at `OK`. An unknown row
 `key_id` becomes `VerifyError` only when no tampered finding exists; otherwise tampering takes
 precedence and `on_finding` still fires.
 
@@ -324,8 +353,8 @@ precedence and `on_finding` still fires.
   `anchor_max_age` (default: 3× the seal interval, configurable). The silently-truncatable window
   between the last anchored event and the newest database record is the one thing only Layer 3
   guards; letting it grow unbounded behind an exit-0 warning would quietly degrade the only
-  guarantee the anchor exists to give. Seal/activation writes stay best-effort and heal on a later
-  sealer pass; floor writes are a hard pre-prune gate.
+  guarantee the anchor exists to give. Seal writes stay best-effort and maximum coverage heals on
+  a later sealer pass; floor writes are a hard pre-prune gate.
 
 The evidence scan is read-only and runs anywhere the key is available; persisting
 `firm_audit_verify_status` requires a write grant. Inside the snapshot transaction it reads the
@@ -338,7 +367,7 @@ snapshot and report a false `TAMPERED`.
 
 Re-reading every sealed range on every run is expensive; only reading the tail would leave old
 row edits unchecked. The default run verifies every always-on invariant (all signed-record MACs,
-activation/floor validity, seal contiguity, anchor completeness, pruned-region emptiness, duplicate
+activation/floor validity, seal contiguity, anchor watermarks, pruned-region emptiness, duplicate
 `entry_id`s, and tail liveness), recomputes the unsealed tail, and selects
 `ceil(range_count / verify_cycle)` ranges from the day's distance since 1970. It always adds the
 newest range if that slice did not select it. The choice is deterministic and **stateless**: there
@@ -418,8 +447,8 @@ wins). See [Retention & querying](retention-and-querying.md).
    retired covering seals then commit together in one write transaction. Serialization/deadlock
    aborts are retried a bounded number of times. Floor records themselves are append-only and
    monotonic.
-4. Verify honors the highest authentic floor (and, when an anchor is used, only an anchored
-   advance). Anchored seals entirely at/below it may legitimately be absent. Above it, seals must
+4. Verify honors the highest authentic database or anchor floor. Seals entirely at/below it may
+   legitimately be absent. Above it, seals must
    tile contiguously from `max(floor, activation boundary)`. Verify also probes the retired prefix
    on every run: any surviving or reinserted row with `id <= floor` is `TAMPERED`.
 
@@ -440,6 +469,13 @@ triggers and pruning is unchanged.)
 If a seal key is configured but no activation exists while rows are already older than the
 retention cutoff, retention refuses plain pruning. This prevents an emptied side table from silently
 downgrading a keyed deployment to unguarded age deletion.
+
+Without an anchor, verify persists a `sealing_observed` fact the first time it sees authentic
+activation/seal coverage. If events later remain while those records vanish, verification reports
+`TAMPERED`; a genuinely never-sealed growing keyed log stays `OK`. This status lives in the same
+database and is therefore only a limited guard: **no-anchor mode cannot detect a total wipe of the
+events being hidden plus the seal side table plus verify status.** The anchor is the independent
+memory that closes that gap and is mandatory for the full deletion/truncation guarantee.
 
 ## Deployment hardening
 

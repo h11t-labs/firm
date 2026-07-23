@@ -42,6 +42,14 @@ class Dialect(ABC):
         ``begin_claim_tx`` already holds the write lock."""
 
     @abstractmethod
+    def with_row_lock(self, stmt: Select) -> Select:
+        """Lock selected coordination rows until transaction end.
+
+        PostgreSQL/MySQL use ``FOR UPDATE``; SQLite is a no-op because callers pair it with
+        ``BEGIN IMMEDIATE``.
+        """
+
+    @abstractmethod
     def upsert(
         self,
         table: Table,

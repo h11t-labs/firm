@@ -122,8 +122,15 @@ def _attack_params() -> list[pytest.ParameterSet]:
 
 
 def _expected_outcome(lifecycle: Lifecycle, mutation: str) -> str:
-    if lifecycle.stage == "fresh" and mutation in {"delete-anchor", "truncate-anchor"}:
+    clean = "warning" if lifecycle.stage == "fresh" else "ok"
+    if mutation in {"edit-anchor", "truncate-anchor"}:
+        return clean
+    if mutation in {"corrupt-anchor-line", "delete-anchor"}:
         return "warning"
+    if mutation == "delete-activation" and lifecycle.stage == "fresh":
+        return "ok"
+    if mutation == "delete-newest-floor" and lifecycle.anchor:
+        return clean
     return "tampered"
 
 
@@ -474,6 +481,7 @@ def _assert_retention_does_not_launder(
         not protected_ids
         or not built.target_seal_ids
         or mutation in _ANCHOR_MUTATIONS
+        or (mutation == "delete-newest-floor" and built.anchor_path is not None)
         or mutation == "drop-seals-table"
     ):
         return
@@ -523,7 +531,7 @@ def test_attack_matrix(
         built.audit.close()
 
 
-def test_orphaned_floor_anchor_is_a_crashed_prune_and_next_retention_converges(
+def test_orphaned_floor_watermark_marks_present_pruned_region_tampered(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
@@ -546,12 +554,9 @@ def test_orphaned_floor_anchor_is_a_crashed_prune_and_next_retention_converges(
             at=retired_at,
         )
 
-        report = built.audit.verify(full=True)
-        assert report.outcome == "warning"
-        assert any("crashed prune" in finding.message for finding in report.findings)
-
-        assert built.audit.retention.run_once() > 0
-        assert built.audit.verify(full=True).outcome == "ok"
+        assert built.audit.verify(full=True).outcome == "tampered"
+        assert built.audit.retention.run_once() == 0
+        assert built.audit.retention.last_refused_tampered == 1
     finally:
         built.audit.close()
 
@@ -562,7 +567,7 @@ def test_sealer_heals_a_committed_seal_missing_from_anchor(
     built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
     try:
         built.audit._anchor_max_age = 24 * 60 * 60
-        target = _target_seal(built)
+        target = _range_seals(built.audit)[-1]
         path = built.anchor_path
         assert path is not None
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -593,7 +598,7 @@ def test_partial_anchor_tail_warns_heals_and_does_not_block_retention(
 
         report = built.audit.verify(full=True)
         assert report.outcome == "warning"
-        assert any("partial anchor append" in finding.message for finding in report.findings)
+        assert any("unreadable line" in finding.message for finding in report.findings)
 
         assert built.audit.sealer.run_once() == 0
         assert partial in path.read_text(encoding="utf-8").splitlines()
@@ -604,44 +609,39 @@ def test_partial_anchor_tail_warns_heals_and_does_not_block_retention(
         built.audit.close()
 
 
-def test_corrupted_non_final_anchor_line_is_tampered(
+def test_corrupted_non_final_anchor_line_is_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
     try:
         _mutate_anchor(built, "corrupt-anchor-line")
-        assert built.audit.verify(full=True).outcome == "tampered"
+        report = built.audit.verify(full=True)
+        assert report.outcome == "warning"
+        assert report.exit_code == 0
     finally:
         built.audit.close()
 
 
-@pytest.mark.parametrize(
-    "delete_newest,expected",
-    [pytest.param(False, "warning", id="clean"), pytest.param(True, "tampered", id="truncated")],
-)
-def test_anchor_cap_keeps_newest_events(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    delete_newest: bool,
-    expected: str,
+def test_append_heavy_anchor_cannot_launder_newest_seal_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("retained-1", True, "single"))
     try:
-        _record_old(built.audit, "beyond-cap", 4)
-        _seal_old(built.audit)
-        monkeypatch.setattr(verify, "_MAX_ANCHOR_ITEMS", 3)
+        floor = _newest_floor(built.audit)
+        path = built.anchor_path
+        assert path is not None
+        at = now_utc().isoformat(timespec="microseconds")
+        with path.open("a", encoding="utf-8") as handle:
+            for _ in range(verify._MAX_FINDINGS + 50):
+                handle.write(f"{at} SEAL 0 {floor.to_id} junk\n")
+        newest = _range_seals(built.audit)[-1]
+        with transaction(built.audit.engine) as conn:
+            conn.execute(
+                delete(_audits).where(_audits.c.id > newest.from_id, _audits.c.id <= newest.to_id)
+            )
+            conn.execute(delete(_seals).where(_seals.c.id == newest.id))
 
-        if delete_newest:
-            newest = _range_seals(built.audit)[-1]
-            with transaction(built.audit.engine) as conn:
-                conn.execute(
-                    delete(_audits).where(
-                        _audits.c.id > newest.from_id, _audits.c.id <= newest.to_id
-                    )
-                )
-                conn.execute(delete(_seals).where(_seals.c.id == newest.id))
-
-        assert built.audit.verify(full=True).outcome == expected
+        assert built.audit.verify(full=True).outcome == "tampered"
     finally:
         built.audit.close()
 
@@ -658,9 +658,9 @@ def test_verify_acquires_database_snapshot_before_reading_anchor(
         order.append("database")
         return original_load(conn)
 
-    def read_second(path):
+    def read_second(path, **kwargs):
         order.append("anchor")
-        return original_read(path)
+        return original_read(path, **kwargs)
 
     try:
         with (
@@ -669,6 +669,53 @@ def test_verify_acquires_database_snapshot_before_reading_anchor(
         ):
             assert built.audit.verify(full=True).outcome == "ok"
         assert order[:2] == ["database", "anchor"]
+    finally:
+        built.audit.close()
+
+
+def test_many_seal_floor_cycles_stay_ok_and_retention_keeps_pruning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex-1 guard: anchor history length cannot deadlock or false-alarm retention."""
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
+    try:
+        assert built.audit.verify(full=True).outcome == "ok"
+        assert built.audit.retention.run_once() == 4
+        for cycle in range(25):
+            _record_old(built.audit, f"long-running-{cycle}", 2)
+            _seal_old(built.audit)
+            assert built.audit.verify(full=True).outcome == "ok"
+            assert built.audit.retention.run_once() == 2
+            assert built.audit.retention.last_refused_tampered == 0
+        assert built.audit.verify(full=True).outcome == "ok"
+    finally:
+        built.audit.close()
+
+
+def test_young_anchored_seal_invisible_to_database_snapshot_is_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex-2 guard: a post-snapshot SEAL inside grace is not a truncation watermark yet."""
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
+    original = verify._read_anchor
+    appended = False
+
+    def read_after_snapshot(path: str, **kwargs):
+        nonlocal appended
+        if not appended:
+            appended = True
+            current = _range_seals(built.audit)[-1].to_id
+            at = now_utc().isoformat(timespec="microseconds")
+            with Path(path).open("a", encoding="utf-8") as handle:
+                handle.write(f"{at} SEAL {current} {current + 1} post-snapshot\n")
+        return original(path, **kwargs)
+
+    try:
+        built.audit.grace = 60.0
+        with patch("firm.audit.verify._read_anchor", read_after_snapshot):
+            report = built.audit.verify(full=True)
+        assert report.outcome == "ok"
+        assert report.exit_code == 0
     finally:
         built.audit.close()
 
@@ -787,7 +834,7 @@ def test_unknown_row_key_as_sole_obstacle_is_error(
 
 
 @pytest.mark.parametrize("kind", ["SEAL", "FLOOR"])
-def test_replayed_valid_anchor_event_is_tampered(
+def test_replayed_valid_anchor_event_does_not_change_watermarks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, Lifecycle("retained-1", True, "single"))
@@ -799,7 +846,7 @@ def test_replayed_valid_anchor_event_is_tampered(
         )
         with path.open("a", encoding="utf-8") as handle:
             handle.write(replay + "\n")
-        assert built.audit.verify(full=True).outcome == "tampered"
+        assert built.audit.verify(full=True).outcome == "ok"
     finally:
         built.audit.close()
 
@@ -827,7 +874,7 @@ def test_retention_missing_retired_seal_key_refuses_without_pruning(
         pruner.close()
 
 
-def test_orphan_floor_past_resolved_floor_without_anchored_seals_is_tampered(
+def test_anchored_floor_remains_authoritative_without_db_floor_or_old_seal_lines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built = _build_log(tmp_path, monkeypatch, Lifecycle("retained-1", True, "single"))
@@ -842,7 +889,7 @@ def test_orphan_floor_past_resolved_floor_without_anchored_seals_is_tampered(
             line for line in path.read_text(encoding="utf-8").splitlines() if " SEAL " not in line
         ]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        assert built.audit.verify(full=True).outcome == "tampered"
+        assert built.audit.verify(full=True).outcome == "ok"
     finally:
         built.audit.close()
 
@@ -896,6 +943,33 @@ def test_genuinely_never_sealed_keyed_log_verifies_ok(tmp_path: Path) -> None:
         assert audit.verify(full=True).outcome == "ok"
     finally:
         audit.close()
+
+
+def test_never_sealed_growing_keyed_log_stays_ok(tmp_path: Path) -> None:
+    """Codex-3 guard: event-count growth is not evidence that sealing once existed."""
+    database_url = f"sqlite:///{tmp_path / 'never-sealed-growing.db'}"
+    audit = AuditLog(database_url=database_url, mac_key=_SINGLE_KEY, grace=0.0)
+    try:
+        for index in range(5):
+            _record_old(audit, f"never-sealed-{index}", 2)
+            assert audit.verify(full=True).outcome == "ok"
+        with transaction(audit.engine) as conn:
+            assert conn.execute(select(_status.c.sealing_observed)).scalar_one() is False
+    finally:
+        audit.close()
+
+
+def test_anchored_wiped_events_and_side_table_is_tampered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
+    try:
+        with transaction(built.audit.engine) as conn:
+            conn.execute(delete(_audits))
+            conn.execute(delete(_seals))
+        assert built.audit.verify(full=True).outcome == "tampered"
+    finally:
+        built.audit.close()
 
 
 def test_activation_boundary_uses_grace_cutoff_and_young_row_is_later_sealed(

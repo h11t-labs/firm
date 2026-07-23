@@ -27,10 +27,9 @@ from .._core.database import snapshot_transaction
 from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
+from .integrity import HmacSigner
 from .verify import (
-    _classify_anchor_issues,
     _read_anchor,
-    _record_matches_anchor,
     load_seal_records,
     range_is_prunable,
     seal_is_intact,
@@ -123,7 +122,14 @@ class Retention:
 
         deleted = 0
         with snapshot_transaction(self.audit.engine, write=True) as conn:
-            # Acquire the database snapshot before reading the external anchor, matching verify.
+            dialect = get_dialect(self.audit.engine)
+            # SQLite is serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL lock the never-deleted
+            # activation row before either side computes a shared high-water mark / floor.
+            activation_lock = dialect.with_row_lock(
+                select(_seals.c.id).where(_seals.c.kind == "activation").limit(1)
+            )
+            conn.execute(activation_lock).first()
+            # The first database read fixes the snapshot before the external anchor is consumed.
             records = load_seal_records(conn)
             if records.capped:
                 self._refuse_tampered(None)
@@ -161,20 +167,31 @@ class Retention:
 
             floor = max((record.to_id or 0 for record in floors), default=0)
             if self.audit._anchor_path is not None:
-                anchor = _read_anchor(self.audit._anchor_path)
-                if anchor.capped:
+                anchor = _read_anchor(
+                    self.audit._anchor_path,
+                    coverage_cutoff=now_utc() - timedelta(seconds=self.audit.grace),
+                    seal_keyring=seal_keyring,
+                )
+                floor = max(floor, anchor.floor_watermark)
+                present_coverage = max(
+                    [
+                        floor,
+                        *(
+                            record.to_id or 0
+                            for record in records
+                            if record.kind == "seal" and seal_is_intact(record, seal_keyring)
+                        ),
+                    ]
+                )
+                if present_coverage < anchor.coverage_watermark:
                     self._refuse_tampered(floors[-1] if floors else None)
                     return 0
-                _, corrupt = _classify_anchor_issues(anchor, records, retired_through=floor)
-                if corrupt:
-                    self._refuse_tampered(floors[-1] if floors else None)
-                    return 0
-                for floor_record in floors:
-                    if not any(
-                        _record_matches_anchor(floor_record, event) for event in anchor.events
-                    ):
-                        self._refuse_tampered(floor_record)
-                        return 0
+            if (
+                floor > 0
+                and conn.execute(select(_audits.c.id).where(_audits.c.id <= floor).limit(1)).first()
+            ):
+                self._refuse_tampered(floors[-1] if floors else None)
+                return 0
 
             covering = [
                 record
@@ -213,11 +230,13 @@ class Retention:
                 return 0
 
             retired_at = now_utc()
-            mac = integrity.floor_mac(
-                seal_key,
-                through_id=through,
-                retired_at=retired_at,
-                key_id=seal_key.id,
+            signer = HmacSigner(seal_key)
+            mac = signer.sign(
+                integrity.floor_mac_input(
+                    through_id=through,
+                    retired_at=retired_at,
+                    key_id=signer.key_id,
+                )
             )
             if not self.audit.sealer._emit_anchor(
                 kind="floor", from_id=None, to_id=through, mac=mac, at=retired_at

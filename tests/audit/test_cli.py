@@ -172,3 +172,54 @@ def test_missing_url_is_a_usage_error(monkeypatch) -> None:
     monkeypatch.delenv("FIRM_AUDIT_DATABASE_URL", raising=False)
     result = CliRunner().invoke(main, ["stats"])
     assert result.exit_code != 0
+
+
+def test_anchor_compact_writes_signed_checkpoint_and_preserves_verification(
+    db_url: str, tmp_path, monkeypatch
+) -> None:
+    secret = "cli-anchor-compact-key-padding-0123456789"  # noqa: S105
+    anchor = tmp_path / "anchor.log"
+    audit = AuditLog(
+        database_url=db_url,
+        mac_key=secret,
+        grace=0.0,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+    )
+    try:
+        audit.sealer.run_once()
+        audit.record("covered")
+        assert audit.sealer.run_once() == 1
+        assert audit.verify(full=True).outcome == "ok"
+    finally:
+        audit.close()
+
+    monkeypatch.setenv("FIRM_AUDIT_KEY", secret)
+    result = CliRunner().invoke(
+        main,
+        [
+            "anchor-compact",
+            "--database-url",
+            db_url,
+            "--anchor",
+            str(anchor),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "coverage=1, floor=0" in result.output
+    lines = anchor.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert lines[0].split()[1] == "CHECKPOINT"
+
+    verifier = AuditLog(
+        database_url=db_url,
+        create_schema=False,
+        mac_key=secret,
+        grace=0.0,
+        anchor_path=str(anchor),
+        anchor_max_age=3600.0,
+    )
+    try:
+        assert verifier.verify(full=True).outcome == "ok"
+    finally:
+        verifier.close()

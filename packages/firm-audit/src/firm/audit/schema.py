@@ -124,6 +124,8 @@ verify_status = Table(
     Column("last_full_coverage_at", _DT),  # last explicit ``--full`` coverage
     Column("newest_anchor_at", _DT),  # age of the freshest anchor the run saw
     Column("anchor_configured", Boolean, nullable=False, default=False),  # vs. "no anchor" (D22)
+    # Monotonic verifier memory for the explicitly weaker no-anchor wiped-side-table guard.
+    Column("sealing_observed", Boolean, nullable=False, default=False),
     Column("unsealed_tail_count", Integer, nullable=False, default=0),
     Column("unsealed_tail_oldest_at", _DT),  # oldest unsealed row → tail age via ``When``
     # JSON list of the top-N tampered findings on tampering (kind/label/id?/message/verdict), read

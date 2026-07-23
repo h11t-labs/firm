@@ -24,6 +24,10 @@ pre-1.0 (breaking changes bump the minor version).
 - Stateless partial verification: every run checks always-on invariants, the tail, newest range,
   and `ceil(range_count / verify_cycle)` date-selected old ranges. Only `--full` guarantees full
   range coverage.
+- `firm-audit anchor-compact` rotates a mutable anchor to one signed coverage/floor `CHECKPOINT`;
+  verification accepts full and compacted anchors with the same monotonic-watermark semantics.
+- A thin `Signer` protocol and the current `HmacSigner` centralize signing/verification without
+  adding an algorithm configuration surface.
 
 ### Security (pre-release hardening of the unreleased tamper-evidence layer)
 
@@ -36,17 +40,24 @@ pre-1.0 (breaking changes bump the minor version).
 - Activation uses the highest settled NULL-MAC row as its boundary, so pre-activation keyed rows
   remain sealable. Verification acquires its database snapshot with the first side-table query,
   then reads the anchor; retention uses the same ordering.
-- Anchor scans retain the newest bounded window, keeping live seals in the completeness check.
-  A wiped no-anchor side table now produces a tampered verdict when prior full coverage proves
-  activation, or a forced-nonzero warning when the settled pre-activation state is ambiguous.
+- Anchor verification is now an O(1)-memory monotonic read: mature SEAL coverage and authentic
+  FLOOR maxima replace capped per-event reconciliation. Appended junk cannot evict evidence;
+  malformed lines are skipped with one warning; a younger-than-grace seal cannot contradict an
+  older database snapshot.
+- With an anchor, its coverage watermark catches a wiped side table and its floor watermark
+  remains authoritative even when the DB floor row is gone. Without an anchor, persisted
+  `sealing_observed` memory detects a later side-table wipe without false-alarming a genuinely
+  never-sealed growing log; total DB+status wipe remains explicitly outside no-anchor guarantees.
 - Retention refuses when an old seal key is unavailable, or when a key is configured but no
   activation exists. Aligned pruning retries serialization/deadlock failures and fsyncs the FLOOR
-  anchor append before the database commit.
-- Anchor parsing is streamed and bounded. Final interrupted lines and reconstructible strict
-  prefixes warn; corrupt middle lines, replayed authenticated events, impossible orphan floors,
-  and other contradictions are tampered.
+  anchor append before the database commit. Sealing and aligned pruning serialize on the
+  never-deleted activation row (`BEGIN IMMEDIATE` on SQLite, `SELECT ... FOR UPDATE` on
+  PostgreSQL/MySQL), closing stale-HWM range reuse.
+- Seal-key rotation no longer disables sealing: existing Layer-2 signers may resolve through the
+  current or retired seal keyring; unknown and row-only signers are still refused.
 - Side-table reads use bounded keyset pages; row and anchor scans are streaming; findings and
-  retained malformed input are capped.
+  unresolved-row identifiers are capped. Oversized attacker-written cells are bounded before MAC
+  recomputation, and `MemoryError` becomes a persisted tampered result rather than escaping.
 - A broken verify-status sink routes through `on_error` without masking the returned integrity
   report or its alert.
 - The pruned region is probed on every run: a row at or below the signed floor is tampered.

@@ -25,6 +25,9 @@ class SqliteDialect(Dialect):
         # guarantees two claimers never select the same row.
         return stmt
 
+    def with_row_lock(self, stmt: Select) -> Select:
+        return stmt
+
     def upsert(
         self,
         table: Table,
