@@ -3452,6 +3452,13 @@ water mark: no later sealer pass and no `verify --full` run can self-heal it. Ea
 the rows its `row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification.
 `AuditLog` emits a startup hint restating this when sealing is enabled.
 
+`grace` also bounds the anchor's truncation guard: the coverage watermark only enforces seals older
+than `grace` (so a just-committed seal that a verifier's snapshot cannot yet see is not read as a
+truncation). The flip side is that deleting a seal **younger than `grace`** is not caught by the
+watermark until it ages — and if the sealer's clock runs ahead of the verifier's by δ, that
+unenforced tail widens to `grace + δ`. Keep `grace` small (and clocks in sync) so this recent-tail
+exposure stays narrow.
+
 ### Long jobs: record on their own transaction
 
 No single `grace` fits both a 50 ms web request and a 40-minute ETL. Rather than widen `grace`

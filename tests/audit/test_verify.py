@@ -707,7 +707,9 @@ def test_status_row_records_affected_identifiers_on_tampering(db_url: str) -> No
         audit.close()
 
 
-def test_malformed_seal_field_is_tampered_not_crash(db_url: str) -> None:
+def test_malformed_seal_field_is_tampered_not_crash(db_url: str, is_sqlite: bool) -> None:
+    if not is_sqlite:
+        pytest.skip("strict dialects reject a non-date sealed_at at the DB before verify sees it")
     audit = _make(db_url)
     try:
         audit.record("a")
@@ -763,7 +765,11 @@ def test_unknown_row_tracking_is_bounded_and_reports_overflow(
         audit.close()
 
 
-def test_oversized_attacker_cell_is_tampered_without_unbounded_recompute(db_url: str) -> None:
+def test_oversized_attacker_cell_is_tampered_without_unbounded_recompute(
+    db_url: str, is_sqlite: bool
+) -> None:
+    if not is_sqlite:
+        pytest.skip("strict dialects reject an over-length action at the DB before verify sees it")
     audit = _make(db_url)
     try:
         with transaction(audit.engine) as conn:
