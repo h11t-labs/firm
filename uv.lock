@@ -398,7 +398,7 @@ wheels = [
 
 [[package]]
 name = "firm"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm" }
 
 [package.optional-dependencies]
@@ -464,7 +464,7 @@ provides-extras = ["queue", "cache", "channel", "audit", "ui", "flask", "fastapi
 
 [[package]]
 name = "firm-audit"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-audit" }
 dependencies = [
     { name = "click" },
@@ -490,7 +490,7 @@ provides-extras = ["postgres", "mysql"]
 
 [[package]]
 name = "firm-cache"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-cache" }
 dependencies = [
     { name = "click" },
@@ -524,7 +524,7 @@ provides-extras = ["encryption", "msgpack", "postgres", "mysql"]
 
 [[package]]
 name = "firm-channel"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-channel" }
 dependencies = [
     { name = "click" },
@@ -550,7 +550,7 @@ provides-extras = ["postgres", "mysql"]
 
 [[package]]
 name = "firm-core"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-core" }
 dependencies = [
     { name = "alembic" },
@@ -576,7 +576,7 @@ provides-extras = ["postgres", "mysql"]
 
 [[package]]
 name = "firm-queue"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-queue" }
 dependencies = [
     { name = "click" },
@@ -612,7 +612,7 @@ provides-extras = ["flask", "fastapi", "postgres", "mysql"]
 
 [[package]]
 name = "firm-stack"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-stack" }
 
 [package.optional-dependencies]
@@ -678,7 +678,7 @@ provides-extras = ["queue", "cache", "channel", "audit", "ui", "flask", "fastapi
 
 [[package]]
 name = "firm-ui"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "packages/firm-ui" }
 dependencies = [
     { name = "firm-audit" },

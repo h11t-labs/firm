@@ -1,10 +1,15 @@
 # Changelog — firm-cache
 
 All notable changes to `firm-cache` are documented here.
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are semver-ish
-pre-1.0 (breaking changes bump the minor version).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-07-23
+
+First stable release: the PyPI classifier moves to **Production/Stable** and the
+inter-package pins to `~=1.0.0`.
 
 ### Changed
 
@@ -26,5 +31,6 @@ pre-1.0 (breaking changes bump the minor version).
   (`firm-cache[encryption]`).
 - `fetch` with `force`/`skip_nil`, failure-safe reads, and a `firm-cache` CLI.
 
-[Unreleased]: https://github.com/h11t-labs/firm/compare/firm-cache-v0.1.0...HEAD
+[Unreleased]: https://github.com/h11t-labs/firm/compare/firm-cache-v1.0.0...HEAD
+[1.0.0]: https://github.com/h11t-labs/firm/compare/firm-cache-v0.1.0...firm-cache-v1.0.0
 [0.1.0]: https://github.com/h11t-labs/firm/releases/tag/firm-cache-v0.1.0

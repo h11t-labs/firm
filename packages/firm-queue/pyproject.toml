@@ -1,6 +1,6 @@
 [project]
 name = "firm-queue"
-version = "0.1.0"
+version = "1.0.0"
 description = "Database-backed background jobs (a pure-Python port of Rails' Solid Queue). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,7 +9,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = ["jobs", "queue", "background", "tasks", "sqlite", "postgresql", "mysql", "solid_queue"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
@@ -17,7 +17,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=0.1.0",
+    "firm-core~=1.0.0",
     "croniter>=6.2.3",
     "click>=8.1",
 ]

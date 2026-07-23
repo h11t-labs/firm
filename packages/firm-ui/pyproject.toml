@@ -1,6 +1,6 @@
 [project]
 name = "firm-ui"
-version = "0.1.0"
+version = "1.0.0"
 description = "Optional web dashboard for firm — watch queues, cache, channels, and the audit log. Standard-library server; Jinja2 for templates."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,18 +9,18 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = ["dashboard", "ui", "queue", "cache", "channel", "audit"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=0.1.0",
-    "firm-queue~=0.1.0",
-    "firm-cache~=0.1.0",
-    "firm-channel~=0.1.0",
-    "firm-audit~=0.1.0",
+    "firm-core~=1.0.0",
+    "firm-queue~=1.0.0",
+    "firm-cache~=1.0.0",
+    "firm-channel~=1.0.0",
+    "firm-audit~=1.0.0",
     "jinja2>=3.1.6",
     "jinjax>=0.65",
 ]
