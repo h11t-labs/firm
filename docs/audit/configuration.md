@@ -19,6 +19,9 @@ AuditLog(
     anchor_path=None,               # append seal/floor/activation events here
     on_anchor=None,                 # callback(kind, from_id, to_id, mac, at) for custom sinks
     verify_cycle=7,                 # old-range verification cost divisor, not a day period
+    background_verification=False,   # run a verify loop on a timer (the in-process continuous watch)
+    verify_interval=3600.0,         # seconds between background tail verifications
+    verify_full_every=24,           # every Nth background run is a --full recompute; 0 disables it
 )
 ```
 
@@ -28,6 +31,7 @@ AuditLog(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
+| `background_verification` / `verify_interval` / `verify_full_every` | `False` / `3600.0` / `24` | Opt-in in-process verify loop — see [Scheduling verification](tamper-evidence.md#scheduling-verification-run-it-continuously). |
 | `on_error` | traceback to stderr | Callback for background-pruning, sealing, and anchor-write failures. |
 
 ## Tamper-evidence

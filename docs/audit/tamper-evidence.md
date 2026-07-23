@@ -441,13 +441,27 @@ detects something. A log that is written and sealed but never verified is exactl
 practice as one with no evidence at all — the signatures are there, but nobody is checking them. So
 treat verification like a health check: run it on a short interval, and run `--full` on a longer one.
 
-Unlike the opt-in in-process `SealLoop` / `RetentionLoop`, firm-audit does **not** bundle a
-`VerifyLoop`. That is a packaging choice, not advice to verify rarely: verify is read-only, and its
-cadence, its `--full` schedule, its alert routing, and *where* it runs (often a separate
-verifier/anchor host, not an app instance) are all deployment decisions. Drive it from a scheduler
-you already run. Two natural options:
+**Option A — the in-process loop.** The simplest cadence is a flag, mirroring `background_sealing`
+/ `background_retention`:
 
-**Option A — a recurring job on `firm-queue`** (dogfooding: use firm's own queue). `firm-queue`
+```python
+audit = AuditLog(
+    engine=verifier_engine, mac_key="...", anchor_path="/var/lib/firm/audit.anchor",
+    on_finding=to_logs,                 # your alert sink (see Alerting above)
+    background_verification=True,       # start the in-process VerifyLoop
+    verify_interval=3600.0,             # a tail verify every hour...
+    verify_full_every=24,              # ...and a --full every 24th tick (≈ daily); 0 disables it
+)
+```
+
+`VerifyLoop` runs a tail verify each interval and a `--full` recompute every `verify_full_every`
+ticks, each persisting `firm_audit_verify_status` and firing `on_finding` on a tampered/warning
+outcome; a run that raises is routed to `on_error` and the loop keeps ticking. It is fine for a
+single process, but *where* verify runs is itself a hardening lever — a separate verifier/anchor
+host that only reads the database is stronger than verifying from an app instance. For that, and for
+multi-process fan-out, drive it from a scheduler instead:
+
+**Option B — a recurring job on `firm-queue`** (dogfooding: use firm's own queue). `firm-queue`
 ships cron-scheduled [recurring tasks](../queue/recurring.md), so a verifier is a `@bq.job` plus two
 `RecurringTask`s:
 
@@ -480,7 +494,7 @@ guarantees every sealed range is recomputed (see [Stateless partial coverage](#s
 Detection reaches your logs two ways: `on_finding` → `to_logs`, and the raised failure → the queue's
 own failed-job path and alerting.
 
-**Option B — an external scheduler.** If you would rather not run verification inside the queue, any
+**Option C — an external scheduler.** If you would rather not run verification inside the queue, any
 cron / systemd timer / CI cron works the same way, using the exit code as the gate:
 
 ```cron

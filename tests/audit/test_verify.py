@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -908,3 +909,47 @@ def test_cli_verify_exit_codes_and_seal(db_url: str, is_sqlite: bool) -> None:
     bad = runner.invoke(main, ["verify", "--database-url", db_url, "--full"], env=env)
     assert bad.exit_code == 1
     assert "TAMPERED" in bad.output
+
+
+def _wait_until(predicate, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_background_verification_starts_the_loop(db_url: str) -> None:
+    audit = _make(db_url, background_verification=True, verify_interval=0.05)
+    try:
+        assert audit._verify_loop is not None
+        assert audit._verify_loop.name == "audit-verifier"
+    finally:
+        audit.close()  # must stop the loop cleanly
+
+
+def test_background_verification_detects_and_alerts_on_tampering(db_url: str) -> None:
+    alerts: list = []
+    audit = _make(
+        db_url, background_verification=True, verify_interval=0.02, on_finding=alerts.append
+    )
+    try:
+        audit.record("a")
+        audit.sealer.run_once()
+
+        # The loop verifies clean first (status persists OK, no alert)...
+        def _clean() -> bool:
+            row = _status_row(audit.engine)
+            return row is not None and row.outcome == "ok"
+
+        assert _wait_until(_clean)
+        assert not alerts
+
+        with transaction(audit.engine) as conn:
+            conn.execute(update(_audits).values(action="HACKED"))
+        # ...then the same background loop detects the tamper and fires on_finding.
+        assert _wait_until(lambda: any(a.severity == "critical" for a in alerts))
+        assert _status_row(audit.engine).outcome == "tampered"
+    finally:
+        audit.close()

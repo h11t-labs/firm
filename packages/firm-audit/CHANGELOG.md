@@ -24,6 +24,10 @@ pre-1.0 (breaking changes bump the minor version).
 - Stateless partial verification: every run checks always-on invariants, the tail, newest range,
   and `ceil(range_count / verify_cycle)` date-selected old ranges. Only `--full` guarantees full
   range coverage.
+- Opt-in in-process verify loop (`background_verification=True`, `verify_interval`,
+  `verify_full_every`) — a tail verify on a timer plus a periodic `--full`, each firing
+  `on_finding`, mirroring the seal/retention loops. Verification can also be scheduled externally
+  (a `firm-queue` recurring task or cron); see the docs.
 - `firm-audit anchor-compact` rotates a mutable anchor to one signed coverage/floor `CHECKPOINT`;
   verification accepts full and compacted anchors with the same monotonic-watermark semantics.
 - A thin `Signer` protocol and the current `HmacSigner` centralize signing/verification without

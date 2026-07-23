@@ -33,6 +33,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .._core.clock import now_utc
 from .._core.database import snapshot_transaction
 from .._core.dialects import get_dialect
+from .._core.poller import InterruptiblePoller
 from . import integrity, schema
 from .integrity import HmacSigner, Key, parse_keyring
 
@@ -1408,3 +1409,38 @@ class Verifier:
         )
         with dialect.begin_claim_tx(self.audit.engine) as conn:
             conn.execute(stmt)
+
+
+class VerifyLoop(InterruptiblePoller):
+    """Optional background loop that verifies on a timer — the in-process continuous watch.
+
+    Each tick runs a tail verify (persisting ``firm_audit_verify_status`` and firing ``on_finding``
+    on a tampered/warning outcome); every ``full_every`` ticks it runs a ``--full`` recompute
+    instead (``0`` disables the periodic full run). Mirrors :class:`~firm.audit.sealing.SealLoop`
+    and :class:`~firm.audit.retention.RetentionLoop`; opt in with
+    ``AuditLog(background_verification=True)``. Verify is read-only apart from the single status
+    row, so this is safe wherever the key is available — though a separate verifier/anchor host is
+    the stronger placement. A run that raises (e.g. an unknown ``key_id``) is routed to
+    ``on_error`` and the loop keeps ticking, exactly like the other pollers.
+    """
+
+    def __init__(
+        self,
+        verifier: Verifier,
+        interval: float = 3600.0,
+        *,
+        anchor_path: str | None = None,
+        full_every: int = 24,
+        on_error: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        super().__init__(interval, name="audit-verifier", on_error=on_error)
+        self.verifier = verifier
+        self._anchor_path = anchor_path
+        self._full_every = full_every
+        self._ticks = 0
+
+    def poll(self) -> int:
+        self._ticks += 1
+        full = self._full_every > 0 and self._ticks % self._full_every == 0
+        report = self.verifier.run(anchor_path=self._anchor_path, full=full)
+        return report.tampered_count

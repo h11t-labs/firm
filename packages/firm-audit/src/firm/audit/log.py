@@ -19,7 +19,7 @@ from .events import Reference
 from .integrity import Key, load_key
 from .retention import Retention, RetentionLoop
 from .sealing import Sealer, SealLoop
-from .verify import IntegrityAlert, Verifier, VerifyReport, default_on_finding
+from .verify import IntegrityAlert, Verifier, VerifyLoop, VerifyReport, default_on_finding
 
 #: Anchor callback: ``(kind, from_id, to_id, mac, at)`` for a seal/floor/activation event.
 AnchorCallback = Callable[[str, int | None, int, str, datetime], None]
@@ -95,6 +95,9 @@ class AuditLog:
         anchor_path: str | None = None,
         on_anchor: AnchorCallback | None = None,
         verify_cycle: int = 7,
+        background_verification: bool = False,
+        verify_interval: float = 3600.0,
+        verify_full_every: int = 24,
         anchor_max_age: float | None = None,
         unsealed_tail_max_age: float | None = None,
         on_error: Callable[[BaseException], None] | None = None,
@@ -198,6 +201,21 @@ class AuditLog:
             self._warn_sealing_enabled(seal_interval)
             self._seal_loop = SealLoop(self.sealer, seal_interval, on_error=self.on_error)
             self._seal_loop.start()
+
+        # The in-process continuous watch (opt-in), mirroring the seal/retention loops: a tail
+        # verify every ``verify_interval`` and a ``--full`` recompute every ``verify_full_every``
+        # ticks, each persisting the status row and firing ``on_finding`` on a tampered/warning
+        # outcome. A separate verifier host is stronger, but this makes "keep checking" one flag.
+        self._verify_loop: VerifyLoop | None = None
+        if background_verification:
+            self._verify_loop = VerifyLoop(
+                self.verifier,
+                verify_interval,
+                anchor_path=self._anchor_path,
+                full_every=verify_full_every,
+                on_error=self.on_error,
+            )
+            self._verify_loop.start()
 
     def _warn_sealing_enabled(self, seal_interval: float) -> None:
         """Restate the two-phase rollout and grace-sizing rules when sealing is switched on
@@ -311,6 +329,8 @@ class AuditLog:
             self._loop.stop()
         if self._seal_loop is not None:
             self._seal_loop.stop()
+        if self._verify_loop is not None:
+            self._verify_loop.stop()
         if self._owns_engine:
             dispose_engine(self.engine)
 
