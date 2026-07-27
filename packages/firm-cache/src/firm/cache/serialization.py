@@ -44,6 +44,16 @@ class JSONCoder:
         return json.loads(data.decode("utf-8"))
 
 
+# Every msgpack payload carries this one-byte tag. 0xc1 is the single byte msgpack itself
+# never emits ("never used" in the spec), so a tagged payload can't be mistaken for a bare
+# msgpack one — and no UTF-8 text, hence no JSON row, can start with it either. Without the
+# tag, switching a live cache from the JSON default silently *misreads* rather than missing:
+# JSON writes the int 1 as b"1", whose single byte 0x31 is a perfectly valid msgpack fixint 49.
+# Counters are exactly the values small enough to hit that, and `increment` would persist the
+# corruption. Costs one byte per entry; readers outside firm must strip it.
+_MSGPACK_TAG = b"\xc1"
+
+
 class MsgpackCoder:
     """Binary alternative to :class:`JSONCoder`: the same value shapes (dict/list/str/number/
     bool/None, plus raw ``bytes``) in smaller rows, and likewise no code execution on load.
@@ -66,10 +76,12 @@ class MsgpackCoder:
         self._msgpack = msgpack
 
     def dumps(self, value: Any) -> bytes:
-        return bytes(self._msgpack.packb(value))
+        return _MSGPACK_TAG + bytes(self._msgpack.packb(value))
 
     def loads(self, data: bytes) -> Any:
-        return self._msgpack.unpackb(data)
+        if data[:1] != _MSGPACK_TAG:
+            raise ValueError("not a msgpack payload written by MsgpackCoder")
+        return self._msgpack.unpackb(data[1:])
 
 
 class EncryptedCoder:

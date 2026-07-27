@@ -61,6 +61,41 @@ def test_msgpack_coder_rejects_non_string_dict_keys_on_read(db_url) -> None:
         assert cache.get("k") is None
 
 
+def test_json_rows_never_decode_as_msgpack_values(db_url) -> None:
+    """Switching a live cache to msgpack must *miss* on JSON rows, never misread them.
+
+    Without a payload tag it silently misreads the values most likely to be there: JSON writes
+    the int 1 as b"1", and that single byte 0x31 is a valid msgpack fixint 49 — so `get` would
+    return 49 and `increment` would persist 50. Small ints are exactly what counters hold.
+    """
+    pytest.importorskip("msgpack")
+    with Cache(database_url=db_url, auto_expire=False) as cache:  # JSON default
+        for i in range(10):
+            cache.set(f"counter:{i}", i)
+        cache.set("big", 4242)
+
+    with Cache(database_url=db_url, coder=MsgpackCoder(), auto_expire=False) as cache:
+        for i in range(10):
+            assert cache.get(f"counter:{i}") is None, f"JSON int {i} misread as msgpack"
+        assert cache.get("big") is None
+
+        # A miss, so increment restarts the counter instead of compounding a bogus value.
+        assert cache.increment("counter:1") == 1
+
+
+def test_msgpack_rows_never_decode_as_json_or_pickle_values(db_url) -> None:
+    """The reverse direction, and the pickle default before it: also misses, never misreads."""
+    pytest.importorskip("msgpack")
+    with Cache(database_url=db_url, coder=MsgpackCoder(), auto_expire=False) as cache:
+        for i in range(10):
+            cache.set(f"counter:{i}", i)
+
+    for coder in (JSONCoder(), PickleCoder()):
+        with Cache(database_url=db_url, coder=coder, auto_expire=False) as cache:
+            for i in range(10):
+                assert cache.get(f"counter:{i}") is None
+
+
 def test_msgpack_coder_composes_with_encryption(db_url) -> None:
     fernet = pytest.importorskip("cryptography.fernet")
     pytest.importorskip("msgpack")

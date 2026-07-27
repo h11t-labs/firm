@@ -34,6 +34,13 @@ dict keys must be `str`/`bytes` — msgpack's unpacker rejects other key types b
 hash-flooding guard, so a dict keyed by ints writes fine but reads back as a miss. Constructing the
 coder without the extra installed raises `ImportError` naming it.
 
+Rows carry a one-byte tag (`0xc1`) in front of the msgpack payload, which is what makes the
+switch-to-a-cold-cache promise above hold. Untagged, a JSON row holding the int `1` is the single
+byte `b"1"` — and `0x31` is a valid msgpack fixint, so it would decode as `49` rather than miss, and
+`increment` would persist the corruption. Small ints are exactly what counters hold, so this is the
+common case, not a corner one. The cost is a byte per entry, and readers outside firm must strip it
+before handing the rest to a msgpack library.
+
 ### Your own coder
 
 Anything with `dumps(value) -> bytes` and `loads(bytes) -> value` works — a coder may return any
