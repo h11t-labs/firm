@@ -23,7 +23,7 @@ SQL database, no Redis required.
 | Module | Install | Ports | Highlights |
 |---|---|---|---|
 | **[queue](docs/queue/overview.md)** | `pip install firm-queue` | `solid_queue` — background jobs | concurrency controls, recurring tasks, retries, forked/threaded supervisor, crash recovery |
-| **[cache](docs/cache/overview.md)** | `pip install firm-cache` | `solid_cache` — cache store | FIFO age/size/count eviction, pluggable coders, at-rest encryption |
+| **[cache](docs/cache/overview.md)** | `pip install firm-cache` | `solid_cache` — cache store | FIFO age/size/count eviction, JSON/msgpack/pickle values, at-rest encryption |
 | **[channel](docs/channel/overview.md)** | `pip install firm-channel` | `solid_cable` — pub/sub | broadcast/subscribe over your database, polling listener, automatic message trimming |
 | **[audit](docs/audit/overview.md)** | `pip install firm-audit` | *(none — original to firm)* | append-only audit log, opt-in retention, `history()` querying |
 

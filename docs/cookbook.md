@@ -171,18 +171,22 @@ cache.decrement("hits")            # -> 10
 cache.decrement("hits", by=4)      # -> 6
 ```
 
-### Coders: JSON vs default pickle
+### Coders: JSON (default), msgpack, pickle
 
-The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
+`JSONCoder` is the default: human-readable bytes, portable across languages, and safe to decode no matter who wrote the row. `MsgpackCoder` takes the same value shapes into a compact binary form (needs the `msgpack` extra). `PickleCoder` handles any Python object but executes code on load — opt in only when every writer to the cache table is trusted.
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
+# JSONCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
 cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
 cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
 
-# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
+# pip install "firm-cache[msgpack]" — smaller rows, and bytes round-trip as bytes
+cache = Cache(database_url="sqlite:///cache.db", coder=MsgpackCoder())
+
+# arbitrary Python objects, at the cost of code execution on load
 cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 ```
 

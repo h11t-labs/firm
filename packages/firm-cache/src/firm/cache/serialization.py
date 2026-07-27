@@ -1,9 +1,11 @@
 """Value coders + optional encryption.
 
 A coder turns a cached value into bytes and back. **JSON is the default**: it covers typical
-cache payloads and is safe to decode no matter who managed to write the table. ``PickleCoder``
-handles arbitrary Python objects but executes code on load — opt in only when every writer to
-the cache table is fully trusted. Wrapping a coder with :func:`build_encrypted_coder` encrypts
+cache payloads and is safe to decode no matter who managed to write the table. ``MsgpackCoder``
+covers the same value shapes in a more compact binary form (and is likewise safe to decode).
+``PickleCoder`` handles arbitrary Python objects but executes code on load — opt in only when
+every writer to the cache table is fully trusted. Wrapping a coder with
+:func:`build_encrypted_coder` encrypts
 the serialized bytes at rest with Fernet (pass a list of keys to rotate: encrypts with the
 first, decrypts with any).
 """
@@ -40,6 +42,34 @@ class JSONCoder:
 
     def loads(self, data: bytes) -> Any:
         return json.loads(data.decode("utf-8"))
+
+
+class MsgpackCoder:
+    """Binary alternative to :class:`JSONCoder`: the same value shapes (dict/list/str/number/
+    bool/None, plus raw ``bytes``) in smaller rows, and likewise no code execution on load.
+
+    Two differences from JSON worth knowing: ``bytes`` round-trip as ``bytes`` instead of
+    needing an encoding, and dict keys must be ``str``/``bytes`` — msgpack's unpacker rejects
+    other key types by default (a hash-flooding guard that matters precisely because the cache
+    table may be writable by others), so a dict keyed by ints writes fine but reads back as a
+    miss. Requires the ``msgpack`` extra.
+    """
+
+    def __init__(self) -> None:
+        try:
+            import msgpack
+        except ImportError as exc:
+            raise ImportError(
+                'The msgpack cache coder requires "msgpack". Install the msgpack extra: '
+                'pip install "firm-cache[msgpack]"'
+            ) from exc
+        self._msgpack = msgpack
+
+    def dumps(self, value: Any) -> bytes:
+        return bytes(self._msgpack.packb(value))
+
+    def loads(self, data: bytes) -> Any:
+        return self._msgpack.unpackb(data)
 
 
 class EncryptedCoder:

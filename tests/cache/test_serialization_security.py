@@ -7,13 +7,15 @@ misses, and key rotation is supported via a key list (MultiFernet).
 
 from __future__ import annotations
 
+import builtins
 import pickle
+import sys
 
 import pytest
 from sqlalchemy import select
 
 from firm._core.database import transaction
-from firm.cache import Cache, JSONCoder, PickleCoder, schema
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder, schema
 from firm.cache.entries import compute_byte_size, write_entry
 from firm.cache.keys import key_hash, normalize_key
 
@@ -32,6 +34,65 @@ def test_pickle_coder_is_an_explicit_opt_in(db_url) -> None:
         value = {"tuple": (1, 2)}  # not JSON-representable as-is
         cache.set("k", value)
         assert cache.get("k") == value
+
+
+def test_msgpack_coder_round_trips_json_shaped_values(db_url) -> None:
+    pytest.importorskip("msgpack")
+    with Cache(database_url=db_url, coder=MsgpackCoder(), auto_expire=False) as cache:
+        value = {"name": "Ada", "admin": True, "scores": [1, 2.5, None]}
+        cache.set("k", value)
+        assert cache.get("k") == value
+
+        # Unlike JSON, bytes survive as bytes — no base64/encoding dance.
+        cache.set("blob", b"\x00\xff")
+        assert cache.get("blob") == b"\x00\xff"
+
+        # increment/decrement go through the coder too.
+        cache.increment("hits", 3)
+        assert cache.get("hits") == 3
+
+
+def test_msgpack_coder_rejects_non_string_dict_keys_on_read(db_url) -> None:
+    """Documented quirk: msgpack's unpacker refuses non-str/bytes map keys (hash-flooding
+    guard), so an int-keyed dict writes fine but reads back as a miss rather than raising."""
+    pytest.importorskip("msgpack")
+    with Cache(database_url=db_url, coder=MsgpackCoder(), auto_expire=False) as cache:
+        cache.set("k", {1: "a"})
+        assert cache.get("k") is None
+
+
+def test_msgpack_coder_composes_with_encryption(db_url) -> None:
+    fernet = pytest.importorskip("cryptography.fernet")
+    pytest.importorskip("msgpack")
+    key = fernet.Fernet.generate_key()
+    with Cache(
+        database_url=db_url, coder=MsgpackCoder(), encrypt_key=key, auto_expire=False
+    ) as cache:
+        cache.set("creds", {"password": "super-secret-token"})
+        assert cache.get("creds") == {"password": "super-secret-token"}
+
+        with transaction(cache.engine) as conn:
+            row = conn.execute(
+                select(_entries.c.value).where(
+                    _entries.c.key_hash == key_hash(normalize_key("creds"))
+                )
+            ).first()
+        assert row is not None
+        assert b"super-secret-token" not in bytes(row.value)
+
+
+def test_msgpack_coder_names_the_extra_when_msgpack_is_missing(monkeypatch) -> None:
+    real_import = builtins.__import__
+
+    def without_msgpack(name: str, *args, **kwargs):
+        if name == "msgpack":
+            raise ImportError("No module named 'msgpack'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_msgpack)
+    monkeypatch.delitem(sys.modules, "msgpack", raising=False)
+    with pytest.raises(ImportError, match=r"firm-cache\[msgpack\]"):
+        MsgpackCoder()
 
 
 def test_undecodable_entry_reads_as_miss_not_error(db_url) -> None:

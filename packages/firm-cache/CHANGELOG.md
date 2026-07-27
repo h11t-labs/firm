@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `MsgpackCoder`: the value coder the `firm-cache[msgpack]` extra was already advertising, now
+  shipped. Same value shapes as the JSON default in a compact binary form, and just as safe to
+  decode (no code execution on load). `from firm.cache import MsgpackCoder`.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

@@ -107,7 +107,7 @@ Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ## firm.cache
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 # database_url is positional; everything after it is keyword-only (defaults shown):
 cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
@@ -126,7 +126,8 @@ cache.increment(key, by=1)          # -> int
 cache.decrement(key, by=1)          # -> int
 cache.clear()
 cache.close()                       # or:  with Cache(...) as cache: ...
-# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
+# keys are str|bytes; values go through the coder (JSONCoder by default; MsgpackCoder for
+# compact binary rows, PickleCoder for arbitrary Python objects — see cache/encryption-and-coders).
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
 ```
 

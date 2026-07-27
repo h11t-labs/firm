@@ -362,18 +362,22 @@ cache.decrement("hits")            # -> 10
 cache.decrement("hits", by=4)      # -> 6
 ```
 
-### Coders: JSON vs default pickle
+### Coders: JSON (default), msgpack, pickle
 
-The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
+`JSONCoder` is the default: human-readable bytes, portable across languages, and safe to decode no matter who wrote the row. `MsgpackCoder` takes the same value shapes into a compact binary form (needs the `msgpack` extra). `PickleCoder` handles any Python object but executes code on load — opt in only when every writer to the cache table is trusted.
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
+# JSONCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
 cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
 cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
 
-# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
+# pip install "firm-cache[msgpack]" — smaller rows, and bytes round-trip as bytes
+cache = Cache(database_url="sqlite:///cache.db", coder=MsgpackCoder())
+
+# arbitrary Python objects, at the cost of code execution on load
 cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 ```
 
@@ -2218,8 +2222,9 @@ atomic upsert.
   `decrement`, and `clear` — see [Operations](operations.md).
 - **Eviction** by age (`max_age`), total size (`max_size`), or entry count (`max_entries`), FIFO
   (oldest first) — see [Eviction & expiry](eviction.md).
-- **Pluggable serialization** (pickle / JSON / your own) and optional **at-rest encryption** —
-  see [Encryption & coders](encryption-and-coders.md).
+- **Values of any shape** — JSON by default, raw `bytes` and smaller rows via the msgpack coder,
+  arbitrary Python objects via the opt-in pickle coder, or bring your own — plus optional **at-rest
+  encryption**. See [Encryption & coders](encryption-and-coders.md).
 
 ```python
 from firm.cache import Cache
@@ -2394,6 +2399,11 @@ Set any to `None` to disable it:
 Cache(database_url=..., max_age=3600, max_size=None, max_entries=100_000)
 ```
 
+`max_size` counts *serialized* bytes, so your [coder](encryption-and-coders.md) sets how much fits:
+`MsgpackCoder` writes typical values about a third smaller than the JSON default, and at-rest
+encryption adds ~170 bytes per entry. If the cache is trimming sooner than you'd like, that's a
+cheaper lever than raising the limit.
+
 `max_age` is also enforced at **read time**: an entry older than `max_age` reads as a miss
 (`get` returns `None`, `fetch` recomputes) even if eviction hasn't physically deleted the row
 yet — eviction is opportunistic, so an idle or read-heavy cache would otherwise keep serving
@@ -2448,29 +2458,56 @@ constant cost.
 
 # Encryption & coders
 
-## Coders
+## Which coder?
 
-A *coder* turns a value into bytes and back. The default is **JSON** (dict/list/str/num/bool/
-None) — safe to decode no matter who wrote the row. `PickleCoder` handles arbitrary Python
-objects and is available as an explicit opt-in, and you can supply your own coder.
+A *coder* turns a value into bytes and back. The default covers the common case; reach for another
+when one of these lines describes you:
+
+| You want to… | Coder | What it costs |
+|---|---|---|
+| cache dicts, lists, strings, numbers | `JSONCoder` — the default | nothing: readable rows, portable to any language |
+| cache **`bytes`** (thumbnails, protobuf, compressed blobs), or fit **more entries** under the same `max_size` | `MsgpackCoder` | `pip install "firm-cache[msgpack]"`; rows are no longer human-readable |
+| cache arbitrary Python objects (tuples, dataclasses, sets) | `PickleCoder` | executes code on load — only when every writer to the table is trusted |
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 Cache(database_url=...)                        # JSON by default
+Cache(database_url=..., coder=MsgpackCoder())  # compact binary; bytes stay bytes
 Cache(database_url=..., coder=PickleCoder())   # arbitrary objects — read the warning below
 ```
 
-A custom coder is anything with `dumps(value) -> bytes` and `loads(bytes) -> value`:
+**Switching coders on an existing cache is safe but not free.** Rows written by the old coder can't
+be decoded by the new one, so they read as misses until they age out — plan for a cold cache, not a
+migration. This is also why the default stays JSON across releases.
+
+### More on `MsgpackCoder`
+
+Same value shapes as JSON in a compact binary form, and just as safe to decode (no code execution on
+load). Typical payloads land around a third smaller, which matters because `byte_size` drives
+[eviction](eviction.md): smaller values mean more entries survive under `max_size`.
+
+Two differences from JSON: `bytes` values round-trip as `bytes` instead of needing an encoding, and
+dict keys must be `str`/`bytes` — msgpack's unpacker rejects other key types by default as a
+hash-flooding guard, so a dict keyed by ints writes fine but reads back as a miss. Constructing the
+coder without the extra installed raises `ImportError` naming it.
+
+### Your own coder
+
+Anything with `dumps(value) -> bytes` and `loads(bytes) -> value` works — a coder may return any
+bytes it likes, so binary formats and compression are fair game:
 
 ```python
-import msgpack   # pip install "firm-cache[msgpack]"
+import zlib
 
-class MsgpackCoder:
-    def dumps(self, value): return msgpack.packb(value, use_bin_type=True)
-    def loads(self, data):  return msgpack.unpackb(data, raw=False)
+from firm.cache import Cache, JSONCoder
 
-Cache(database_url=..., coder=MsgpackCoder())
+class GzipJSONCoder:
+    def __init__(self): self._inner = JSONCoder()
+    def dumps(self, value): return zlib.compress(self._inner.dumps(value))
+    def loads(self, data):  return self._inner.loads(zlib.decompress(data))
+
+Cache(database_url=..., coder=GzipJSONCoder())
 ```
 
 > **Security:** `PickleCoder` deserializes with `pickle`, which executes code on load — anyone
@@ -2522,7 +2559,7 @@ Every `Cache(...)` option, with its default:
 Cache(
     database_url=None,            # SQLAlchemy URL (or pass engine=)
     engine=None,                  # a pre-built SQLAlchemy Engine, instead of database_url
-    coder=None,                   # value coder; defaults to PickleCoder()
+    coder=None,                   # value coder; defaults to JSONCoder()
     encrypt_key=None,             # Fernet key -> encrypt values at rest
     max_age=1209600.0,            # evict entries older than this many seconds (2 weeks); None = off
     max_size=268435456,           # evict when estimated total bytes exceed this (256 MiB); None = off
@@ -2540,7 +2577,7 @@ Cache(
 | Option | Default | Notes |
 |---|---|---|
 | `database_url` / `engine` | — | Provide one. `engine` lets two caches share a pool; bare `postgresql://`/`mysql://` URLs are normalized to the shipped drivers. |
-| `coder` | `PickleCoder()` | See [Encryption & coders](encryption-and-coders.md). |
+| `coder` | `JSONCoder()` | `MsgpackCoder` / `PickleCoder` are opt-in — see [Encryption & coders](encryption-and-coders.md). |
 | `encrypt_key` | `None` | Fernet key (needs the `[encryption]` extra). |
 | `max_age` / `max_size` / `max_entries` | 2 wk / 256 MiB / off | Eviction limits — see [Eviction & expiry](eviction.md). |
 | `expiry_batch_size` | `100` | Eviction batch + write-trigger rate (~`2/N`). |
@@ -4999,7 +5036,7 @@ Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ## firm.cache
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 # database_url is positional; everything after it is keyword-only (defaults shown):
 cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
@@ -5018,7 +5055,8 @@ cache.increment(key, by=1)          # -> int
 cache.decrement(key, by=1)          # -> int
 cache.clear()
 cache.close()                       # or:  with Cache(...) as cache: ...
-# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
+# keys are str|bytes; values go through the coder (JSONCoder by default; MsgpackCoder for
+# compact binary rows, PickleCoder for arbitrary Python objects — see cache/encryption-and-coders).
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
 ```
 

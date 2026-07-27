@@ -26,7 +26,9 @@ cache.fetch("expensive", lambda: compute())  # compute once, then cached
 ## Highlights
 
 - **FIFO eviction** by age, total size, or entry count — tuned in the background, like Solid Cache
-- **Pluggable coders** — JSON (default), opt-in pickle, or msgpack via `firm-cache[msgpack]`
+- **Cache anything you can serialize** — JSON by default; raw `bytes` (thumbnails, protobuf,
+  compressed blobs) and ~⅓ smaller rows with `firm-cache[msgpack]`; arbitrary Python objects with
+  the opt-in pickle coder
 - **At-rest encryption** (Fernet) via `firm-cache[encryption]`
 - `fetch`, `get_multi`/`set_multi`, `increment`/`decrement`
 
