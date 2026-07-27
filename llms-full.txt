@@ -2496,8 +2496,36 @@ Rows carry a one-byte tag (`0xc1`) in front of the msgpack payload, which is wha
 switch-to-a-cold-cache promise above hold. Untagged, a JSON row holding the int `1` is the single
 byte `b"1"` — and `0x31` is a valid msgpack fixint, so it would decode as `49` rather than miss, and
 `increment` would persist the corruption. Small ints are exactly what counters hold, so this is the
-common case, not a corner one. The cost is a byte per entry, and readers outside firm must strip it
-before handing the rest to a msgpack library.
+common case, not a corner one. The cost is a byte per entry.
+
+`0xc1` is the one byte the msgpack spec marks *never used*, and no UTF-8 text can start with it, so
+the tag can't collide with a bare msgpack payload or with a JSON row. There is no option to turn it
+off: the only thing that switch would do is re-open the misread above.
+
+### What ends up in the `value` column
+
+| Coder | Bytes written |
+|---|---|
+| `JSONCoder` | UTF-8 JSON |
+| `MsgpackCoder` | the `0xc1` tag, then the msgpack body |
+| `PickleCoder` | a pickle stream |
+
+With `encrypt_key` set, that payload is wrapped in a Fernet token instead — so an encrypted row is
+opaque to any reader without the key, whichever coder produced it.
+
+Reading a msgpack row from outside firm therefore means stripping one byte:
+
+```python
+import msgpack
+
+def decode_firm_msgpack(value: bytes):
+    if value[:1] != b"\xc1":
+        raise ValueError("not a firm msgpack payload")
+    return msgpack.unpackb(value[1:])
+```
+
+(Finding the row is the harder half: lookups go through `key_hash`, a signed 64-bit hash of the
+normalized key — see [Internals](internals.md).)
 
 ### Your own coder
 
