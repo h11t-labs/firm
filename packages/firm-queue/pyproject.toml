@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 flask = ["flask>=3.0"]                 # firm.queue.contrib.flask integration
 fastapi = ["fastapi>=0.110"]           # firm.queue.contrib.fastapi integration
+django = ["django>=5.2"]               # firm.queue.contrib.django (Tasks backend needs Django 6.0)
 postgres = ["firm-core[postgres]"]     # PostgreSQL driver (via firm-core)
 mysql = ["firm-core[mysql]"]           # MySQL / MariaDB driver (via firm-core)
 

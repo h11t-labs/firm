@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- **Django integration** (`firm.queue.contrib.django`, needs the `[django]` extra): one line in
+  `INSTALLED_APPS` configures firm from `DATABASES`, creates its tables from `manage.py migrate`,
+  autodiscovers `<app>/jobs.py`, and adds `manage.py firm_worker`. Includes a Django 6 Tasks
+  backend (`firm.queue.contrib.django.backend.FirmBackend`) and `enqueue_on_commit()` for
+  enqueueing inside `transaction.atomic()`. See [docs/django.md](../../docs/django.md).
+- **Per-job middleware** — `firm.queue.hooks.around_perform` wraps every job body a process runs,
+  for cleanup that has to happen whether the job returned or raised, and for timing, tracing, and
+  logging. Unlike a lifecycle hook, an exception in middleware fails the job. The Django app
+  config uses it to close Django's ORM connections after each job.
+
 ### Deprecated
 
 - The framework integrations moved from `firm.contrib.*` to **`firm.queue.contrib.*`**, so that

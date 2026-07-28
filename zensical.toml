@@ -55,6 +55,7 @@ nav = [
   ] },
   { "Guides" = [
     { "Framework integration" = "contrib.md" },
+    { "Django" = "django.md" },
     { "Deployment" = "deployment.md" },
     { "Dashboard (UI)" = "ui.md" },
     { "Database backends" = "database-backends.md" },

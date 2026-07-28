@@ -1,0 +1,4 @@
+# SQLite (firm runs in WAL mode, hence the sidecars)
+*.db
+*.db-wal
+*.db-shm

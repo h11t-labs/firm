@@ -7,9 +7,9 @@ nothing. You still define jobs the normal way with `@bq.job`.
 !!! note "Moved from `firm.contrib`"
 
     These live under `firm.queue.contrib` as of the next release, so that each module's
-    integrations sit under that module's own path — the same shape `firm.cache.contrib.*`
-    already has. `firm.contrib` read like a firm-wide namespace while everything in it only ever
-    configured the queue.
+    integrations sit under that module's own path — alongside `firm.cache.contrib.django`,
+    `firm.channel.contrib.django` and `firm.audit.contrib.django`. `firm.contrib` read like a
+    firm-wide namespace while everything in it only ever configured the queue.
 
     The old `firm.contrib.flask`, `firm.contrib.fastapi` and `firm.contrib.sqlalchemy` keep
     working and emit a `DeprecationWarning`; they are removed in 2.0. They re-export the same
@@ -19,6 +19,7 @@ nothing. You still define jobs the normal way with `@bq.job`.
 |---|---|---|
 | `firm.queue.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
 | `firm.queue.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.queue.contrib.django` | `firm-queue[django]` | a Django app config, `manage.py firm_worker`, `enqueue_on_commit`, and a `django.tasks` backend |
 | `firm.queue.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
 
 ## FastAPI
@@ -63,6 +64,23 @@ flask firm worker --threads 5 --queues default,mailers
 
 `Firm(app, embed_workers=True)` runs the worker inside the web process instead (dev /
 single-process only — otherwise every web worker starts its own supervisor).
+
+## Django
+
+```python
+# settings.py
+INSTALLED_APPS = ["myapp", "firm.queue.contrib.django"]
+```
+
+That one line configures firm from `DATABASES` in every process, creates its tables from
+`manage.py migrate`, imports `<app>/jobs.py` so workers can resolve your jobs, and adds
+`manage.py firm_worker`. `firm.queue.contrib.django.enqueue_on_commit` is the transactional enqueue
+below in Django's terms; `firm.queue.contrib.django.backend.FirmBackend` puts Django 6's `@task` on the
+same queue, and `firm.cache.contrib.django.FirmCache` puts `django.core.cache` in the same
+database.
+
+Django has a page of its own, because it has questions of its own — Alembic next to Django
+migrations, two connection pools, `TransactionTestCase`: **[Django](django.md)**.
 
 ## Transactional enqueue
 

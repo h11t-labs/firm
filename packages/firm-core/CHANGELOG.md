@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm._core.contrib.django.sqlalchemy_url_for()` — turns one Django `DATABASES` entry into a
+  SQLAlchemy URL firm can open, so every module's Django integration shares one mapping instead
+  of each carrying its own. Handles unix sockets, credentials needing percent-encoding, and the
+  `OPTIONS` keys Django consumes itself. Needs no Django import.
+- `firm._core.contrib.django_handle` — the shared machinery behind the Django handles in
+  firm-channel and firm-audit: settings-block validation, URL derivation, and a `LazyHandle` that
+  builds its object on first access, rebinds when the database changes, and reuses firm-queue's
+  engine when it is pointed at the same one.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

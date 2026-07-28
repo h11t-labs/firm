@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 encryption = ["cryptography>=42"]      # at-rest encryption (Fernet)
 msgpack = ["msgpack>=1.0"]             # msgpack value coder
+django = ["django>=5.2"]               # firm.cache.contrib.django CACHES backend
 postgres = ["firm-core[postgres]"]     # PostgreSQL driver (via firm-core)
 mysql = ["firm-core[mysql]"]           # MySQL / MariaDB driver (via firm-core)
 
