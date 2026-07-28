@@ -6,6 +6,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Changed
+
+- `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future
+  `firm-core` minor. Ships with the next release of this package. See
+  `docs/testing-and-contributing.md` § Cross-package pins.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-28
+
+### Changed
+
+- Module pins widened from `~=1.0.0` to `~=1.0`. The old form (`==1.0.*`) meant this package and a
+  module's next minor could not be installed together at all; the dashboard now works with any
+  1.x module. No behaviour change — the floor is deliberately left where it is, since the dashboard
+  needs nothing that shipped in those minors. See `docs/testing-and-contributing.md`
+  § Cross-package pins.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the
