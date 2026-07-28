@@ -114,6 +114,14 @@ class FirmQueue:
         @click.group(name, help=help_text)
         def group() -> None:
             if renamed_to is not None:
+                # Both channels on purpose: the warning is what a migration check greps for,
+                # the echo is what the person running the command actually sees (Python hides
+                # DeprecationWarning by default outside __main__).
+                warnings.warn(
+                    f"`flask {name}` is now `flask {renamed_to}`; the old name is removed in 2.0.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
                 click.echo(
                     f"warning: `flask {name}` is now `flask {renamed_to}`; "
                     "the old name is removed in 2.0.",
@@ -137,6 +145,7 @@ class FirmQueue:
 
 
 def _resolve_url(app: Any) -> str | None:
+    _warn_on_conflicting_config(app)
     for key in _CONFIG_KEYS:
         if url := app.config.get(key):
             return str(url)
@@ -144,6 +153,32 @@ def _resolve_url(app: Any) -> str | None:
         if url := os.environ.get(key):
             return url
     return None
+
+
+def _warn_on_conflicting_config(app: Any) -> None:
+    """Catch the one upgrade that can silently move a running queue to another database.
+
+    1.0.0 ignored ``app.config["FIRM_QUEUE_DATABASE_URL"]`` outright, so an app that set it
+    alongside a key that *did* resolve has been running on the other one. Now the queue key wins
+    — almost certainly what its author meant, but the jobs already enqueued do not follow.
+    Only a genuine disagreement is worth a warning; the same URL under both keys is fine.
+    """
+    queue_url = app.config.get(_CONFIG_KEYS[0])
+    if not queue_url:
+        return
+    losers = {
+        f"app.config[{_CONFIG_KEYS[1]!r}]": app.config.get(_CONFIG_KEYS[1]),
+        f"the {_CONFIG_KEYS[0]} environment variable": os.environ.get(_CONFIG_KEYS[0]),
+    }
+    for name, other in losers.items():
+        if other and str(other) != str(queue_url):
+            warnings.warn(
+                f"app.config[{_CONFIG_KEYS[0]!r}] now takes precedence over {name}, which "
+                f"firm-queue 1.0.0 used instead. The queue moves to {queue_url!r}; jobs already "
+                f"enqueued in {other!r} stay there. Remove one of the two to silence this.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
 
 def _build_supervisor(queues: tuple[str, ...], threads: int) -> Any:
@@ -174,6 +209,13 @@ def __getattr__(name: str) -> Any:
         )
         return FirmQueue
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    # A `__getattr__`-only name is invisible to dir(), so editors and `rich.inspect` can't tell
+    # that `Firm` still resolves. List it until 2.0. `__all__` stays clean, so `import *` and
+    # every doc example still hand out only the new name.
+    return sorted([*globals(), "Firm"])
 
 
 __all__ = ["FirmQueue"]

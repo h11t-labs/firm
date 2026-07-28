@@ -64,10 +64,14 @@ def test_deprecated_cli_group_warns_on_stderr(queue_url, capsys) -> None:
     FirmQueue(app)
     try:
         assert app.cli.commands["firm"].callback is not None
-        app.cli.commands["firm"].callback()
+        with pytest.warns(DeprecationWarning, match="flask firm-queue"):
+            app.cli.commands["firm"].callback()
         assert "`flask firm` is now `flask firm-queue`" in capsys.readouterr().err
 
-        app.cli.commands["firm-queue"].callback()  # the current name stays quiet
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            app.cli.commands["firm-queue"].callback()  # the current name stays quiet
+        assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
         assert capsys.readouterr().err == ""
     finally:
         set_runtime(None)
@@ -89,10 +93,45 @@ def test_queue_key_wins_over_the_shared_one(queue_url, tmp_path) -> None:
     app = Flask(__name__)
     app.config["FIRM_DATABASE_URL"] = f"sqlite:///{tmp_path / 'shared.db'}"
     app.config["FIRM_QUEUE_DATABASE_URL"] = queue_url
-    ext = FirmQueue(app)
+    with pytest.warns(RuntimeWarning, match="takes precedence"):
+        ext = FirmQueue(app)
     try:
         assert ext.runtime is not None
         assert str(ext.runtime.engine.url) == queue_url
+    finally:
+        set_runtime(None)
+
+
+def test_conflicting_config_warns_that_the_queue_moved(queue_url, tmp_path) -> None:
+    """1.0.0 ignored the app.config queue key, so honouring it can move a live queue.
+
+    The jobs already enqueued in the old database do not follow, and nothing else in the app
+    would say so — this warning is the only signal the operator gets.
+    """
+    app = Flask(__name__)
+    old_db = f"sqlite:///{tmp_path / 'where-the-jobs-are.db'}"
+    app.config["FIRM_DATABASE_URL"] = old_db
+    app.config["FIRM_QUEUE_DATABASE_URL"] = queue_url
+    with pytest.warns(RuntimeWarning) as caught:
+        FirmQueue(app)
+    try:
+        message = str(caught[0].message)
+        assert old_db in message  # names the database being left behind
+        assert queue_url in message  # and the one taking over
+    finally:
+        set_runtime(None)
+
+
+def test_matching_config_under_both_keys_is_silent(queue_url) -> None:
+    """Belt-and-braces config is not a conflict: same URL, nothing moves, no warning."""
+    app = Flask(__name__)
+    app.config["FIRM_DATABASE_URL"] = queue_url
+    app.config["FIRM_QUEUE_DATABASE_URL"] = queue_url
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        FirmQueue(app)
+    try:
+        assert not [w for w in caught if issubclass(w.category, RuntimeWarning)]
     finally:
         set_runtime(None)
 

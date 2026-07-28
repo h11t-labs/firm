@@ -16,9 +16,13 @@ nothing. You still define jobs the normal way with `@bq.job`.
     `app.extensions["firm"]` → `app.extensions["firm_queue"]` and `flask firm` →
     `flask firm-queue`.
 
-    Everything above shipped in 1.0.0, so every old spelling keeps working and warns; all of them
-    are removed in 2.0. The old import paths re-export the same objects, so `is` and `isinstance`
+    Everything above shipped in 1.0.0, so every old spelling keeps working, and all of them are
+    removed in 2.0. The old import paths re-export the same objects, so `is` and `isinstance`
     still hold across both.
+
+    The old import paths, the `Firm` name and `flask firm` raise a `DeprecationWarning` you can
+    grep a migration for. **`app.extensions["firm"]` cannot** — it is an ordinary dict key that
+    both spellings point at, and reading it runs no code of ours. Search for it by hand.
 
 | Import | Install | What it does |
 |---|---|---|

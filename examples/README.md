@@ -9,7 +9,7 @@ Runnable scripts. Each creates a local SQLite database (`firm-*.db`) for the dem
 | [embedded_worker.py](embedded_worker.py) | running the queue *inside* your app process with `ThreadSupervisor` | `uv run python examples/embedded_worker.py` |
 | [audit_logging.py](audit_logging.py) | same-transaction audit events, a queue job's lifecycle, and `history()` querying | `uv run python examples/audit_logging.py` |
 | [fastapi_app.py](fastapi_app.py) | a FastAPI app (lifespan + enqueue + read-through cache) | `uv run uvicorn examples.fastapi_app:app` |
-| [flask_app.py](flask_app.py) | a Flask app (`Firm` extension + enqueue + cache) | `uv run flask --app examples.flask_app run` |
+| [flask_app.py](flask_app.py) | a Flask app (`FirmQueue` extension + enqueue + cache) | `uv run flask --app examples.flask_app run` |
 | [secured_dashboard.py](secured_dashboard.py) | the firm-ui dashboard behind Basic auth + a custom Authenticator | `uv run python examples/secured_dashboard.py` |
 
 Install what each needs, e.g. `pip install "firm-queue[fastapi]"` or `pip install "firm-queue[flask]"`.

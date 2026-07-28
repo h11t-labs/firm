@@ -26,8 +26,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 - The Flask extension now resolves its database URL from `FIRM_QUEUE_DATABASE_URL` before
   `FIRM_DATABASE_URL`, looking in `app.config` before the environment, and the FastAPI lifespan
   falls back to `FIRM_DATABASE_URL` as well. One shared setting still configures every module,
-  and a single module can now override it — the shape `firm-ui` already had. Existing apps
-  setting only `FIRM_DATABASE_URL` are unaffected.
+  and a single module can now override it — the shape `firm-ui` already had.
+
+  **Check this if you set `app.config["FIRM_QUEUE_DATABASE_URL"]`.** 1.0.0 ignored that key
+  entirely, so if you set it *and* something else that did resolve (`app.config`'s
+  `FIRM_DATABASE_URL`, or `FIRM_QUEUE_DATABASE_URL` in the environment), your queue has been
+  running against the other one. It now resolves to the `app.config` queue key — probably what
+  you meant when you set it, but it does move a running queue to a different database, and jobs
+  already in the old one stay there. The extension raises a `RuntimeWarning` naming both URLs
+  when it sees that disagreement, so this cannot pass silently; the same URL under both keys is
+  not a conflict and stays quiet. Apps that set only `FIRM_DATABASE_URL`, only the environment,
+  or `database_url=` are unaffected.
+
+  Apps setting *neither* key anywhere used to raise `RuntimeError` at startup and now start if
+  `FIRM_DATABASE_URL` is in the environment — the shared setting `firm-ui` already reads.
 
 ### Deprecated
 
@@ -54,7 +66,10 @@ the name a genuinely suite-wide integration would want, and the other modules gr
   point at the same extension instance.
 
 - The Flask CLI group `flask firm` is now **`flask firm-queue`**. Both are registered; the old one
-  prints a rename notice on stderr before running.
+  raises a `DeprecationWarning` and prints a rename notice on stderr before running.
+
+`app.extensions["firm"]` is the one deprecation that cannot warn — it is a plain dict key, and
+reading it runs no code of ours. Grep for it rather than relying on warnings.
 
 ## [1.0.0] - 2026-07-23
 

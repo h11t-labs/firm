@@ -54,3 +54,33 @@ def test_new_paths_do_not_warn() -> None:
             warnings.simplefilter("always")
             importlib.reload(mod)
         assert not [w for w in caught if issubclass(w.category, DeprecationWarning)], module
+
+
+@pytest.mark.parametrize(("module", "old_attribute", "new_attribute"), MOVED)
+def test_identity_survives_reloading_the_new_module(
+    module: str, old_attribute: str, new_attribute: str
+) -> None:
+    """A reload rebuilds the class object; the old path must follow, not keep a stale copy.
+
+    Reloads happen for real under Flask's `--reload` dev server and plugin-reload machinery. If
+    the shim bound its target once at import, it would hand out the *previous* class afterwards
+    and every `isinstance` across the two spellings would start failing — the exact breakage
+    these aliases exist to prevent.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        old = importlib.import_module(f"firm.contrib.{module}")
+        new = importlib.import_module(f"firm.queue.contrib.{module}")
+        importlib.reload(new)
+        assert getattr(old, old_attribute) is getattr(new, new_attribute)
+
+
+def test_old_paths_expose_both_names_to_dir() -> None:
+    """`__getattr__`-only names are invisible to dir(); editors and inspect tools need them."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        old = importlib.import_module("firm.contrib.flask")
+        new = importlib.import_module("firm.queue.contrib.flask")
+    assert {"Firm", "FirmQueue"} <= set(dir(old))
+    assert {"Firm", "FirmQueue"} <= set(dir(new))
+    assert new.__all__ == ["FirmQueue"]  # but `import *` only ever hands out the new name
