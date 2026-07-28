@@ -1,12 +1,8 @@
-"""Specs for the dashboard tamper-evidence verify-status panel (design D22-D25).
+"""Specs for how the dashboard renders the tamper-evidence integrity state (design D22-D25).
 
-Three layers, mirroring the split in :mod:`firm.ui.audit_queries` / :mod:`firm.ui.render`:
-
-* :func:`integrity_state` is pure, so the whole six-row state table (plus ``verify_max_age``
-  forcing and anchor-absent-by-design) is asserted directly without a database;
-* the two query helpers (:func:`verify_status_row`, :func:`integrity_config`) are checked against
-  a real (seeded) audit schema;
-* rendering per state and the overview escalation go through :mod:`firm.ui.render`.
+The state itself is derived by :func:`firm.audit.queries.integrity_state` (specced in
+``tests/audit/test_integrity_status.py``); this file covers the panel :mod:`firm.ui.render` builds
+from it, per state, plus the overview escalation.
 """
 
 from __future__ import annotations
@@ -14,8 +10,8 @@ from __future__ import annotations
 import importlib.resources
 from datetime import datetime, timedelta
 
-from firm.ui import audit_queries, render
-from firm.ui.audit_queries import IntegrityConfig, integrity_state
+from firm.audit.queries import IntegrityConfig, integrity_state
+from firm.ui import render
 
 NOW = datetime(2026, 7, 20, 12, 0, 0)
 
@@ -50,172 +46,6 @@ def _status(**over: object) -> dict[str, object]:
     }
     base.update(over)
     return base
-
-
-# -- state derivation: the six state-table rows ------------------------------------------------
-
-
-def test_state_not_configured_when_no_key_and_no_status() -> None:
-    st = integrity_state(None, _cfg(key=False, sealing=False), now=NOW)
-    assert st.state == "not_configured"
-    assert st.tone == "neutral"
-    assert st.escalate is False
-
-
-def test_state_never_ran_when_configured_but_no_status() -> None:
-    st = integrity_state(None, _cfg(key=True, sealing=True), now=NOW)
-    assert st.state == "never_ran"
-    assert st.tone == "warn"
-    assert st.escalate is True  # amber liveness -> shows on overview too
-
-
-def test_state_ok_when_fresh_and_clean() -> None:
-    st = integrity_state(_status(), _cfg(), now=NOW)
-    assert st.state == "ok"
-    assert st.tone == "ok"
-    assert st.escalate is False
-    assert st.causes == ()
-
-
-def test_state_verifier_warning_does_not_escalate() -> None:
-    st = integrity_state(_status(outcome="warning", warning_count=2), _cfg(), now=NOW)
-    assert st.state == "warning"
-    assert "verify_warnings" in st.causes
-    assert st.escalate is False  # a non-liveness warning stays on the audit tab
-
-
-def test_state_error_is_amber_and_escalates() -> None:
-    st = integrity_state(
-        _status(outcome="error", error_message="unknown key_id ab12"), _cfg(), now=NOW
-    )
-    assert st.state == "error"
-    assert st.tone == "warn"  # red stays reserved for proven tampering (D24)
-    assert st.escalate is True
-
-
-def test_state_tampered_dominates_everything() -> None:
-    st = integrity_state(_status(outcome="tampered", tampered_count=3), _cfg(), now=NOW)
-    assert st.state == "tampered"
-    assert st.tone == "danger"
-    assert st.escalate is True
-
-
-def test_tampered_count_alone_forces_tampered() -> None:
-    # A stored outcome that lags the counts must not soften a real finding.
-    st = integrity_state(_status(outcome="ok", tampered_count=1), _cfg(), now=NOW)
-    assert st.state == "tampered"
-
-
-# -- staleness forcing + anchor-absent-by-design -----------------------------------------------
-
-
-def test_verify_max_age_forces_amber_over_a_stored_ok() -> None:
-    old = _status(ran_at=NOW - timedelta(hours=30))  # a nightly cron that skipped a day
-    st = integrity_state(old, _cfg(), now=NOW, verify_max_age=24 * 3600.0)
-    assert st.state == "warning"
-    assert "stale" in st.causes
-    assert st.escalate is True  # a dead verify cron is a liveness alarm
-
-
-def test_fresh_run_within_max_age_stays_ok() -> None:
-    st = integrity_state(_status(ran_at=NOW - timedelta(hours=1)), _cfg(), now=NOW)
-    assert st.state == "ok"
-
-
-def test_anchor_absent_by_design_never_reads_as_stale() -> None:
-    # No anchor configured: an aggressive threshold must not manufacture an "anchor stale" amber.
-    st = integrity_state(
-        _status(anchor_configured=False, newest_anchor_at=None),
-        _cfg(),
-        now=NOW,
-        anchor_max_age=1.0,
-    )
-    assert st.state == "ok"
-    assert "anchor_stale" not in st.causes
-
-
-def test_configured_anchor_past_threshold_warns() -> None:
-    st = integrity_state(
-        _status(anchor_configured=True, newest_anchor_at=NOW - timedelta(hours=1)),
-        _cfg(),
-        now=NOW,
-        anchor_max_age=60.0,
-    )
-    assert st.state == "warning"
-    assert "anchor_stale" in st.causes
-    assert st.escalate is False  # a lagging anchor sink is not a pipeline-liveness alarm
-
-
-def test_stalled_sealer_escalates() -> None:
-    st = integrity_state(
-        _status(unsealed_tail_oldest_at=NOW - timedelta(hours=30), unsealed_tail_count=500),
-        _cfg(),
-        now=NOW,
-        verify_max_age=24 * 3600.0,
-    )
-    assert st.state == "warning"
-    assert "sealer_stalled" in st.causes
-    assert st.escalate is True
-
-
-# -- query helpers -----------------------------------------------------------------------------
-
-
-def test_verify_status_row_none_when_never_run(runtime) -> None:
-    with runtime.engine.connect() as conn:
-        assert audit_queries.verify_status_row(conn) is None
-
-
-def test_verify_status_row_reads_upserted_row(runtime, seed) -> None:
-    seed.verify_status(outcome="warning", warning_count=4, unsealed_tail_count=7)
-    with runtime.engine.connect() as conn:
-        row = audit_queries.verify_status_row(conn)
-    assert row is not None
-    assert row["outcome"] == "warning"
-    assert row["warning_count"] == 4
-    assert row["unsealed_tail_count"] == 7
-
-
-def test_verify_status_row_reads_canonical_id_not_newest_ran_at(runtime, seed) -> None:
-    # Bug #2. The verifier upserts a single fixed row (id 1). A DB-write attacker cannot flip the
-    # panel green by inserting a SECOND, far-future ``outcome="ok"`` row: the dashboard reads the
-    # canonical row by id, never the newest by ``ran_at``. The first seeded row is the genuine
-    # tampered verify at id 1; the second is the attacker's future-dated forgery at id 2.
-    seed.verify_status(outcome="tampered", tampered_count=1, ran_at=NOW)  # id 1 — the real verify
-    seed.verify_status(outcome="ok", ran_at=NOW + timedelta(days=3650))  # id 2 — attacker forgery
-    with runtime.engine.connect() as conn:
-        row = audit_queries.verify_status_row(conn)
-    assert row is not None
-    assert row["outcome"] == "tampered"  # the canonical row wins — the forgery is ignored
-    assert row["tampered_count"] == 1
-
-
-def test_integrity_config_without_seals_is_inactive(runtime) -> None:
-    with runtime.engine.connect() as conn:
-        cfg = audit_queries.integrity_config(conn, key_configured=False)
-    assert cfg.key_configured is False
-    assert cfg.sealing_active is False
-    assert cfg.sealing_since is None
-
-
-def test_integrity_config_reads_explicit_activation_marker(runtime, seed) -> None:
-    older_seal = NOW - timedelta(days=2)
-    activated_at = NOW - timedelta(days=1)
-    seed.seal(from_id=0, to_id=5, sealed_at=older_seal)
-    seed.seal(
-        kind="activation",
-        from_id=-1,
-        to_id=0,
-        row_count=None,
-        rows_mac=None,
-        sealed_at=activated_at,
-    )
-    seed.seal(from_id=5, to_id=10, sealed_at=NOW)
-    with runtime.engine.connect() as conn:
-        cfg = audit_queries.integrity_config(conn, key_configured=True)
-    assert cfg.key_configured is True
-    assert cfg.sealing_active is True
-    assert cfg.sealing_since == activated_at
 
 
 # -- rendering per state -----------------------------------------------------------------------

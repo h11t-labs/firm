@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm.cache.queries`: the read-query layer the dashboard used to keep to itself, now a supported
+  surface for your own dashboards, exporters, and health checks — `cache_stats` and `cache_recent`,
+  `Connection` in / dicts out. Keys come back as raw `bytes` (a cache key is arbitrary bytes), so
+  decoding for display is the caller's decision. A negative `limit`/`offset` raises `ValueError`.
+
 ## [1.1.0] - 2026-07-28
 
 ### Added

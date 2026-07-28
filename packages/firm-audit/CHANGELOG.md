@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm.audit.queries`: the read-query layer the dashboard used to keep to itself, now a supported
+  surface for your own dashboards, exporters, and health checks. Paginated, sortable
+  `audit_search`/`audit_count` (where `history()` is a plain filtered read), `audit_stats`,
+  `audit_detail`, plus the tamper-evidence readers `verify_status_row`, `integrity_config`,
+  `integrity_state`, `row_integrity_context`, and `row_status`. Search filters take the same dual
+  form as `history()` — `subject=`/`actor=` or the split `*_type=`/`*_id=` halves, never both — and
+  a negative `limit`/`offset` raises `ValueError`.
+
 ### Changed
 
 - `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future
