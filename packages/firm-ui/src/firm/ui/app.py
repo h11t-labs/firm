@@ -137,6 +137,7 @@ class UIRequest:
     peer: str = ""
     prefix: str = ""
     host: str = ""
+    scheme: str = "http"  # what the client used to reach the dashboard, as the transport sees it
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "method", self.method.upper())
@@ -246,11 +247,18 @@ class _Handler:
     def _origin_ok(self) -> bool:
         """Basic CSRF guard: a cross-origin browser form POST carries a mismatched ``Origin`` (or
         ``Referer``). Non-browser clients that send neither are allowed — the threat model is the
-        operator's own browser being tricked into POSTing to this dashboard."""
+        operator's own browser being tricked into POSTing to this dashboard.
+
+        A dashboard reached over HTTPS accepts an HTTPS origin only, so a page served over plain
+        HTTP on the same host cannot post to it. The reverse stays permissive: a deployment behind
+        a TLS-terminating proxy often reports ``http`` to the application, and the browser's origin
+        is then ``https`` — rejecting that would break every action on a correct deployment.
+        """
         host = self.request.host
+        allowed = {f"{self.request.scheme}://{host}", f"https://{host}"}
         origin = self.request.headers.get("Origin", "")
         if origin:
-            return origin in (f"http://{host}", f"https://{host}")
+            return origin in allowed
         referer = self.request.headers.get("Referer", "")
         if referer:
             return urlsplit(referer).netloc == host
@@ -417,6 +425,11 @@ class _Handler:
         raw_length = self.request.headers.get("Content-Length", "")
         if raw_length and not re.fullmatch(r"[0-9]+", raw_length):
             return self.error("Malformed Content-Length.", 400)
+        # Same reasoning for a body framed two ways at once: RFC 9112 requires that a request
+        # carrying both be rejected, precisely because a proxy in front may frame it by the header
+        # this side ignores.
+        if raw_length and self.request.headers.get("Transfer-Encoding", ""):
+            return self.error("Content-Length and Transfer-Encoding cannot both be set.", 400)
         # Both the announced and the actual size, so the limit holds whether the transport hands
         # over a buffered body or a reader (and for a chunked body, which announces no length).
         announced = _to_int(raw_length, 0)

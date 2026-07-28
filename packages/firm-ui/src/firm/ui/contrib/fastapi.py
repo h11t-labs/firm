@@ -46,8 +46,12 @@ def router(
 
     async def dispatch(request: Request, subpath: str) -> Response:
         scope = request.scope
-        # scope["path"] is already percent-decoded; root_path covers an app mounted under a path.
-        full_path = f"{scope.get('root_path', '')}{scope['path']}"
+        # scope["path"] is already percent-decoded. root_path covers an app mounted under a path,
+        # but Starlette versions disagree on whether it is still part of scope["path"] — so add it
+        # only when it is not there already, or a nested mount doubles its own prefix.
+        root, path = scope.get("root_path", ""), scope["path"]
+        inside_root = root and (path == root or path.startswith(f"{root}/"))
+        full_path = path if inside_root else f"{root}{path}"
         ui_request = UIRequest(
             method=request.method,
             path=f"/{subpath}",
@@ -56,6 +60,7 @@ def router(
             peer=request.client.host if request.client else "",
             prefix=mount_prefix(full_path, subpath),
             host=request.headers.get("host", ""),
+            scheme=request.url.scheme,
         )
         # The body stays in the receive channel until the app asks for it, which it only does once
         # the request has authenticated and passed the size limit — the same order the standalone

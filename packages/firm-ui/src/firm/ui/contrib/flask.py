@@ -55,6 +55,7 @@ def blueprint(
             peer=request.remote_addr or "",
             prefix=mount_prefix(full_path, subpath),
             host=request.host,
+            scheme=request.scheme,
         )
         # Lazily: the body is buffered only once the request has authenticated and passed the
         # dashboard's size limit.

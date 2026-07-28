@@ -21,6 +21,13 @@ Two things every mount has to settle, and both are explicit here rather than def
   ``Origin``/``Referer`` check, not by the host framework's CSRF token (the forms are rendered by
   firm-ui and carry no token). The adapters therefore exempt these routes from the host's token
   check where the host applies one by default; the same-origin guard runs on every POST.
+
+One thing a mount inherits rather than decides: how much of a request body reaches memory. The
+dashboard refuses a body over 1 MiB and asks for it only after the request has authenticated, but
+a request that announces no length (a chunked one) is buffered by the host's server before either
+check can run — so the host's own request-size limit is the bound (Django's
+``DATA_UPLOAD_MAX_MEMORY_SIZE``, Flask's ``MAX_CONTENT_LENGTH``, whatever sits in front of an ASGI
+app). The standalone server frames bodies by ``Content-Length`` alone and rejects the rest.
 """
 
 from __future__ import annotations

@@ -73,6 +73,7 @@ def dashboard_view(
             # request.path carries the script prefix; request.path_info would not.
             prefix=mount_prefix(request.path, subpath),
             host=request.get_host(),  # validated against ALLOWED_HOSTS
+            scheme=request.scheme,
         )
         # Lazily: reading request.body applies Django's own upload limits, and it only happens
         # once the request has authenticated and passed the dashboard's size limit.

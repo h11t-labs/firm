@@ -58,10 +58,25 @@ class Handler(BaseHTTPRequestHandler):
         if response.body:
             self.wfile.write(response.body)
 
+    def _framing_ok(self) -> bool:
+        """``BaseHTTPRequestHandler`` frames a body by ``Content-Length`` and nothing else, so a
+        chunked request would leave its body in the socket to be read as the next request — the
+        back half of a request-smuggling pair. Refuse anything that announces another framing."""
+        if not self.headers.get("Transfer-Encoding"):
+            return True
+        self.close_connection = True
+        headers = [("Content-Type", "text/plain; charset=utf-8")]
+        self._write(UIResponse(400, headers, b"Unsupported Transfer-Encoding.\n"))
+        return False
+
     def do_GET(self) -> None:
+        if not self._framing_ok():
+            return
         self._write(self._app.handle(self._request()))
 
     def do_POST(self) -> None:
+        if not self._framing_ok():
+            return
         # The body is read only if the app asks for it — it declines to before the request has
         # authenticated and passed the size limit. If it never asks, the announced bytes are still
         # in the socket, so the connection has to close: keep-alive would misparse them as the

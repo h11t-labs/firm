@@ -187,6 +187,37 @@ def test_ambiguous_content_length_is_refused(app: DashboardApp) -> None:
         assert app.handle(request).status == 400
 
 
+def test_two_framings_at_once_are_refused(app: DashboardApp) -> None:
+    """RFC 9112: a request framed by both Content-Length and Transfer-Encoding must be rejected —
+    a proxy in front may frame it by the header this side ignores."""
+    request = UIRequest(
+        "POST",
+        "/settings/theme",
+        headers=Headers(
+            [("Host", "app.example"), ("Content-Length", "10"), ("Transfer-Encoding", "chunked")]
+        ),
+        body=b"theme=dark",
+    )
+    assert app.handle(request).status == 400
+
+
+def test_https_dashboard_refuses_a_plain_http_origin(dashboard, seed) -> None:
+    """A page served over HTTP on the same host must not be able to post to an HTTPS dashboard.
+    The reverse stays permissive: behind a TLS-terminating proxy the app often sees ``http`` while
+    the browser's origin is ``https``."""
+    seed.cache_entry()
+    app = DashboardApp(dashboard)
+
+    def clear(scheme: str, origin: str) -> int:
+        headers = Headers([("Host", "app.example"), ("Origin", origin)])
+        return app.handle(UIRequest("POST", "/cache/clear", headers=headers, scheme=scheme)).status
+
+    assert clear("https", "http://app.example") == 403
+    assert clear("https", "https://app.example") == 303
+    assert clear("http", "https://app.example") == 303  # proxy-terminated TLS
+    assert clear("http", "http://app.example") == 303
+
+
 @pytest.mark.parametrize(
     ("hostile", "expected"),
     [

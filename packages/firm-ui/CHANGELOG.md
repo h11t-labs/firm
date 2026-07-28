@@ -24,9 +24,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Changed
 
-- A POST whose `Content-Length` is not a plain number — including two conflicting header lines —
-  is answered `400` instead of being read under one of the two lengths. Every transport now agrees
-  on how much body there is, or refuses the request.
+- Request framing is now unambiguous or refused: a `Content-Length` that is not a plain number
+  (including two conflicting header lines), a request framed by both `Content-Length` and
+  `Transfer-Encoding`, and — on the standalone server, which frames by `Content-Length` alone — any
+  chunked request are all answered `400`. Each was a body the layer in front could read differently
+  than this one.
+- The same-origin guard now knows the scheme the dashboard was reached over: served over HTTPS, it
+  accepts an HTTPS origin only, so a page on plain HTTP at the same host can no longer post to it.
+  A deployment that terminates TLS in a proxy and reports `http` to the application still accepts
+  the browser's HTTPS origin.
 - The dashboard's read queries moved into the packages that own the data (`firm.queue.queries`,
   `firm.cache.queries`, `firm.channel.queries`, `firm.audit.queries`), where they are now a
   supported API. firm-ui builds on them like any other consumer and keeps only presentation:

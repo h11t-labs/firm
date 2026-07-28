@@ -237,6 +237,26 @@ def test_mounting_unguarded_is_refused(mount) -> None:
 # -- framework-specific ----------------------------------------------------------------------------
 
 
+def test_fastapi_nested_mount_does_not_double_its_prefix(dashboard, seed) -> None:
+    """A router included in an app that is itself mounted under a path: the dashboard's own prefix
+    is the whole path in front of it, once — Starlette versions disagree on whether root_path is
+    still part of scope["path"], and guessing wrong yields /ops/ops/firm links."""
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from firm.ui.contrib.fastapi import router
+
+    seed.ready()
+    inner = fastapi.FastAPI()
+    inner.include_router(router(dashboard, host_auth=True), prefix=PREFIX)
+    outer = fastapi.FastAPI()
+    outer.mount("/ops", inner)
+
+    body = TestClient(outer, follow_redirects=False).get(f"/ops{PREFIX}/").text
+    assert f'href="/ops{PREFIX}/cache"' in body
+    assert "/ops/ops" not in body
+
+
 def test_django_decorator_guards_the_mount(django_client, seed) -> None:
     """The permission rule stays in the host project: a decorator that refuses must win before any
     dashboard code runs."""
