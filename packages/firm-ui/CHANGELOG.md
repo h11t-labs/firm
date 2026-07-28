@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard can be **mounted inside a host application** — on its domain, in its routing,
+  behind its own permissions — instead of running as a second process. One adapter per framework,
+  each behind its own extra: `firm.ui.contrib.django.dashboard_urls` (`firm-ui[django]`),
+  `firm.ui.contrib.flask.blueprint` (`firm-ui[flask]`), and `firm.ui.contrib.fastapi.router`
+  (`firm-ui[fastapi]`). Links, form actions, and the preference cookies all carry the mount
+  prefix. A mount must state who authenticates it — `authenticator=` (firm-ui checks) or
+  `host_auth=True` (the host application does); neither raises `ValueError`, so mounting can never
+  silently mean "no auth at all".
+- `firm.ui.DashboardApp` — the dashboard with no transport attached: `handle(UIRequest) ->
+  UIResponse`, the seam the adapters and the stdlib server both sit on. With `firm.ui.UIRequest`,
+  `firm.ui.UIResponse`, and `firm.ui.Headers`, that is all a mount for another framework needs.
+- `static_url=` points the stylesheet link at your own static pipeline, and `firm.ui.static_dir()`
+  says where the file lives so you can publish it there.
+
 ### Changed
 
 - The dashboard's read queries moved into the packages that own the data (`firm.queue.queries`,

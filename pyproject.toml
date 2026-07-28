@@ -33,6 +33,7 @@ dev = [
     "msgpack>=1.0",
     "psycopg[binary]>=3.3.4",
     "pymysql>=1.1",
+    "django>=4.2",
     "flask>=3.0",
     "fastapi>=0.139.2",
     "httpx>=0.27",

@@ -1,0 +1,91 @@
+"""Mount the dashboard in a FastAPI (or plain Starlette) application (``firm-ui[fastapi]``).
+
+::
+
+    from firm.ui import build_dashboard
+    from firm.ui.contrib.fastapi import router
+
+    dash = build_dashboard(database_url="sqlite:///app.db")
+    app.include_router(router(dash, host_auth=True), prefix="/firm",
+                       dependencies=[Depends(require_admin)])
+
+``host_auth=True`` says the dependency (or middleware) guards the route; pass ``authenticator=``
+instead to let firm-ui check it. The dashboard's work is synchronous database I/O, so each request
+runs in the threadpool rather than on the event loop.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Request, Response
+from starlette.concurrency import run_in_threadpool
+
+from ..app import Headers, UIRequest
+from ..auth import Authenticator
+from ..context import Dashboard
+from . import build_app, mount_prefix
+
+
+def router(
+    dashboard: Dashboard,
+    *,
+    authenticator: Authenticator | None = None,
+    host_auth: bool = False,
+    channel_trim_retention: float | None = None,
+    static_url: str | None = None,
+) -> APIRouter:
+    """A router serving the whole dashboard under whatever ``prefix`` you include it at."""
+    app = build_app(
+        dashboard,
+        authenticator=authenticator,
+        host_auth=host_auth,
+        channel_trim_retention=channel_trim_retention,
+        static_url=static_url,
+    )
+    api = APIRouter()
+
+    async def dispatch(request: Request, subpath: str) -> Response:
+        scope = request.scope
+        # scope["path"] is already percent-decoded; root_path covers an app mounted under a path.
+        full_path = f"{scope.get('root_path', '')}{scope['path']}"
+        ui_request = UIRequest(
+            method=request.method,
+            path=f"/{subpath}",
+            query=scope["query_string"].decode("latin-1"),
+            headers=Headers(request.headers.items()),
+            # Starlette has already buffered the body by the time a route runs; the host's own
+            # request-size limit is the one that applies before it, and the dashboard rejects
+            # anything over its own limit below.
+            body=await request.body(),
+            peer=request.client.host if request.client else "",
+            prefix=mount_prefix(full_path, subpath),
+            host=request.headers.get("host", ""),
+        )
+        result = await run_in_threadpool(app.handle, ui_request)
+        response = Response(content=result.body, status_code=result.status)
+        for name, value in result.headers:
+            if name.lower() == "set-cookie":  # repeatable: never collapse it into headers[]
+                response.raw_headers.append((b"set-cookie", value.encode("latin-1")))
+            else:
+                response.headers[name] = value
+        return response
+
+    # Two routes, each with its own signature: a ``subpath`` that is not part of the path pattern
+    # would be read from the *query string* instead, and letting ``?subpath=`` pick the page would
+    # hand any caller a way around the routes.
+    async def root_route(request: Request) -> Response:
+        return await dispatch(request, "")
+
+    async def sub_route(request: Request, subpath: str) -> Response:
+        return await dispatch(request, subpath)
+
+    api.add_api_route(
+        "/", root_route, methods=["GET", "POST"], include_in_schema=False, name="firm-ui-root"
+    )
+    api.add_api_route(
+        "/{subpath:path}",
+        sub_route,
+        methods=["GET", "POST"],
+        include_in_schema=False,
+        name="firm-ui",
+    )
+    return api

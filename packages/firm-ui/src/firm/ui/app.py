@@ -1,0 +1,728 @@
+"""The dashboard itself — routing, pages, and actions — with no HTTP transport attached.
+
+Everything here speaks :class:`UIRequest` in and :class:`UIResponse` out, so the same dashboard
+runs behind the stdlib server (``firm-ui serve``, see :mod:`firm.ui.server`) and mounted inside a
+host application's own routing (see :mod:`firm.ui.contrib`). A transport adapter is then only a
+translation: build a :class:`UIRequest`, call :meth:`DashboardApp.handle`, write the
+:class:`UIResponse`.
+
+Routes are matched by hand; GETs render pages, POSTs run an action and redirect back. Each route
+is guarded by whether that part (queue / cache / channel / audit) is enabled on the dashboard.
+Every URL the pages build carries :attr:`UIRequest.prefix`, so a dashboard mounted under
+``/firm`` links to ``/firm/jobs`` — see :class:`firm.ui.render.Urls`.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import traceback
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
+from http.cookies import SimpleCookie
+from importlib import resources
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from sqlalchemy.engine import Connection
+
+from firm._core.clock import now_utc
+from firm.audit import queries as audit_queries
+from firm.cache import queries as cache_queries
+from firm.channel import queries as channel_queries
+from firm.queue import queries as queue_queries
+
+from . import actions, render
+from .auth import Allow, Authenticator, AuthRequest
+from .context import Dashboard
+from .render import Urls
+
+# Per-page auto-refresh preference: one cookie per part, holding a value from
+# render.REFRESH_OPTIONS (seconds, or 0 for off). Unset -> the page's historical default, so
+# existing behaviour is unchanged until someone opens the control.
+_REFRESH_DEFAULTS = {"queue": 5, "cache": 10, "channel": 10, "audit": 10}
+_REFRESH_VALID = frozenset(secs for secs, _ in render.REFRESH_OPTIONS)
+# Colour theme preference: a single cookie (system / light / dark). Unset -> "system", i.e. follow
+# the OS via prefers-color-scheme, so existing behaviour is unchanged until someone picks a theme.
+_THEME_VALID = frozenset(value for value, _, _ in render.THEME_OPTIONS)
+_PREF_COOKIE_MAX_AGE = 60 * 60 * 24 * 365  # 1 year — refresh + theme preferences persist
+# Dashboard POSTs carry at most a tiny settings form; anything bigger is abuse of the buffer.
+MAX_BODY_BYTES = 1 << 20
+# Whether audit tamper-evidence is configured is read from *this* process's environment — the
+# server-context signal that tells "configured but never verified" apart from a plain no-key
+# deployment (design D22). A truthy value is enough; the writer validates the key's length.
+_AUDIT_KEY_ENV = "FIRM_AUDIT_KEY"
+
+_STATIC_DIR = resources.files("firm.ui").joinpath("static")
+# Read once at import time -- the dashboard is a short-lived local process, not a place where
+# hot-reloading the stylesheet from disk on every request would buy anything.
+_STATIC_CSS = _STATIC_DIR.joinpath("style.css").read_bytes()
+_STATIC_PATH = "/static/style.css"
+
+
+def static_dir() -> Path:
+    """The directory holding the dashboard's stylesheet, for a host application that would rather
+    serve it through its own static pipeline (Django ``STATICFILES_DIRS``, an nginx ``alias``, …).
+    Point :class:`DashboardApp`'s ``static_url`` at wherever you publish it."""
+    return Path(str(_STATIC_DIR))
+
+
+# -- request / response --------------------------------------------------------------------------
+
+
+class Headers(Mapping[str, str]):
+    """Case-insensitive request headers — what every HTTP layer agrees on, and all the dashboard
+    needs from one. Build one from any header collection's ``.items()``; repeated header lines are
+    joined with ``", "`` (the separator ``Cookie`` and the rest of the parsers this code hands them
+    to already accept). Look values up with an explicit default — ``headers.get("Origin", "")`` —
+    as with any other ``Mapping``."""
+
+    __slots__ = ("_items",)
+
+    def __init__(self, pairs: Iterable[tuple[str, str]] = ()) -> None:
+        items: dict[str, str] = {}
+        for name, value in pairs:
+            key = name.lower()
+            items[key] = f"{items[key]}, {value}" if key in items else value
+        self._items = items
+
+    def __getitem__(self, name: str) -> str:
+        return self._items[name.lower()]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+@dataclass(frozen=True)
+class UIRequest:
+    """One dashboard request, independent of how it arrived.
+
+    ``path`` is *mount-relative* (``/jobs`` whether the dashboard owns the root or is mounted at
+    ``/firm``) and ``prefix`` is where it is mounted (``""`` or ``/firm``, never trailing-slashed);
+    the two concatenated are the URL the client asked for. ``host`` is the authority the client
+    addressed — the CSRF origin check compares ``Origin``/``Referer`` against it, and a framework
+    that resolves the host itself (Django's ``ALLOWED_HOSTS``, a proxy-aware Flask) should pass its
+    own answer rather than leave it to the raw ``Host`` header.
+    """
+
+    method: str
+    path: str  # percent-decoded, as every WSGI/ASGI framework hands it over
+    query: str = ""
+    headers: Headers = field(default_factory=Headers)
+    body: bytes = b""
+    peer: str = ""
+    prefix: str = ""
+    host: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "method", self.method.upper())
+        path = self.path if self.path.startswith("/") else f"/{self.path}"
+        object.__setattr__(self, "path", path)
+        prefix = self.prefix.rstrip("/")
+        if prefix and not prefix.startswith("/"):
+            prefix = f"/{prefix}"
+        object.__setattr__(self, "prefix", prefix)
+        if not self.host:
+            object.__setattr__(self, "host", self.headers.get("Host", ""))
+
+    @property
+    def params(self) -> dict[str, list[str]]:
+        return parse_qs(self.query)
+
+    @property
+    def full_path(self) -> str:
+        """The path the client asked for, prefix and query included — what links and the ``return``
+        field of the settings forms have to point back to."""
+        return f"{self.prefix}{self.path}" + (f"?{self.query}" if self.query else "")
+
+
+@dataclass
+class UIResponse:
+    """One dashboard response: a status, headers (repeatable, so ``Set-Cookie`` works), and a body.
+    ``Content-Length`` is left to the transport, which is the layer that knows about framing."""
+
+    status: int = 200
+    headers: list[tuple[str, str]] = field(default_factory=list)
+    body: bytes = b""
+
+
+def _html(body: str, status: int = 200) -> UIResponse:
+    return UIResponse(
+        status,
+        [("Content-Type", "text/html; charset=utf-8")],
+        body.encode("utf-8"),
+    )
+
+
+def _redirect(location: str, *, cookie: str | None = None) -> UIResponse:
+    headers = [("Location", location)]
+    if cookie is not None:
+        headers.append(("Set-Cookie", cookie))
+    return UIResponse(303, headers)
+
+
+# -- the application -----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DashboardApp:
+    """The dashboard as a callable unit: :meth:`handle` turns a request into a response.
+
+    ``authenticator`` runs at the top of every request; ``None`` means this deployment
+    authenticates somewhere else (the loopback bind of ``firm-ui serve``, or the host application
+    a mount sits behind — :mod:`firm.ui.contrib` makes stating that explicit).
+    ``channel_trim_retention`` (seconds) controls the trim button's cutoff, and ``static_url``
+    points the stylesheet link somewhere else than the built-in route.
+    """
+
+    dashboard: Dashboard
+    authenticator: Authenticator | None = None
+    channel_trim_retention: float | None = None
+    static_url: str | None = None
+
+    def handle(
+        self, request: UIRequest, *, read_body: Callable[[], bytes] | None = None
+    ) -> UIResponse:
+        """Route ``request`` and return the response to send.
+
+        ``read_body`` is for a transport that has not buffered the request body yet: it is called
+        only once a POST has passed authentication and the ``Content-Length`` limit, so an
+        unauthenticated caller can never make the server read a body it announced. A transport
+        whose framework already parsed the body just puts it on the request and leaves this unset.
+        """
+        return _Handler(self, request).run(read_body)
+
+
+class _Handler:
+    """One request's worth of state. Its methods return responses instead of writing them, which is
+    the only structural difference from the socket-bound handler this grew out of."""
+
+    def __init__(self, app: DashboardApp, request: UIRequest) -> None:
+        self.app = app
+        self.request = request
+        self.dash = app.dashboard
+        self.urls = Urls(request.prefix, app.static_url)
+
+    # -- responses -----------------------------------------------------------------------------
+
+    def error(self, message: str, status: int) -> UIResponse:
+        return _html(
+            render.error_page(self.dash.parts, message, theme=self._theme(), urls=self.urls), status
+        )
+
+    def _server_error(self, exc: BaseException) -> UIResponse:
+        # Full traceback to stderr for the operator; a generic body for the client — the
+        # repr leaked query fragments and paths to anyone who could reach the port.
+        traceback.print_exception(exc, file=sys.stderr)
+        return self.error("Internal error — details are in the server log.", 500)
+
+    def _not_found(self) -> UIResponse:
+        return _html(render.not_found(self.dash.parts, theme=self._theme(), urls=self.urls), 404)
+
+    def _static_css(self) -> UIResponse:
+        return UIResponse(200, [("Content-Type", "text/css; charset=utf-8")], _STATIC_CSS)
+
+    def _origin_ok(self) -> bool:
+        """Basic CSRF guard: a cross-origin browser form POST carries a mismatched ``Origin`` (or
+        ``Referer``). Non-browser clients that send neither are allowed — the threat model is the
+        operator's own browser being tricked into POSTing to this dashboard."""
+        host = self.request.host
+        origin = self.request.headers.get("Origin", "")
+        if origin:
+            return origin in (f"http://{host}", f"https://{host}")
+        referer = self.request.headers.get("Referer", "")
+        if referer:
+            return urlsplit(referer).netloc == host
+        return True
+
+    def _check_auth(self) -> UIResponse | None:
+        """Run the configured authenticator (if any). Returns the response to send on denial, or
+        ``None`` to continue — including when no authenticator is set."""
+        authenticator = self.app.authenticator
+        if authenticator is None:
+            return None
+        req = AuthRequest(
+            method=self.request.method,
+            path=self.request.full_path,
+            headers=self.request.headers,
+            client_addr=self.request.peer,
+        )
+        result = authenticator.authenticate(req)
+        if isinstance(result, Allow):
+            return None
+        title = "Forbidden" if result.status == 403 else "Sign in"
+        body = render.auth_page(title, result.message, theme=self._theme(), urls=self.urls)
+        response = _html(body, result.status)
+        response.headers = [*result.headers.items(), *response.headers]
+        return response
+
+    def _cookies(self) -> SimpleCookie:
+        cookies = SimpleCookie()
+        cookies.load(self.request.headers.get("Cookie", ""))
+        return cookies
+
+    def _refresh_seconds(self, part: str) -> int:
+        """The visitor's saved auto-refresh interval for ``part`` (0 = off), from its cookie, or
+        that page's historical default if unset or the cookie holds an invalid value."""
+        morsel = self._cookies().get(f"firm_refresh_{part}")
+        if morsel is not None:
+            value = _to_int(morsel.value, -1)
+            if value in _REFRESH_VALID:
+                return value
+        return _REFRESH_DEFAULTS[part]
+
+    def _theme(self) -> str:
+        """The visitor's saved colour theme (system/light/dark) from its cookie, defaulting to
+        ``system`` (follow the OS) when unset or holding an unknown value."""
+        morsel = self._cookies().get("firm_theme")
+        if morsel is not None and morsel.value in _THEME_VALID:
+            return morsel.value
+        return "system"
+
+    @staticmethod
+    def _per_page(raw: str | None, default: int) -> int:
+        """Validate a ``per_page`` query param against the shared table-size allowlist, falling
+        back to ``default`` when it's missing or not one of the offered choices."""
+        value = _to_int(raw or "", default)
+        return value if value in render.TABLE_PER_PAGE_OPTIONS else default
+
+    def _pref_cookie(self, name: str, value: str) -> str:
+        cookie = SimpleCookie()
+        cookie[name] = value
+        cookie[name]["path"] = self.urls.path("/")
+        cookie[name]["max-age"] = _PREF_COOKIE_MAX_AGE
+        return cookie[name].OutputString()
+
+    def _return_to(self, fields: dict[str, list[str]]) -> str:
+        """Where a settings POST redirects back to. ``return`` comes from a hidden form field, so it
+        is restricted to a same-site relative path — that closes off using it as an open redirect
+        (``//host`` and ``/\\host`` are both protocol-relative to a browser)."""
+        return_to = fields.get("return", [""])[0]
+        if not return_to.startswith("/") or return_to[:2] in ("//", "/\\"):
+            return self.urls.path("/")
+        return return_to
+
+    def _set_refresh(self, fields: dict[str, list[str]]) -> UIResponse:
+        """Handle a refresh-control POST: validate, set the cookie, and redirect back to the page
+        the visitor was on."""
+        part = fields.get("part", [""])[0]
+        seconds = _to_int(fields.get("seconds", [""])[0], -1)
+        if part not in _REFRESH_DEFAULTS or seconds not in _REFRESH_VALID:
+            return self._not_found()
+        name = f"firm_refresh_{part}"
+        return _redirect(self._return_to(fields), cookie=self._pref_cookie(name, str(seconds)))
+
+    def _set_theme(self, fields: dict[str, list[str]]) -> UIResponse:
+        """Handle a theme-control POST: validate, set the cookie, and redirect back, mirroring
+        :meth:`_set_refresh`."""
+        theme = fields.get("theme", [""])[0]
+        if theme not in _THEME_VALID:
+            return self._not_found()
+        return _redirect(self._return_to(fields), cookie=self._pref_cookie("firm_theme", theme))
+
+    # -- routing -------------------------------------------------------------------------------
+
+    def run(self, read_body: Callable[[], bytes] | None = None) -> UIResponse:
+        if self.request.method == "GET":
+            return self._get()
+        if self.request.method == "POST":
+            return self._post(read_body)
+        return UIResponse(405, [("Allow", "GET, POST")], b"")
+
+    def _get(self) -> UIResponse:
+        denied = self._check_auth()
+        if denied is not None:
+            return denied
+        dash = self.dash
+        path = self.request.path
+        params = self.request.params
+        try:
+            if path == "/":
+                return self._landing()
+            if path == _STATIC_PATH:
+                return self._static_css()
+            if path == "/jobs" and dash.queue is not None:
+                state = params.get("state", ["ready"])[0]
+                page = max(1, _to_int(params.get("page", ["1"])[0], 1))
+                return self._jobs(
+                    state, page, params.get("queue", [None])[0], params.get("per_page", [None])[0]
+                )
+            if (match := re.fullmatch(r"/job/(\d+)", path)) and dash.queue is not None:
+                job_id = _parse_id(match.group(1))
+                if job_id is None:
+                    return self._not_found()
+                return self._job(job_id, params.get("queue", [None])[0])
+            if path == "/cache" and dash.cache is not None:
+                return self._cache(
+                    max(1, _to_int(params.get("page", ["1"])[0], 1)),
+                    params.get("per_page", [None])[0],
+                )
+            if path == "/channels" and dash.channel is not None:
+                return self._channels(
+                    max(1, _to_int(params.get("top_page", ["1"])[0], 1)),
+                    params.get("top_per_page", [None])[0],
+                    max(1, _to_int(params.get("page", ["1"])[0], 1)),
+                    params.get("per_page", [None])[0],
+                )
+            if path == "/audit" and dash.audit is not None:
+                return self._audit(
+                    params.get("action", [None])[0],
+                    params.get("subject", [None])[0],
+                    params.get("actor", [None])[0],
+                    params.get("correlation_id", [None])[0],
+                    params.get("sort", [None])[0],
+                    params.get("dir", [None])[0],
+                    max(1, _to_int(params.get("page", ["1"])[0], 1)),
+                    params.get("per_page", [None])[0],
+                )
+            if (match := re.fullmatch(r"/audit/(\d+)", path)) and dash.audit is not None:
+                audit_id = _parse_id(match.group(1))
+                if audit_id is None:
+                    return self._not_found()
+                return self._audit_detail(audit_id)
+            return self._not_found()
+        except Exception as exc:  # never crash the server on a bad request
+            return self._server_error(exc)
+
+    def _post(self, read_body: Callable[[], bytes] | None) -> UIResponse:
+        denied = self._check_auth()
+        if denied is not None:
+            return denied
+        dash = self.dash
+        path = self.request.path
+        # Both the announced and the actual size, so the limit holds whether the transport hands
+        # over a buffered body or a reader (and for a chunked body, which announces no length).
+        announced = _to_int(self.request.headers.get("Content-Length", "0"), 0)
+        if announced > MAX_BODY_BYTES or len(self.request.body) > MAX_BODY_BYTES:
+            return self.error("Request body too large.", 413)
+        body = read_body() if read_body is not None else self.request.body
+        if len(body) > MAX_BODY_BYTES:
+            return self.error("Request body too large.", 413)
+        if not self._origin_ok():
+            return self.error("Cross-origin POST rejected (CSRF guard).", 403)
+        try:
+            if path == "/settings/refresh":
+                return self._set_refresh(parse_qs(body.decode("utf-8")))
+            if path == "/settings/theme":
+                return self._set_theme(parse_qs(body.decode("utf-8")))
+            if (m := re.fullmatch(r"/queue/(.+)/pause", path)) and dash.queue is not None:
+                actions.pause(dash.queue, m.group(1))
+                return _redirect(self.urls.path("/"))
+            if (m := re.fullmatch(r"/queue/(.+)/resume", path)) and dash.queue is not None:
+                actions.resume(dash.queue, m.group(1))
+                return _redirect(self.urls.path("/"))
+            if (m := re.fullmatch(r"/job/(\d+)/retry", path)) and dash.queue is not None:
+                job_id = _parse_id(m.group(1))
+                if job_id is None:
+                    return self._not_found()
+                actions.retry(dash.queue, job_id)
+                return _redirect(self.urls.path("/jobs?state=failed"))
+            if (m := re.fullmatch(r"/job/(\d+)/discard", path)) and dash.queue is not None:
+                job_id = _parse_id(m.group(1))
+                if job_id is None:
+                    return self._not_found()
+                actions.discard(dash.queue, job_id)
+                return _redirect(self.urls.path("/jobs?state=failed"))
+            if path == "/failed/retry-all" and dash.queue is not None:
+                actions.retry_all(dash.queue)
+                return _redirect(self.urls.path("/jobs?state=failed"))
+            if path == "/cache/clear" and dash.cache is not None:
+                actions.clear_cache(dash.cache)
+                return _redirect(self.urls.path("/cache"))
+            if path == "/channels/trim" and dash.channel is not None:
+                actions.trim_channel(dash.channel, retention=self.app.channel_trim_retention)
+                return _redirect(self.urls.path("/channels"))
+            return self._not_found()
+        except Exception as exc:
+            return self._server_error(exc)
+
+    def _integrity(self, conn: Connection) -> audit_queries.IntegrityState:
+        """Derive the tamper-evidence panel's state from an audit connection (shared with the
+        page's own query so the panel costs no extra round-trip). ``key_configured`` comes from
+        this process's ``FIRM_AUDIT_KEY``."""
+        key_configured = bool(os.environ.get(_AUDIT_KEY_ENV))
+        status = audit_queries.verify_status_row(conn)
+        config = audit_queries.integrity_config(conn, key_configured=key_configured)
+        return audit_queries.integrity_state(status, config, now=now_utc())
+
+    # -- pages ---------------------------------------------------------------------------------
+
+    def _landing(self) -> UIResponse:
+        dash = self.dash
+        if dash.queue is not None:
+            return self._overview()
+        if dash.cache is not None:
+            return _redirect(self.urls.path("/cache"))
+        if dash.channel is not None:
+            return _redirect(self.urls.path("/channels"))
+        if dash.audit is not None:
+            return _redirect(self.urls.path("/audit"))
+        return _html(render.empty_page(dash.parts, theme=self._theme(), urls=self.urls))
+
+    def _overview(self) -> UIResponse:
+        dash = self.dash
+        assert dash.queue is not None  # guarded by the route check before this is called
+        now = now_utc()
+        # The integrity strip escalates onto the overview (D23) only when the audit part is
+        # present; its data lives in the audit database, so it needs its own connection.
+        integrity = None
+        if dash.audit is not None:
+            with dash.audit.connect() as audit_conn:
+                integrity = self._integrity(audit_conn)
+        with dash.queue.engine.connect() as conn:
+            body = render.overview_page(
+                dash.parts,
+                queue_queries.state_counts(conn),
+                queue_queries.queue_rows(conn, now),
+                queue_queries.processes(conn, now),
+                queue_queries.recurring(conn),
+                integrity=integrity,
+                refresh=self._refresh_seconds("queue"),
+                request_path=self.request.full_path,
+                theme=self._theme(),
+                urls=self.urls,
+            )
+        return _html(body)
+
+    def _jobs(self, state: str, page: int, queue: str | None, per_page: str | None) -> UIResponse:
+        dash = self.dash
+        assert dash.queue is not None
+        if state not in queue_queries.STATES:
+            state = "ready"
+        per_page_n = self._per_page(per_page, render.JOBS_DEFAULT_PER_PAGE)
+        with dash.queue.engine.connect() as conn:
+            counts = queue_queries.state_counts(conn, queue=queue)
+            page = _clamp_page(page, counts.get(state, 0), per_page_n)
+            offset = (page - 1) * per_page_n
+            jobs = queue_queries.jobs_by_state(
+                conn, state, limit=per_page_n, offset=offset, queue=queue
+            )
+        return _html(
+            render.jobs_page(
+                dash.parts,
+                state,
+                jobs,
+                page,
+                per_page_n,
+                counts,
+                queue=queue,
+                refresh=self._refresh_seconds("queue"),
+                request_path=self.request.full_path,
+                theme=self._theme(),
+                urls=self.urls,
+            )
+        )
+
+    def _job(self, job_id: int, queue: str | None) -> UIResponse:
+        dash = self.dash
+        assert dash.queue is not None
+        with dash.queue.engine.connect() as conn:
+            job = queue_queries.job_detail(conn, job_id)
+        if job is None:
+            return self._not_found()
+        return _html(
+            render.job_page(
+                dash.parts,
+                job,
+                queue=queue,
+                theme=self._theme(),
+                request_path=self.request.full_path,
+                urls=self.urls,
+            )
+        )
+
+    def _cache(self, page: int, per_page: str | None) -> UIResponse:
+        dash = self.dash
+        assert dash.cache is not None
+        per_page_n = self._per_page(per_page, render.CACHE_DEFAULT_PER_PAGE)
+        with dash.cache.connect() as conn:
+            stats = cache_queries.cache_stats(conn)
+            page = _clamp_page(page, stats["entries"], per_page_n)
+            offset = (page - 1) * per_page_n
+            body = render.cache_page(
+                dash.parts,
+                stats,
+                _decode_rows(
+                    cache_queries.cache_recent(conn, limit=per_page_n, offset=offset), "key"
+                ),
+                page=page,
+                per_page=per_page_n,
+                refresh=self._refresh_seconds("cache"),
+                request_path=self.request.full_path,
+                theme=self._theme(),
+                urls=self.urls,
+            )
+        return _html(body)
+
+    def _channels(
+        self, top_page: int, top_per_page: str | None, page: int, per_page: str | None
+    ) -> UIResponse:
+        dash = self.dash
+        assert dash.channel is not None
+        top_per_page_n = self._per_page(top_per_page, render.CHANNEL_TOP_DEFAULT_PER_PAGE)
+        per_page_n = self._per_page(per_page, render.CHANNEL_MSG_DEFAULT_PER_PAGE)
+        with dash.channel.connect() as conn:
+            stats = channel_queries.channel_stats(conn)
+            top_page = _clamp_page(top_page, stats["channels"], top_per_page_n)
+            page = _clamp_page(page, stats["messages"], per_page_n)
+            top_offset = (top_page - 1) * top_per_page_n
+            offset = (page - 1) * per_page_n
+            body = render.channel_page(
+                dash.parts,
+                stats,
+                _decode_rows(
+                    channel_queries.channel_top(conn, limit=top_per_page_n, offset=top_offset),
+                    "channel",
+                ),
+                _decode_rows(
+                    channel_queries.channel_recent(conn, limit=per_page_n, offset=offset),
+                    "channel",
+                    "payload",
+                ),
+                top_page=top_page,
+                top_per_page=top_per_page_n,
+                page=page,
+                per_page=per_page_n,
+                refresh=self._refresh_seconds("channel"),
+                request_path=self.request.full_path,
+                theme=self._theme(),
+                urls=self.urls,
+            )
+        return _html(body)
+
+    def _audit(
+        self,
+        action: str | None,
+        subject: str | None,
+        actor: str | None,
+        correlation_id: str | None,
+        sort: str | None,
+        dir: str | None,
+        page: int,
+        per_page: str | None,
+    ) -> UIResponse:
+        dash = self.dash
+        assert dash.audit is not None
+        sort = sort if sort in audit_queries.SORT_COLUMNS else render.AUDIT_DEFAULT_SORT
+        dir = dir if dir in ("asc", "desc") else render.AUDIT_DEFAULT_DIR
+        per_page_n = self._per_page(per_page, render.AUDIT_DEFAULT_PER_PAGE)
+        # The "Type:id" strings the form submits are split here; firm-audit filters on the halves.
+        # The raw strings stay in the filters dict below, so the form redisplays what was typed.
+        # An empty field means "no filter", so it is normalized away before the query sees it.
+        subject_type, subject_id = _split_ref(subject)
+        actor_type, actor_id = _split_ref(actor)
+        action_filter = action or None
+        correlation_filter = correlation_id or None
+        with dash.audit.connect() as conn:
+            total = audit_queries.audit_count(
+                conn,
+                action=action_filter,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                correlation_id=correlation_filter,
+            )
+            page = _clamp_page(page, total, per_page_n)
+            offset = (page - 1) * per_page_n
+            body = render.audit_page(
+                dash.parts,
+                audit_queries.audit_stats(conn),
+                audit_queries.audit_search(
+                    conn,
+                    action=action_filter,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    correlation_id=correlation_filter,
+                    sort=sort,
+                    dir=dir,
+                    limit=per_page_n,
+                    offset=offset,
+                ),
+                {
+                    "action": action or "",
+                    "subject": subject or "",
+                    "actor": actor or "",
+                    "correlation_id": correlation_id or "",
+                },
+                integrity=self._integrity(conn),
+                row_ctx=audit_queries.row_integrity_context(conn),
+                total=total,
+                page=page,
+                per_page=per_page_n,
+                sort=sort,
+                dir=dir,
+                refresh=self._refresh_seconds("audit"),
+                request_path=self.request.full_path,
+                theme=self._theme(),
+                urls=self.urls,
+            )
+        return _html(body)
+
+    def _audit_detail(self, event_id: int) -> UIResponse:
+        dash = self.dash
+        assert dash.audit is not None
+        with dash.audit.connect() as conn:
+            event = audit_queries.audit_detail(conn, event_id)
+            row_ctx = audit_queries.row_integrity_context(conn) if event is not None else None
+        if event is None:
+            return self._not_found()
+        return _html(
+            render.audit_detail_page(
+                dash.parts,
+                event,
+                row_ctx=row_ctx,
+                theme=self._theme(),
+                request_path=self.request.full_path,
+                urls=self.urls,
+            )
+        )
+
+
+_MAX_ID = 2**63 - 1  # BIGINT PKs; a longer digit run can't be a row id
+
+
+def _parse_id(raw: str) -> int | None:
+    """Parse a route id; None for values no BIGINT column can hold (-> 404, not a DBAPI
+    error surfacing as a 500)."""
+    value = int(raw)
+    return value if value <= _MAX_ID else None
+
+
+def _clamp_page(page: int, total: int, per_page: int) -> int:
+    """Clamp to the last real page, so the query offset always matches what the pager shows
+    (the pager clamps for display; an unclamped offset rendered an empty table under a pager
+    claiming rows exist)."""
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    return min(max(page, 1), total_pages)
+
+
+def _to_int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _split_ref(raw: str | None) -> tuple[str | None, str | None]:
+    """Split the ``"Type:id"`` string the audit filter form submits (matching how subjects and
+    actors are displayed and linked elsewhere) into the two halves firm-audit filters on. Either
+    half may be empty and then filters nothing — ``"cron"`` (no colon) filters by type alone, so
+    label-only refs (which have no id) stay filterable."""
+    if not raw:
+        return None, None
+    kind, _, ident = raw.partition(":")
+    return kind or None, ident or None
+
+
+def _decode_rows(rows: list[dict], *fields: str) -> list[dict]:
+    """Decode the named binary columns of query rows for display. Cache keys and channel
+    names/payloads are arbitrary bytes in the database and come back as ``bytes``; the dashboard
+    is where they become text."""
+    return [row | {f: render.decode_bytes(row[f]) for f in fields} for row in rows]

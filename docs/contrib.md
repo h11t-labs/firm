@@ -10,6 +10,10 @@ nothing. You still define jobs the normal way with `@bq.job`.
 | `firm.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
 | `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
 
+The dashboard has framework glue of its own — `firm.ui.contrib` mounts it in a Django, Flask, or
+FastAPI application instead of running it as a second process. See
+[Dashboard § Mount it in your application](ui.md#mount-it-in-your-application).
+
 ## FastAPI
 
 ```python
