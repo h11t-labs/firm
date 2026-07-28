@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from importlib.util import find_spec
 
 import pytest
 from sqlalchemy import func, inspect, select
@@ -139,6 +140,16 @@ def test_imports_setting_loads_modules_outside_any_app(django_project) -> None:
             set_runtime(None)
 
 
+def test_the_tasks_backend_module_is_derived_from_settings() -> None:
+    """Which module the app config will import, without importing it — so this half of the
+    behaviour is still covered on Django 5.x, where `django.tasks` does not exist."""
+    with override_settings(
+        TASKS={"default": {"BACKEND": "firm.queue.contrib.django.backend.FirmBackend"}}
+    ):
+        assert _task_backend_modules() == {"firm.queue.contrib.django.backend"}
+
+
+@pytest.mark.skipif(find_spec("django.tasks") is None, reason="django.tasks arrived in Django 6.0")
 def test_our_tasks_backend_is_imported_without_being_declared(django_project) -> None:
     """A worker never reads TASKS, so the backend's `run_task` has to reach the registry some
     other way. Making the user restate it under IMPORTS is exactly the boilerplate this app
@@ -146,7 +157,6 @@ def test_our_tasks_backend_is_imported_without_being_declared(django_project) ->
     with override_settings(
         TASKS={"default": {"BACKEND": "firm.queue.contrib.django.backend.FirmBackend"}}
     ):
-        assert _task_backend_modules() == {"firm.queue.contrib.django.backend"}
         _app_config().ready()
         try:
             assert "firm.queue.contrib.django.backend.run_task" in REGISTRY
