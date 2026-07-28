@@ -13,6 +13,7 @@ import contextlib
 from dataclasses import dataclass
 
 from sqlalchemy import Engine, inspect
+from sqlalchemy.exc import SQLAlchemyError
 
 from firm._core.config import Runtime, Settings
 from firm._core.database import create_engine_for
@@ -29,11 +30,20 @@ _CHANNEL_TABLE = channel_schema.messages.name
 _AUDIT_TABLE = audit_schema.audit_events.name
 
 
+class DashboardConnectionError(RuntimeError):
+    """A configured database could not be reached or inspected. Raised instead of treating the
+    part as "not configured": the operator explicitly passed this URL, so a bad password or an
+    unreachable host must not read as a dashboard that quietly starts without that tab."""
+
+
 def _has_table(engine: Engine, table: str) -> bool:
+    """Whether ``table`` exists — the "part enabled" probe. Only a successful inspection may
+    answer False; a connection/inspection failure raises :class:`DashboardConnectionError`."""
     try:
         return table in inspect(engine).get_table_names()
-    except Exception:
-        return False
+    except SQLAlchemyError as exc:
+        url = engine.url.render_as_string(hide_password=True)
+        raise DashboardConnectionError(f"cannot inspect database at {url}: {exc}") from exc
 
 
 @dataclass
@@ -69,8 +79,12 @@ def _engine_if_table(url: str | None, table: str) -> Engine | None:
     if not url:
         return None
     engine = create_engine_for(url)
-    if _has_table(engine, table):
-        return engine
+    try:
+        if _has_table(engine, table):
+            return engine
+    except DashboardConnectionError:
+        engine.dispose()
+        raise
     engine.dispose()
     return None
 
@@ -88,7 +102,12 @@ def build_dashboard(
     queue_resolved = queue_url or database_url
     if queue_resolved:
         runtime = Runtime(Settings(database_url=queue_resolved))
-        if _has_table(runtime.engine, _QUEUE_TABLE):
+        try:
+            has_queue = _has_table(runtime.engine, _QUEUE_TABLE)
+        except DashboardConnectionError:
+            runtime.reset()
+            raise
+        if has_queue:
             dash.queue = runtime
         else:
             runtime.reset()

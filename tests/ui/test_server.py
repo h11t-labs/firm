@@ -266,6 +266,19 @@ def test_channels_page_and_trim(base_url, seed) -> None:
     assert status == 200
 
 
+def test_binary_columns_are_decoded_for_display(base_url, seed) -> None:
+    # The query layers hand cache keys and channel names/payloads over as bytes; the dashboard
+    # decodes them at the edge, so a page never shows a b'...' repr of plain UTF-8 text.
+    seed.cache_entry()  # key=b"user:1"
+    seed.channel_message()  # channel=b"room:1", payload=b"hello"
+    _, cache_body = _get(base_url + "/cache")
+    _, channel_body = _get(base_url + "/channels")
+    assert "user:1" in cache_body
+    assert "room:1" in channel_body and "hello" in channel_body
+    for body in (cache_body, channel_body):
+        assert "b&#39;" not in body and "b'" not in body
+
+
 def test_cache_page_size_selector_and_pagination(base_url, seed) -> None:
     for i in range(60):
         seed.cache_entry(key=f"key-{i:02d}".encode())

@@ -6,6 +6,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard's read queries moved into the packages that own the data (`firm.queue.queries`,
+  `firm.cache.queries`, `firm.channel.queries`, `firm.audit.queries`), where they are now a
+  supported API. firm-ui builds on them like any other consumer and keeps only presentation:
+  styling, pagination glue, auth, and decoding binary columns for display. The four private
+  `firm.ui.*_queries` modules are gone; import from the owning package instead.
+- A configured database that cannot be reached or inspected now raises
+  `DashboardConnectionError` (a clean CLI error, password masked) instead of silently starting
+  the dashboard without that part's tab — a bad password or unreachable host no longer reads as
+  "not configured". A reachable database without firm tables still just disables the part.
+
+## [1.0.1] - 2026-07-28
+
+### Changed
+
+- Module pins widened from `~=1.0.0` to `~=1.0`. The old form (`==1.0.*`) meant this package and a
+  module's next minor could not be installed together at all; the dashboard now works with any
+  1.x module. No behaviour change — the floor is deliberately left where it is, since the dashboard
+  needs nothing that shipped in those minors. See `docs/testing-and-contributing.md`
+  § Cross-package pins.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

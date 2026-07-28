@@ -1,6 +1,6 @@
 [project]
 name = "firm-cache"
-version = "1.0.0"
+version = "1.1.0"
 description = "Database-backed cache store (a pure-Python port of Rails' Solid Cache). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,7 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=1.0.0",
+    "firm-core~=1.0",
     "click>=8.1",
 ]
 

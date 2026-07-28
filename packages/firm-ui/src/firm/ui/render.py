@@ -22,9 +22,8 @@ from jinjax.jinjax import JinjaX
 from markupsafe import Markup, escape
 
 from firm._core.clock import now_utc
-
-from .audit_queries import IntegrityState, row_status
-from .queries import STATES
+from firm.audit.queries import DEFAULT_SORT, IntegrityState, row_status
+from firm.queue.queries import STATES
 
 _PART_NAV = {
     "queue": ("Queue", "/"),
@@ -189,6 +188,16 @@ def _bytes(n: int | float) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} GiB"
+
+
+def decode_bytes(raw: Any) -> str:
+    """Render a binary column (a cache key, a channel name or payload) as text. Those columns are
+    arbitrary bytes and the query layer hands them over as ``bytes``, so anything that isn't UTF-8
+    falls back to a ``repr`` rather than raising mid-page."""
+    try:
+        return bytes(raw).decode("utf-8")
+    except (UnicodeDecodeError, TypeError):
+        return repr(bytes(raw))
 
 
 def _json_preview(value: dict[str, Any] | None) -> str:
@@ -690,7 +699,7 @@ def channel_page(
 
 
 AUDIT_DEFAULT_PER_PAGE = 25
-AUDIT_DEFAULT_SORT = "created_at"
+AUDIT_DEFAULT_SORT = DEFAULT_SORT  # the library's default column, so the two can't drift apart
 AUDIT_DEFAULT_DIR = "desc"
 # label, sort key, default direction when clicked from an unsorted state
 _AUDIT_COLUMNS = [
@@ -765,7 +774,7 @@ def _sort_columns(
 
 
 # -- integrity (tamper-evidence) panel ---------------------------------------------------------
-# :func:`audit_queries.integrity_state` decides *which* of the six states applies; this section
+# :func:`firm.audit.queries.integrity_state` decides *which* of the six states applies; this section
 # turns that state into the ready-made strings/markup the <Integrity/> component renders (design
 # review D22-D25). Every state carries a shield icon + a word, never colour alone, so the verdict
 # still reads with images off (the word) and without colour vision (icon shape + word).
@@ -795,7 +804,7 @@ _INTEGRITY_STRIP = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": "
 _TAMPER_DOCS_URL = "https://github.com/h11t-labs/firm/blob/main/docs/audit/tamper-evidence.md"
 
 #: Hard cap on the ``affected_identifiers`` JSON this page will parse (mirrors
-#: :data:`firm.ui.audit_queries._MAX_AFFECTED_JSON`). The verifier bounds the column to a handful of
+#: :data:`firm.audit.queries._MAX_AFFECTED_JSON`). The verifier bounds the column to a handful of
 #: small findings, so a larger blob is corrupt or hostile — rejected before ``json.loads`` and paired
 #: with a ``RecursionError`` guard so a deeply-nested payload cannot 500 every render (Bug #3).
 _MAX_AFFECTED_JSON = 64 * 1024
@@ -971,7 +980,7 @@ def _integrity_view(state: IntegrityState | None) -> dict[str, Any] | None:
 
 
 # -- per-row tamper-evidence status ------------------------------------------------------------
-# :func:`audit_queries.row_status` decides a row's status token; this maps it to the small tinted
+# :func:`firm.audit.queries.row_status` decides a row's status token; this maps it to the small tinted
 # shield the events table / detail page shows. Icon shape + tooltip word both carry the meaning, so
 # it never rides on colour alone. Tone classes reuse the table's --ok/--warn/--danger/--text-3.
 _ROW_STATUS = {
@@ -1035,7 +1044,7 @@ def audit_page(
         _card("last event", _reltime(stats["last_event_at"])),
     ]
     # The per-row status column only appears when tamper-evidence is actually in use; a plain
-    # audit log adds no column, no icon (audit_queries.row_status returns None when inactive).
+    # audit log adds no column, no icon (firm.audit.queries.row_status returns None when inactive).
     integrity_active = bool(row_ctx and row_ctx["active"])
     for r in rows:
         r["subject_display"] = _ref_display(r["subject_type"], r["subject_id"], r["subject_label"])

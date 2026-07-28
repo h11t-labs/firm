@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm.channel.queries`: the read-query layer the dashboard used to keep to itself, now a
+  supported surface for your own dashboards, exporters, and health checks — `channel_stats`,
+  `channel_top`, and `channel_recent`, `Connection` in / dicts out. Channel names and payloads come
+  back as raw `bytes`, so decoding for display is the caller's decision. A negative `limit`/`offset`
+  raises `ValueError`.
+
+### Changed
+
+- `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future
+  `firm-core` minor. Ships with the next release of this package. See
+  `docs/testing-and-contributing.md` § Cross-package pins.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

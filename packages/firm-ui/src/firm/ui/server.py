@@ -20,8 +20,12 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from sqlalchemy.engine import Connection
 
 from firm._core.clock import now_utc
+from firm.audit import queries as audit_queries
+from firm.cache import queries as cache_queries
+from firm.channel import queries as channel_queries
+from firm.queue import queries as queue_queries
 
-from . import actions, audit_queries, cache_queries, channel_queries, queries, render
+from . import actions, render
 from .auth import Allow, Authenticator, AuthRequest
 from .context import Dashboard
 
@@ -380,10 +384,10 @@ class Handler(BaseHTTPRequestHandler):
         with dash.queue.engine.connect() as conn:
             body = render.overview_page(
                 dash.parts,
-                queries.state_counts(conn),
-                queries.queue_rows(conn, now),
-                queries.processes(conn, now),
-                queries.recurring(conn),
+                queue_queries.state_counts(conn),
+                queue_queries.queue_rows(conn, now),
+                queue_queries.processes(conn, now),
+                queue_queries.recurring(conn),
                 integrity=integrity,
                 refresh=self._refresh_seconds("queue"),
                 request_path=self.path,
@@ -394,14 +398,16 @@ class Handler(BaseHTTPRequestHandler):
     def _jobs(self, state: str, page: int, queue: str | None, per_page: str | None) -> None:
         dash = self._dash
         assert dash.queue is not None
-        if state not in queries.STATES:
+        if state not in queue_queries.STATES:
             state = "ready"
         per_page_n = self._per_page(per_page, render.JOBS_DEFAULT_PER_PAGE)
         with dash.queue.engine.connect() as conn:
-            counts = queries.state_counts(conn, queue=queue)
+            counts = queue_queries.state_counts(conn, queue=queue)
             page = _clamp_page(page, counts.get(state, 0), per_page_n)
             offset = (page - 1) * per_page_n
-            jobs = queries.jobs_by_state(conn, state, limit=per_page_n, offset=offset, queue=queue)
+            jobs = queue_queries.jobs_by_state(
+                conn, state, limit=per_page_n, offset=offset, queue=queue
+            )
         body = render.jobs_page(
             dash.parts,
             state,
@@ -420,7 +426,7 @@ class Handler(BaseHTTPRequestHandler):
         dash = self._dash
         assert dash.queue is not None
         with dash.queue.engine.connect() as conn:
-            job = queries.job_detail(conn, job_id)
+            job = queue_queries.job_detail(conn, job_id)
         if job is None:
             self._not_found()
         else:
@@ -441,7 +447,9 @@ class Handler(BaseHTTPRequestHandler):
             body = render.cache_page(
                 dash.parts,
                 stats,
-                cache_queries.cache_recent(conn, limit=per_page_n, offset=offset),
+                _decode_rows(
+                    cache_queries.cache_recent(conn, limit=per_page_n, offset=offset), "key"
+                ),
                 page=page,
                 per_page=per_page_n,
                 refresh=self._refresh_seconds("cache"),
@@ -466,8 +474,15 @@ class Handler(BaseHTTPRequestHandler):
             body = render.channel_page(
                 dash.parts,
                 stats,
-                channel_queries.channel_top(conn, limit=top_per_page_n, offset=top_offset),
-                channel_queries.channel_recent(conn, limit=per_page_n, offset=offset),
+                _decode_rows(
+                    channel_queries.channel_top(conn, limit=top_per_page_n, offset=top_offset),
+                    "channel",
+                ),
+                _decode_rows(
+                    channel_queries.channel_recent(conn, limit=per_page_n, offset=offset),
+                    "channel",
+                    "payload",
+                ),
                 top_page=top_page,
                 top_per_page=top_per_page_n,
                 page=page,
@@ -494,13 +509,22 @@ class Handler(BaseHTTPRequestHandler):
         sort = sort if sort in audit_queries.SORT_COLUMNS else render.AUDIT_DEFAULT_SORT
         dir = dir if dir in ("asc", "desc") else render.AUDIT_DEFAULT_DIR
         per_page_n = self._per_page(per_page, render.AUDIT_DEFAULT_PER_PAGE)
+        # The "Type:id" strings the form submits are split here; firm-audit filters on the halves.
+        # The raw strings stay in the filters dict below, so the form redisplays what was typed.
+        # An empty field means "no filter", so it is normalized away before the query sees it.
+        subject_type, subject_id = _split_ref(subject)
+        actor_type, actor_id = _split_ref(actor)
+        action_filter = action or None
+        correlation_filter = correlation_id or None
         with dash.audit.connect() as conn:
             total = audit_queries.audit_count(
                 conn,
-                action=action,
-                subject=subject,
-                actor=actor,
-                correlation_id=correlation_id,
+                action=action_filter,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                correlation_id=correlation_filter,
             )
             page = _clamp_page(page, total, per_page_n)
             offset = (page - 1) * per_page_n
@@ -509,10 +533,12 @@ class Handler(BaseHTTPRequestHandler):
                 audit_queries.audit_stats(conn),
                 audit_queries.audit_search(
                     conn,
-                    action=action,
-                    subject=subject,
-                    actor=actor,
-                    correlation_id=correlation_id,
+                    action=action_filter,
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    correlation_id=correlation_filter,
                     sort=sort,
                     dir=dir,
                     limit=per_page_n,
@@ -580,6 +606,24 @@ def _to_int(value: str, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _split_ref(raw: str | None) -> tuple[str | None, str | None]:
+    """Split the ``"Type:id"`` string the audit filter form submits (matching how subjects and
+    actors are displayed and linked elsewhere) into the two halves firm-audit filters on. Either
+    half may be empty and then filters nothing — ``"cron"`` (no colon) filters by type alone, so
+    label-only refs (which have no id) stay filterable."""
+    if not raw:
+        return None, None
+    kind, _, ident = raw.partition(":")
+    return kind or None, ident or None
+
+
+def _decode_rows(rows: list[dict], *fields: str) -> list[dict]:
+    """Decode the named binary columns of query rows for display. Cache keys and channel
+    names/payloads are arbitrary bytes in the database and come back as ``bytes``; the dashboard
+    is where they become text."""
+    return [row | {f: render.decode_bytes(row[f]) for f in fields} for row in rows]
 
 
 def create_server(
