@@ -45,6 +45,14 @@ It points at existing databases — it never creates or migrates a schema.
 Queue actions reuse the library's own helpers (`queues.pause/resume`, `maintenance.retry_failed`),
 so the UI applies exactly the same semantics as the library and CLIs.
 
+## Building your own
+
+Everything the dashboard reads comes from each part's own read-query module
+(`from firm.queue import queries`, and the same for `firm.cache` / `firm.channel` /
+`firm.audit`) — a supported `Connection`-in / dicts-out surface, so your own dashboard, exporter,
+or health check can use exactly what this one uses. The signatures are listed per part in the
+[API cheatsheet](api.md).
+
 ## Security
 
 It's an **internal ops tool**: it exposes tracebacks and destructive actions (retry / discard /

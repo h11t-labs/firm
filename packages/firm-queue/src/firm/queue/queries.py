@@ -1,7 +1,13 @@
 """Read-only queries over the firm-queue schema (SQLAlchemy only — no heavy deps).
 
-Everything here is a plain ``SELECT`` returning dicts, so it's trivially testable without a running
-server and keeps the rendering layer free of ORM objects.
+These functions are a supported read surface — the dashboard (firm-ui) builds on it, and so can
+your own dashboards, exporters, or health checks. Changing their signatures is a breaking change.
+
+Everything here is a plain ``SELECT`` taking a live ``Connection`` and returning dicts, so it's
+trivially testable without a running server and keeps callers free of ORM objects.
+
+Input contract: a negative ``limit``/``offset`` and an unknown ``state`` raise ``ValueError``
+rather than reaching the database.
 """
 
 from __future__ import annotations
@@ -12,7 +18,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.engine import Connection
 
-from firm.queue import schema
+from . import schema
 
 _jobs = schema.jobs
 _ready = schema.ready_executions
@@ -32,7 +38,7 @@ _EXEC_TABLES = {
     "failed": _failed,
 }
 
-# The state tabs, in display order. "finished" is derived from jobs.finished_at, not an exec table.
+# The states, in display order. "finished" is derived from jobs.finished_at, not an exec table.
 STATES = ["ready", "scheduled", "blocked", "claimed", "failed", "finished"]
 
 _STATE_TS = {
@@ -46,8 +52,14 @@ _STATE_TS = {
 DEFAULT_ALIVE_THRESHOLD = 300.0
 
 
-def _count(conn: Connection, table: Any) -> int:
-    return conn.execute(select(func.count()).select_from(table)).scalar() or 0
+def _check_window(limit: int, offset: int) -> None:
+    """Reject a negative page window before it reaches SQL — the backends disagree about what a
+    negative LIMIT/OFFSET means (SQLite reads a negative limit as "no limit"), so it is a caller
+    bug worth naming rather than a silently different result set."""
+    if limit < 0:
+        raise ValueError(f"limit must be >= 0, got {limit}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset}")
 
 
 def state_counts(conn: Connection, queue: str | None = None) -> dict[str, int]:
@@ -77,6 +89,8 @@ def state_counts(conn: Connection, queue: str | None = None) -> dict[str, int]:
 
 
 def queue_rows(conn: Connection, now: datetime) -> list[dict[str, Any]]:
+    """One row per queue that has ready work or is paused: ``name``, ``size``, ``latency``
+    (seconds since the oldest ready job, measured against ``now``) and ``paused``."""
     ready_names = {r[0] for r in conn.execute(select(_ready.c.queue_name).distinct())}
     paused_names = {r[0] for r in conn.execute(select(_pauses.c.queue_name))}
     rows: list[dict[str, Any]] = []
@@ -100,6 +114,12 @@ def queue_rows(conn: Connection, now: datetime) -> list[dict[str, Any]]:
 def jobs_by_state(
     conn: Connection, state: str, limit: int = 50, offset: int = 0, queue: str | None = None
 ) -> list[dict[str, Any]]:
+    """A page of jobs in one of :data:`STATES`, newest first (``scheduled`` runs due-first). Each
+    dict carries the job columns plus ``ts``, that state's own timestamp. An unknown ``state`` is a
+    ``ValueError``."""
+    _check_window(limit, offset)
+    if state not in STATES:
+        raise ValueError(f"unknown state {state!r}; expected one of {', '.join(STATES)}")
     cols = [_jobs.c.id, _jobs.c.queue_name, _jobs.c.class_name, _jobs.c.priority, _jobs.c.attempts]
     if state == "finished":
         stmt = (
@@ -133,6 +153,8 @@ def jobs_by_state(
 
 
 def job_detail(conn: Connection, job_id: int) -> dict[str, Any] | None:
+    """One job with its derived ``state`` (plus ``error``/``process_id`` where the state has
+    them), or ``None`` when no such job exists."""
     job = conn.execute(select(_jobs).where(_jobs.c.id == job_id)).first()
     if job is None:
         return None
@@ -168,6 +190,8 @@ def job_detail(conn: Connection, job_id: int) -> dict[str, Any] | None:
 def processes(
     conn: Connection, now: datetime, alive_threshold: float = DEFAULT_ALIVE_THRESHOLD
 ) -> list[dict[str, Any]]:
+    """The registered worker/dispatcher processes, freshest heartbeat first. ``age`` is measured
+    against ``now``; ``alive`` is that age within ``alive_threshold`` seconds."""
     rows = conn.execute(select(_processes).order_by(_processes.c.last_heartbeat_at.desc())).all()
     out: list[dict[str, Any]] = []
     for r in rows:
@@ -188,6 +212,7 @@ def processes(
 
 
 def recurring(conn: Connection) -> list[dict[str, Any]]:
+    """The registered recurring schedules, by key."""
     rows = conn.execute(select(_recurring).order_by(_recurring.c.key)).all()
     return [
         {

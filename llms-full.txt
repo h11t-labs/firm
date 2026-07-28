@@ -4727,6 +4727,14 @@ It points at existing databases — it never creates or migrates a schema.
 Queue actions reuse the library's own helpers (`queues.pause/resume`, `maintenance.retry_failed`),
 so the UI applies exactly the same semantics as the library and CLIs.
 
+## Building your own
+
+Everything the dashboard reads comes from each part's own read-query module
+(`from firm.queue import queries`, and the same for `firm.cache` / `firm.channel` /
+`firm.audit`) — a supported `Connection`-in / dicts-out surface, so your own dashboard, exporter,
+or health check can use exactly what this one uses. The signatures are listed per part in the
+[API cheatsheet](api.md).
+
 ## Security
 
 It's an **internal ops tool**: it exposes tracebacks and destructive actions (retry / discard /
@@ -5068,6 +5076,22 @@ task = RecurringTask(key="nightly", schedule="0 3 * * *", job=my_job, args=(), k
 Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ```
 
+Read queries (for custom dashboards) — each takes a live SQLAlchemy `Connection` and returns
+plain dicts; this is what the `firm-ui` dashboard is built on:
+
+```python
+from firm.queue import queries
+
+queries.STATES                                     # the valid `state` values, in display order
+queries.state_counts(conn, queue=None)             # -> dict[str, int]  (per state, plus total)
+queries.queue_rows(conn, now)                      # -> list[dict]  (name, size, latency, paused)
+queries.jobs_by_state(conn, state, limit=50, offset=0, queue=None)   # -> list[dict]
+queries.job_detail(conn, job_id)                   # -> dict | None
+queries.processes(conn, now, alive_threshold=300.0)  # -> list[dict]  (+ age, alive)
+queries.recurring(conn)                            # -> list[dict]
+# a negative limit/offset, or an unknown state, raises ValueError.
+```
+
 ## firm.cache
 
 ```python
@@ -5095,6 +5119,17 @@ cache.close()                       # or:  with Cache(...) as cache: ...
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
 ```
 
+Read queries (for custom dashboards), `Connection` in / dicts out:
+
+```python
+from firm.cache import queries
+
+queries.cache_stats(conn)                        # -> {"entries": int, "estimated_size": int}
+queries.cache_recent(conn, limit=50, offset=0)   # -> list[dict]  (id, key, byte_size, created_at)
+# `key` is raw bytes (a cache key is arbitrary bytes — decode it yourself for display);
+# a negative limit/offset raises ValueError.
+```
+
 ## firm.channel
 
 ```python
@@ -5109,6 +5144,18 @@ channel.subscribe(name, callback)   # callback(payload: bytes); only future mess
 channel.unsubscribe(name, callback)
 channel.trim()                      # -> int
 channel.close()                     # or:  with Channel(...) as channel: ...
+```
+
+Read queries (for custom dashboards), `Connection` in / dicts out:
+
+```python
+from firm.channel import queries
+
+queries.channel_stats(conn)                       # -> {"messages": int, "channels": int}
+queries.channel_top(conn, limit=25, offset=0)     # -> list[dict]  (channel, count, last)
+queries.channel_recent(conn, limit=50, offset=0)  # -> list[dict]  (id, channel, payload, created_at)
+# `channel` and `payload` are raw bytes (decode them yourself for display);
+# a negative limit/offset raises ValueError.
 ```
 
 ## firm.audit
@@ -5143,6 +5190,33 @@ record(conn, action, subject=None, actor=None, data=None, changes=None,
 # An object may define __firm_audit_ref__(self) -> Ref to customize its audit identity.
 # Each event dict from history()/get() carries subject_label/actor_label (the display names).
 # data/changes/context: dicts stored as JSON text (not native JSON/JSONB).
+```
+
+Read queries (for custom dashboards), `Connection` in / dicts out — paginated search where
+`history()` is a plain filtered read, plus the tamper-evidence status:
+
+```python
+from firm.audit import queries
+
+queries.audit_stats(conn)            # -> {"events": int, "actions": int, "last_event_at": dt|None}
+queries.audit_count(conn, action=None, subject=None, subject_type=None, subject_id=None,
+                    actor=None, actor_type=None, actor_id=None, correlation_id=None)   # -> int
+queries.audit_search(conn, **same_filters, sort="created_at", dir="desc",
+                     limit=25, offset=0)   # -> list[dict]  (the history() shape + row_mac)
+queries.audit_detail(conn, event_id)       # -> dict | None
+queries.SORT_COLUMNS, queries.DEFAULT_SORT # the sortable columns and the default
+# filters behave exactly as in history() (a bare string filters by type only, and passing both
+# forms for one field raises ValueError); an unknown sort/dir falls back to the default, and a
+# negative limit/offset raises ValueError.
+
+# tamper-evidence (only meaningful when a key is configured; see audit/tamper-evidence):
+queries.verify_status_row(conn)                       # -> dict | None  (the verifier's status row)
+queries.integrity_config(conn, key_configured=True)   # -> IntegrityConfig
+queries.integrity_state(status, config, now=None,
+                        verify_max_age=..., anchor_max_age=...)   # -> IntegrityState (pure)
+queries.row_integrity_context(conn)   # -> dict  (the per-row signals, gathered once)
+queries.row_status(row, ctx)          # -> "sealed"|"unsealed"|"unprotected"|"tampered"|... | None
+# IntegrityState carries state, tone (ok/warn/danger/neutral), escalate, and cause tokens.
 ```
 
 ## firm.contrib (optional — `[flask]` / `[fastapi]` extras)

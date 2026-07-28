@@ -1,15 +1,21 @@
-"""Read-only queries for the audit part.
+"""Read-only queries over the audit log: paginated search, per-row and deployment-wide integrity.
 
-Unlike :func:`firm.audit.events.history`, ``audit_search`` here needs UI-shaped pagination and
-column sorting, so it queries ``schema.audit_events`` directly rather than going through that
-helper — the same division the queue/cache/channel query modules already draw against their parts.
+These functions are a supported read surface — the dashboard (firm-ui) builds on it, and so can
+your own dashboards, exporters, or health checks. Changing their signatures is a breaking change.
+
+Unlike :func:`firm.audit.events.history`, :func:`audit_search` offers pagination and column
+sorting (and pairs with :func:`audit_count` for a total), so it queries ``schema.audit_events``
+directly rather than going through that helper. Filters take the same dual form ``history()``
+accepts.
 
 The tail of this module (:func:`verify_status_row`, :func:`integrity_config`,
-:func:`integrity_state`) feeds the dashboard's tamper-evidence panel (design review D22-D25). It
-reads the single ``firm_audit_verify_status`` row the verifier upserts and derives the *display*
-state the panel renders. That derivation is a pure function so the six state-table rows can be
-unit-tested without a database; the presentation (prose, links, colours) stays in
-:mod:`.render` / the ``Integrity`` component.
+:func:`integrity_state`, :func:`row_status`) reads the single ``firm_audit_verify_status`` row the
+verifier upserts and folds it into a severity a caller can present. That derivation is pure, so the
+whole state table is testable without a database; how a severity is *shown* (words, colours, icons)
+is entirely the caller's business.
+
+Input contract: a negative ``limit``/``offset`` raises ``ValueError``; an unknown ``sort`` or a
+``dir`` outside ``{"asc", "desc"}`` falls back to :data:`DEFAULT_SORT` / descending.
 """
 
 from __future__ import annotations
@@ -22,19 +28,14 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.engine import Connection
 
-from firm._core.clock import now_utc
-from firm.audit import events, schema
-from firm.audit.serialization import load_json
+from .._core.clock import now_utc
+from . import events, schema
+from .events import Reference
+from .verify import _STATUS_ID
 
 _audits = schema.audit_events
 _seals = schema.seals
 _verify_status = schema.verify_status
-
-#: The fixed primary key of the single ``firm_audit_verify_status`` row the verifier upserts (it
-#: mirrors :data:`firm.audit.verify._STATUS_ID`). The dashboard reads *this* row by id, never the
-#: newest by ``ran_at`` — an attacker with DB write access could otherwise insert a second,
-#: future-dated ``outcome="ok"`` row and pin the panel green forever (Bug #2).
-_STATUS_ID = 1
 
 # Sortable columns, in table order. Each maps to one or more real columns (composite for
 # subject/actor, so e.g. sorting by "subject" groups same-type rows together); always a plain
@@ -50,7 +51,18 @@ SORT_COLUMNS: dict[str, tuple[Any, ...]] = {
 DEFAULT_SORT = "created_at"
 
 
+def _check_window(limit: int, offset: int) -> None:
+    """Reject a negative page window before it reaches SQL — the backends disagree about what a
+    negative LIMIT/OFFSET means (SQLite reads a negative limit as "no limit"), so it is a caller
+    bug worth naming rather than a silently different result set."""
+    if limit < 0:
+        raise ValueError(f"limit must be >= 0, got {limit}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset}")
+
+
 def audit_stats(conn: Connection) -> dict[str, Any]:
+    """Log-wide totals: recorded ``events``, distinct ``actions``, and ``last_event_at``."""
     total = conn.execute(select(func.count()).select_from(_audits)).scalar_one()
     actions = conn.execute(
         select(func.count(func.distinct(_audits.c.action))).select_from(_audits)
@@ -59,53 +71,50 @@ def audit_stats(conn: Connection) -> dict[str, Any]:
     return {"events": total, "actions": actions, "last_event_at": last_event_at}
 
 
-def _row_to_dict(row: Any) -> dict[str, Any]:
-    return {
-        "id": row.id,
-        "action": row.action,
-        "subject_type": row.subject_type,
-        "subject_id": row.subject_id,
-        "subject_label": row.subject_label,
-        "actor_type": row.actor_type,
-        "actor_id": row.actor_id,
-        "actor_label": row.actor_label,
-        "correlation_id": row.correlation_id,
-        "data": load_json(row.data),
-        "created_at": row.created_at,
-        # Layer-1 signature — present once a key is configured, NULL on legacy/pre-key rows. Read
-        # by :func:`row_status` to tell "sealed/signed" apart from "unprotected".
-        "row_mac": row.row_mac,
-    }
+def _event_dict(row: Any) -> dict[str, Any]:
+    """One event row as a dict — exactly what :func:`firm.audit.events.history` returns, plus
+    ``row_mac``: the Layer-1 signature (present once a key is configured, NULL on legacy/pre-key
+    rows) that :func:`row_status` reads to tell "sealed/signed" apart from "unprotected"."""
+    return events._row_to_dict(row) | {"row_mac": row.row_mac}
+
+
+def _halves(
+    name: str, ref: Reference, type_: str | None, id_: Any | None
+) -> tuple[str | None, str | None]:
+    """Resolve one reference field to its ``(type, id)`` halves, accepting either the paired
+    ``subject=``/``actor=`` form or the split ``*_type=``/``*_id=`` one — the same contract as
+    :func:`firm.audit.events.history`, including that passing both is a ``ValueError``."""
+    if ref is not None and (type_ is not None or id_ is not None):
+        raise ValueError(f"pass either {name}= or {name}_type=/{name}_id=, not both")
+    if ref is not None:
+        type_, id_, _ = events._ref(ref)
+    return type_, None if id_ is None else str(id_)
 
 
 def _apply_filters(
     stmt: Any,
     *,
     action: str | None,
-    subject: str | None,
-    actor: str | None,
+    subject_type: str | None,
+    subject_id: str | None,
+    actor_type: str | None,
+    actor_id: str | None,
     correlation_id: str | None,
 ) -> Any:
-    """Shared by :func:`audit_search` and :func:`audit_count`, so the count always matches
-    exactly the rows a search would return for the same filters. ``subject``/``actor`` are a
-    single ``"Type:id"`` string (matching how they're displayed and linked elsewhere); either half
-    may be empty — ``"cron"`` (no colon) filters by type alone, ``"Invoice:42"`` filters the pair —
-    so label-only refs (which have no id) stay filterable."""
-    if action:
+    """Shared by :func:`audit_search` and :func:`audit_count`, so the count always matches exactly
+    the rows a search would return for the same filters. Each half filters independently, so
+    ``subject_type="Invoice"`` alone matches every invoice regardless of id."""
+    if action is not None:
         stmt = stmt.where(_audits.c.action == action)
-    if subject:
-        subject_type, _, subject_id = subject.partition(":")
-        if subject_type:
-            stmt = stmt.where(_audits.c.subject_type == subject_type)
-        if subject_id:
-            stmt = stmt.where(_audits.c.subject_id == subject_id)
-    if actor:
-        actor_type, _, actor_id = actor.partition(":")
-        if actor_type:
-            stmt = stmt.where(_audits.c.actor_type == actor_type)
-        if actor_id:
-            stmt = stmt.where(_audits.c.actor_id == actor_id)
-    if correlation_id:
+    if subject_type is not None:
+        stmt = stmt.where(_audits.c.subject_type == subject_type)
+    if subject_id is not None:
+        stmt = stmt.where(_audits.c.subject_id == subject_id)
+    if actor_type is not None:
+        stmt = stmt.where(_audits.c.actor_type == actor_type)
+    if actor_id is not None:
+        stmt = stmt.where(_audits.c.actor_id == actor_id)
+    if correlation_id is not None:
         stmt = stmt.where(_audits.c.correlation_id == correlation_id)
     return stmt
 
@@ -114,17 +123,26 @@ def audit_count(
     conn: Connection,
     *,
     action: str | None = None,
-    subject: str | None = None,
-    actor: str | None = None,
+    subject: Reference = None,
+    subject_type: str | None = None,
+    subject_id: Any | None = None,
+    actor: Reference = None,
+    actor_type: str | None = None,
+    actor_id: Any | None = None,
     correlation_id: str | None = None,
 ) -> int:
-    """The number of events matching these filters — for pagination, not the (unfiltered)
-    dashboard-wide total in :func:`audit_stats`."""
+    """The number of events matching these filters — for pagination, not the (unfiltered) log-wide
+    total in :func:`audit_stats`. Filters are exactly :func:`audit_search`'s; see it for the two
+    accepted reference forms."""
+    subject_type, subject_id = _halves("subject", subject, subject_type, subject_id)
+    actor_type, actor_id = _halves("actor", actor, actor_type, actor_id)
     stmt = _apply_filters(
         select(func.count()).select_from(_audits),
         action=action,
-        subject=subject,
-        actor=actor,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
         correlation_id=correlation_id,
     )
     return conn.execute(stmt).scalar_one()
@@ -134,19 +152,42 @@ def audit_search(
     conn: Connection,
     *,
     action: str | None = None,
-    subject: str | None = None,
-    actor: str | None = None,
+    subject: Reference = None,
+    subject_type: str | None = None,
+    subject_id: Any | None = None,
+    actor: Reference = None,
+    actor_type: str | None = None,
+    actor_id: Any | None = None,
     correlation_id: str | None = None,
     sort: str = DEFAULT_SORT,
     dir: str = "desc",
     limit: int = 25,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
+    """One page of matching events, as dicts (the ``history()`` shape plus ``row_mac``).
+
+    ``subject``/``actor`` filter on the ``(type, id)`` of any accepted reference (a domain object,
+    an explicit tuple, a :class:`firm.audit.Ref`, or a bare ``"label"`` string → **type only**, so
+    ``subject="Invoice:42"`` filters on the *type* ``"Invoice:42"``, not on type + id — split it
+    yourself, or pass ``("Invoice", 42)``, to filter the pair); ``subject_type``/``subject_id``/
+    ``actor_type``/``actor_id`` filter on either half independently. Passing both forms for the
+    same field is a ``ValueError``.
+
+    ``sort`` is one of :data:`SORT_COLUMNS` and ``dir`` is ``"asc"``/``"desc"``; anything else
+    falls back to :data:`DEFAULT_SORT` / descending rather than raising, so a stray query
+    parameter degrades instead of erroring. Rows always carry an id tiebreaker, so paging is
+    stable when the sort key ties.
+    """
+    _check_window(limit, offset)
+    subject_type, subject_id = _halves("subject", subject, subject_type, subject_id)
+    actor_type, actor_id = _halves("actor", actor, actor_type, actor_id)
     stmt = _apply_filters(
         select(_audits),
         action=action,
-        subject=subject,
-        actor=actor,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        actor_type=actor_type,
+        actor_id=actor_id,
         correlation_id=correlation_id,
     )
 
@@ -156,34 +197,29 @@ def audit_search(
         order.append(_audits.c.id.desc())  # stable order across pages when the sort key ties
     stmt = stmt.order_by(*order).limit(limit).offset(offset)
 
-    return [_row_to_dict(row) for row in conn.execute(stmt).all()]
+    return [_event_dict(row) for row in conn.execute(stmt).all()]
 
 
 def audit_detail(conn: Connection, event_id: int) -> dict[str, Any] | None:
-    event = events.get(conn, event_id)
-    if event is None:
-        return None
-    # ``events.get`` maps the display columns but not ``row_mac``; add it here (single-row, cheap)
-    # so :func:`row_status` can classify the detail page without reaching back into firm-audit.
-    event["row_mac"] = conn.execute(
-        select(_audits.c.row_mac).where(_audits.c.id == event_id)
-    ).scalar_one_or_none()
-    return event
+    """One event by id — like :func:`firm.audit.events.get`, plus the ``row_mac`` that
+    :func:`row_status` needs to classify it — or ``None`` when no such event exists."""
+    row = conn.execute(select(_audits).where(_audits.c.id == event_id)).first()
+    return None if row is None else _event_dict(row)
 
 
 # -- per-row tamper-evidence status ------------------------------------------------------------
-# The integrity *panel* (above) reports the deployment-wide verdict; this pair reports the status
-# of one audit row for the events table / detail page, so a row reads as sealed / signed-not-sealed
-# / unprotected / tampered at a glance. :func:`row_integrity_context` gathers the two cheap signals
-# once per page; :func:`row_status` is pure over a single row + that context, so the priority table
-# is unit-testable without a database.
+# The integrity *state* (below) reports the deployment-wide verdict; this pair reports the status
+# of one audit row, so a row reads as sealed / signed-not-sealed / unprotected / tampered at a
+# glance. :func:`row_integrity_context` gathers the two cheap signals once per page;
+# :func:`row_status` is pure over a single row + that context, so the priority table is
+# unit-testable without a database.
 
 
-#: Hard cap on the ``affected_identifiers`` JSON the dashboard will parse. The verifier bounds it to
-#: :data:`firm.audit.verify._MAX_AFFECTED` small findings, so anything larger is corrupt or hostile.
-#: Rejecting it before ``json.loads`` (and catching ``RecursionError`` below) keeps a DB-write
-#: attacker from 500-ing every audit-page render with an oversized or deeply-nested blob (Bug #3):
-#: the page is re-rendered on every request, so an uncaught parse crash is a persistent DoS.
+#: Hard cap on the ``affected_identifiers`` JSON these helpers will parse. The verifier bounds it
+#: to :data:`firm.audit.verify._MAX_AFFECTED` small findings, so anything larger is corrupt or
+#: hostile. Rejecting it before ``json.loads`` (and catching ``RecursionError`` below) keeps a
+#: DB-write attacker from crashing every reader with an oversized or deeply-nested blob (Bug #3):
+#: a dashboard re-parses this on every request, so an uncaught parse crash is a persistent DoS.
 _MAX_AFFECTED_JSON = 64 * 1024
 
 
@@ -214,7 +250,7 @@ def _affected_is_truncated(raw: str | None) -> bool:
     """Whether the verifier truncated its ``affected_identifiers`` — i.e. more rows were flagged
     tampered than the JSON carries individual ids for (the ``kind="more"`` overflow marker). When it
     did, the set from :func:`_tampered_row_ids` is *incomplete*, so a sealed row not in it may
-    still be one of the un-listed tampered rows — the table must not vouch for it as verified
+    still be one of the un-listed tampered rows — a reader must not vouch for it as verified
     (Bug #8)."""
     if not raw or len(raw) > _MAX_AFFECTED_JSON:
         return False
@@ -232,15 +268,14 @@ def row_integrity_context(conn: Connection) -> dict[str, Any]:
     use at all (``active`` — any seal/activation/floor record exists or a verify run has happened),
     the newest covering seal's ``to_id`` (``max_sealed_to_id``, 0 when nothing is sealed), and the
     set of row ids the latest verify flagged tampered (``tampered_ids``). When ``active`` is False
-    the table adds no status column at all, so a plain audit log looks exactly as it did before
-    tamper-evidence existed."""
+    every row's status is ``None``, so a plain audit log carries no integrity dimension at all."""
     any_record = conn.execute(select(_seals.c.id).limit(1)).first() is not None
     max_to = conn.execute(select(func.max(_seals.c.to_id)).where(_seals.c.kind == "seal")).scalar()
     status = verify_status_row(conn)
     affected = status["affected_identifiers"] if status else None
     # When the latest run is tampered AND its affected list was truncated, the known tampered-id set
-    # is incomplete — a sealed row not in it may still be one of the un-listed tampered rows, so the
-    # table must not render it as "Sealed & verified" (Bug #8).
+    # is incomplete — a sealed row not in it may still be one of the un-listed tampered rows, so it
+    # must not be reported as verified (Bug #8).
     truncated = bool(
         status and status["outcome"] == "tampered" and _affected_is_truncated(affected)
     )
@@ -254,14 +289,14 @@ def row_integrity_context(conn: Connection) -> dict[str, Any]:
 
 def row_status(row: dict[str, Any], ctx: dict[str, Any]) -> str | None:
     """One row's tamper-evidence status, or ``None`` when tamper-evidence is not in use (so the
-    caller renders nothing). Priority, top wins: ``tampered`` (verify flagged this row id) >
+    caller reports nothing). Priority, top wins: ``tampered`` (verify flagged this row id) >
     ``unprotected`` (no signature — a legacy pre-key row) > ``unsealed`` (signed but past the newest
     seal — the grace-window tail) > ``sealed`` (signed and within a seal).
 
     When the latest run flagged more tampered rows than its ``affected_identifiers`` lists ids for
     (``ctx["tampered_truncated"]`` — Bug #8), a sealed row not in the known set may still be one of
     the un-listed tampered rows, so it degrades to ``unverified`` (honest: "sealed, but this run
-    could not vouch for it") instead of falsely reading ``sealed`` & verified."""
+    could not vouch for it") instead of falsely reading ``sealed``."""
     if not ctx["active"]:
         return None
     if row["id"] in ctx["tampered_ids"]:
@@ -275,28 +310,27 @@ def row_status(row: dict[str, Any], ctx: dict[str, Any]) -> str | None:
     return "sealed"
 
 
-# -- integrity (tamper-evidence) panel ---------------------------------------------------------
+# -- deployment-wide integrity state -----------------------------------------------------------
 # The verifier (opt-in) upserts one ``firm_audit_verify_status`` row after each run; this tail
-# reads it and folds it — together with whether integrity is switched on at all — into the single
-# display state the panel renders (design review D22-D25). Nothing here presents anything: the
-# prose, links, and colours live in :mod:`.render`; this layer only decides *which* of the six
+# reads it and folds it — together with whether integrity is switched on at all — into a single
+# derived state with a severity. Nothing here presents anything: it only decides *which* of the six
 # states applies, so the whole state table is unit-testable without a database.
 
-# Liveness thresholds (seconds). Independent of the stored verdict, the panel forces amber when
-# the last verify run — or the newest anchor — is older than these, so a verify cron or anchor
-# sink that quietly died surfaces within one threshold rather than ageing behind a stale green
-# (design "Staleness" / review D16). Both are overridable by the caller.
-DEFAULT_VERIFY_MAX_AGE = 24 * 60 * 60.0  # a nightly verify that skips a whole day goes amber
+# Liveness thresholds (seconds). Independent of the stored verdict, the derived state escalates to
+# ``warn`` when the last verify run — or the newest anchor — is older than these, so a verify cron
+# or anchor sink that quietly died surfaces within one threshold rather than ageing behind a stale
+# ``ok``. Both are overridable by the caller.
+DEFAULT_VERIFY_MAX_AGE = 24 * 60 * 60.0  # a nightly verify that skips a whole day goes to warn
 DEFAULT_ANCHOR_MAX_AGE = 3 * 60.0  # 3x the 60s seal interval, matching the CLI's ``anchor_max_age``
 
 
 @dataclass(frozen=True)
 class IntegrityConfig:
     """Whether tamper-evidence is switched on for this deployment — the signal that tells
-    "configured but never verified" apart from "no key at all" (design D22). ``key_configured``
-    is supplied by the *server context* (the dashboard process's ``FIRM_AUDIT_KEY``), never
-    inferred from whether a status row happens to exist; ``sealing_active`` / ``sealing_since``
-    come from the explicit signed activation marker written by the first sealer pass."""
+    "configured but never verified" apart from "no key at all". ``key_configured`` is supplied by
+    the caller (the reading process's ``FIRM_AUDIT_KEY``), never inferred from whether a status row
+    happens to exist; ``sealing_active`` / ``sealing_since`` come from the explicit signed
+    activation marker written by the first sealer pass."""
 
     key_configured: bool
     sealing_active: bool
@@ -305,14 +339,14 @@ class IntegrityConfig:
 
 @dataclass(frozen=True)
 class IntegrityState:
-    """The derived display state — one of the six rows of the design's state table. ``tone`` is
-    the pill/strip colour token (``ok``/``warn``/``danger``/``neutral``); ``escalate`` is whether
-    this state also renders at the top of the overview page (TAMPERED and amber-liveness do, the
-    calm OK strip does not — review D23); ``causes`` are machine tokens (``stale``,
-    ``sealer_stalled``, ``anchor_stale``, ``verify_warnings``) that :mod:`.render` turns into the
-    itemized WARNING/ERROR prose. ``status``/``config`` carry the raw values render reads for
-    timestamps, counts, and affected-range links; ``verify_max_age``/``anchor_max_age`` are the
-    thresholds this state was derived under, so the prose can name them honestly."""
+    """The derived integrity state. ``tone`` is its severity (``ok``/``warn``/``danger``/
+    ``neutral``, like log levels); ``escalate`` is whether this state deserves prominent surfacing
+    beyond a dedicated integrity view (tampering and stalled-pipeline liveness do, a healthy state
+    does not); ``causes`` are machine tokens (``stale``, ``sealer_stalled``, ``anchor_stale``,
+    ``verify_warnings``) a caller can turn into itemized prose. ``status``/``config`` carry the raw
+    values behind the verdict (timestamps, counts, the affected range);
+    ``verify_max_age``/``anchor_max_age`` are the thresholds this state was derived under, so a
+    caller can name them honestly."""
 
     state: str
     tone: str
@@ -326,11 +360,12 @@ class IntegrityState:
 
 def verify_status_row(conn: Connection) -> dict[str, Any] | None:
     """The single ``firm_audit_verify_status`` row the verifier upserts, as a plain dict, or
-    ``None`` when verify has never run. Read by its fixed primary key (:data:`_STATUS_ID`) — the one
-    canonical row the verifier upserts — **not** the newest by ``ran_at``. Ordering by ``ran_at``
-    would let a DB-write attacker insert a second, far-future ``outcome="ok"`` row and keep the
-    dashboard green even after real verifies flagged tampering (Bug #2); the id-keyed read always
-    reflects the last genuine verify run."""
+    ``None`` when verify has never run. Read by its fixed primary key
+    (:data:`firm.audit.verify._STATUS_ID`) — the one canonical row the verifier upserts — **not**
+    the newest by ``ran_at``. Ordering by ``ran_at`` would let a DB-write attacker insert a second,
+    far-future ``outcome="ok"`` row and keep readers reporting a healthy log even after real
+    verifies flagged tampering (Bug #2); the id-keyed read always reflects the last genuine verify
+    run."""
     row = conn.execute(select(_verify_status).where(_verify_status.c.id == _STATUS_ID)).first()
     if row is None:
         return None
@@ -347,15 +382,14 @@ def verify_status_row(conn: Connection) -> dict[str, Any] | None:
         "anchor_configured": row.anchor_configured,
         "unsealed_tail_count": row.unsealed_tail_count,
         "unsealed_tail_oldest_at": row.unsealed_tail_oldest_at,
-        # JSON list of ``{"kind", "label", "id"?, "message"?, "verdict"}`` on tampering; see
-        # ``render._affected_cells``.
+        # JSON list of ``{"kind", "label", "id"?, "message"?, "verdict"}`` on tampering.
         "affected_identifiers": row.affected_identifiers,
         "duration_seconds": row.duration_seconds,
     }
 
 
 def integrity_config(conn: Connection, *, key_configured: bool) -> IntegrityConfig:
-    """Whether integrity is switched on. ``key_configured`` is the server's own
+    """Whether integrity is switched on. ``key_configured`` is the calling process's own
     ``FIRM_AUDIT_KEY`` presence (passed in, not read here); sealing state comes only from the
     explicit signed ``kind="activation"`` marker, whose ``sealed_at`` is the activation moment."""
     since = conn.execute(
@@ -380,10 +414,10 @@ def integrity_state(
     verify_max_age: float = DEFAULT_VERIFY_MAX_AGE,
     anchor_max_age: float = DEFAULT_ANCHOR_MAX_AGE,
 ) -> IntegrityState:
-    """Fold the status row + config into a display state (pure — no I/O, so the whole state
+    """Fold the status row + config into one derived state (pure — no I/O, so the whole state
     table is unit-tested directly). Priority: proven tampering dominates everything; then the
     "configured but never ran" vs "not configured" split on ``config`` (never on whether a status
-    row exists); then verdict plus the liveness/anchor staleness that forces amber regardless of
+    row exists); then verdict plus the liveness/anchor staleness that forces ``warn`` regardless of
     the stored verdict (a dead verify cron cannot record its own death)."""
     now = now or now_utc()
     configured = config.key_configured or config.sealing_active
@@ -403,7 +437,7 @@ def integrity_state(
     if status["outcome"] == "tampered" or status["tampered_count"]:
         return make("tampered", "danger", True)
 
-    # Liveness / staleness — these force amber even over a stored ``ok`` (design "Staleness").
+    # Liveness / staleness — these force ``warn`` even over a stored ``ok``.
     causes: list[str] = []
     ran_age = _age(now, status["ran_at"])
     if ran_age is not None and ran_age > verify_max_age:
@@ -412,20 +446,19 @@ def integrity_state(
     if tail_age is not None and tail_age > verify_max_age:
         causes.append("sealer_stalled")
     anchor_age = _age(now, status["newest_anchor_at"])
-    # anchor-absent-by-design (``anchor_configured`` False) never reads as "stale" (review D22).
+    # anchor-absent-by-design (``anchor_configured`` False) never reads as "stale".
     if status["anchor_configured"] and anchor_age is not None and anchor_age > anchor_max_age:
         causes.append("anchor_stale")
     if status["warning_count"]:
         causes.append("verify_warnings")
 
     if status["outcome"] == "error":
-        # ERROR (verify itself failed, e.g. unknown key_id) is amber and counts toward liveness
-        # so it escalates; red stays reserved for proven tampering (design D24).
+        # ERROR (verify itself failed, e.g. unknown key_id) is a warning that counts toward
+        # liveness, so it escalates; ``danger`` stays reserved for proven tampering.
         return make("error", "warn", True, tuple(causes))
     if status["outcome"] == "warning" or causes:
-        # Only a stalled pipeline (verify not running, sealer behind) is "amber liveness" and
-        # escalates to the overview; a verifier / stale-anchor warning stays on the audit tab
-        # (review D23).
+        # Only a stalled pipeline (verify not running, sealer behind) escalates; a verifier or
+        # stale-anchor warning stays in the integrity view.
         liveness = bool({"stale", "sealer_stalled"}.intersection(causes))
         return make("warning", "warn", liveness, tuple(causes))
     return make("ok", "ok", False)

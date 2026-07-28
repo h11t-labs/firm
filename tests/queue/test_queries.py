@@ -1,18 +1,20 @@
-"""Read-layer specs."""
+"""Specs for the read-query surface (:mod:`firm.queue.queries`)."""
 
 from __future__ import annotations
 
+import pytest
+
 from firm._core.clock import now_utc
-from firm.ui import queries
+from firm.queue import queries, queues
 
 
-def test_state_counts(runtime, seed) -> None:
+def test_state_counts(engine, seed) -> None:
     seed.ready()
     seed.ready()
     seed.scheduled()
     seed.failed()
     seed.finished()
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         counts = queries.state_counts(conn)
     assert counts["ready"] == 2
     assert counts["scheduled"] == 1
@@ -21,22 +23,22 @@ def test_state_counts(runtime, seed) -> None:
     assert counts["total"] == 5
 
 
-def test_jobs_by_state(runtime, seed) -> None:
+def test_jobs_by_state(engine, seed) -> None:
     a = seed.ready()
     b = seed.ready()
     seed.failed()
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         ready = queries.jobs_by_state(conn, "ready")
     assert {row["id"] for row in ready} == {a, b}
     assert all(row["class_name"] == "app.task" for row in ready)
 
 
-def test_state_counts_scoped_to_queue(runtime, seed) -> None:
+def test_state_counts_scoped_to_queue(engine, seed) -> None:
     seed.ready(queue="mailers")
     seed.ready(queue="mailers")
     seed.ready(queue="default")
     seed.failed()  # failed_executions has no queue_name of its own; must join back to jobs
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         mailers = queries.state_counts(conn, queue="mailers")
         default = queries.state_counts(conn, queue="default")
     assert mailers["ready"] == 2
@@ -45,46 +47,75 @@ def test_state_counts_scoped_to_queue(runtime, seed) -> None:
     assert default["ready"] == 1
 
 
-def test_jobs_by_state_scoped_to_queue(runtime, seed) -> None:
+def test_jobs_by_state_scoped_to_queue(engine, seed) -> None:
     a = seed.ready(queue="mailers")
     seed.ready(queue="default")
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         mailers_ready = queries.jobs_by_state(conn, "ready", queue="mailers")
     assert {row["id"] for row in mailers_ready} == {a}
 
 
-def test_job_detail_failed_includes_error(runtime, seed) -> None:
+def test_jobs_by_state_paginates(engine, seed) -> None:
+    for _ in range(5):
+        seed.ready()
+    with engine.connect() as conn:
+        newest_first = [row["id"] for row in queries.jobs_by_state(conn, "ready")]
+        page = queries.jobs_by_state(conn, "ready", limit=2, offset=2)
+    assert [row["id"] for row in page] == newest_first[2:4]
+
+
+def test_jobs_by_state_rejects_an_unknown_state(engine) -> None:
+    # A caller typo used to surface as a bare KeyError from the exec-table lookup.
+    with engine.connect() as conn, pytest.raises(ValueError, match="unknown state"):
+        queries.jobs_by_state(conn, "not-a-state")
+
+
+def test_jobs_by_state_rejects_a_negative_window(engine) -> None:
+    with engine.connect() as conn:
+        with pytest.raises(ValueError, match="limit"):
+            queries.jobs_by_state(conn, "ready", limit=-1)
+        with pytest.raises(ValueError, match="offset"):
+            queries.jobs_by_state(conn, "ready", offset=-1)
+
+
+def test_job_detail_failed_includes_error(engine, seed) -> None:
     job_id = seed.failed(error="Traceback...\nValueError: nope")
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         detail = queries.job_detail(conn, job_id)
     assert detail is not None
     assert detail["state"] == "failed"
     assert "ValueError: nope" in detail["error"]
 
 
-def test_job_detail_missing_returns_none(runtime) -> None:
-    with runtime.engine.connect() as conn:
+def test_job_detail_missing_returns_none(engine) -> None:
+    with engine.connect() as conn:
         assert queries.job_detail(conn, 999) is None
 
 
-def test_queue_rows_reports_size_and_paused(runtime, seed) -> None:
+def test_queue_rows_reports_size_and_paused(engine, runtime, seed) -> None:
     seed.ready(queue="mailers")
     seed.ready(queue="mailers")
     seed.ready(queue="default")
-    from firm.queue import queues
-
     queues.pause(runtime, "mailers")
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         rows = {r["name"]: r for r in queries.queue_rows(conn, now_utc())}
     assert rows["mailers"]["size"] == 2
     assert rows["mailers"]["paused"] is True
     assert rows["default"]["paused"] is False
 
 
-def test_processes_alive_vs_stale(runtime, seed) -> None:
+def test_processes_alive_vs_stale(engine, seed) -> None:
     seed.process(name="fresh", age_seconds=0.0)
     seed.process(name="stale", age_seconds=10_000.0)
-    with runtime.engine.connect() as conn:
+    with engine.connect() as conn:
         procs = {p["name"]: p for p in queries.processes(conn, now_utc())}
     assert procs["fresh"]["alive"] is True
     assert procs["stale"]["alive"] is False
+
+
+def test_recurring_lists_registered_schedules(engine, seed) -> None:
+    seed.recurring_task(key="nightly", schedule="0 3 * * *")
+    with engine.connect() as conn:
+        rows = queries.recurring(conn)
+    assert [r["key"] for r in rows] == ["nightly"]
+    assert rows[0]["schedule"] == "0 3 * * *"
