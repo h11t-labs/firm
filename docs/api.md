@@ -107,7 +107,7 @@ Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ## firm.cache
 
 ```python
-from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, PickleCoder
 
 # database_url is positional; everything after it is keyword-only (defaults shown):
 cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
@@ -126,8 +126,7 @@ cache.increment(key, by=1)          # -> int
 cache.decrement(key, by=1)          # -> int
 cache.clear()
 cache.close()                       # or:  with Cache(...) as cache: ...
-# keys are str|bytes; values go through the coder (JSONCoder by default; MsgpackCoder for
-# compact binary rows, PickleCoder for arbitrary Python objects — see cache/encryption-and-coders).
+# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
 ```
 
@@ -186,13 +185,13 @@ record(conn, action, subject=None, actor=None, data=None, changes=None,
 ```python
 # FastAPI: app = FastAPI(lifespan=lifespan(database_url=..., embed_workers=False,
 #                                          queues=("*",), threads=3))
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
 # Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
 #   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import Firm
 
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```
 

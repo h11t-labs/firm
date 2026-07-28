@@ -6,6 +6,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Deprecated
+
+- The framework integrations moved from `firm.contrib.*` to **`firm.queue.contrib.*`**, so that
+  each module's integrations sit under that module's own path — the same shape
+  `firm.cache.contrib.*` already has. `firm.contrib` read like a firm-wide namespace while
+  everything in it only ever configured the queue.
+
+  `firm.contrib.flask`, `firm.contrib.fastapi` and `firm.contrib.sqlalchemy` keep working and now
+  emit a `DeprecationWarning`; they are removed in 2.0. They re-export the same objects, so `is`
+  and `isinstance` still hold across both spellings. Update imports:
+
+  ```python
+  from firm.contrib.flask import Firm  # deprecated
+  from firm.queue.contrib.flask import Firm  # use this
+  ```
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

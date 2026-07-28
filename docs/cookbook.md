@@ -171,22 +171,18 @@ cache.decrement("hits")            # -> 10
 cache.decrement("hits", by=4)      # -> 6
 ```
 
-### Coders: JSON (default), msgpack, pickle
+### Coders: JSON vs default pickle
 
-`JSONCoder` is the default: human-readable bytes, portable across languages, and safe to decode no matter who wrote the row. `MsgpackCoder` takes the same value shapes into a compact binary form (needs the `msgpack` extra). `PickleCoder` handles any Python object but executes code on load — opt in only when every writer to the cache table is trusted.
+The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
 
 ```python
-from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, PickleCoder
 
-# JSONCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
 cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
 cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
 
-# pip install "firm-cache[msgpack]" — smaller rows, and bytes round-trip as bytes
-cache = Cache(database_url="sqlite:///cache.db", coder=MsgpackCoder())
-
-# arbitrary Python objects, at the cost of code execution on load
+# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 ```
 
@@ -734,8 +730,8 @@ from sqlalchemy.orm import Session
 
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.fastapi import lifespan
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.fastapi import lifespan
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 DATABASE_URL = "postgresql://localhost/app"
 
@@ -814,7 +810,7 @@ A complete single-file Flask app: `Firm(app)` configures the queue from `app.con
 from flask import Flask, jsonify
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import Firm
 
 app = Flask(__name__)
 app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"

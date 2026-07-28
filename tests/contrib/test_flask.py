@@ -10,9 +10,9 @@ from flask import Flask
 from sqlalchemy import func, select
 
 import firm.queue as bq
-from firm.contrib.flask import Firm
 from firm.queue import schema
 from firm.queue.config import current_runtime, set_runtime
+from firm.queue.contrib.flask import Firm
 
 
 @bq.job()

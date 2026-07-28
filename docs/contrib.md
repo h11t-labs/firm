@@ -1,20 +1,31 @@
 # Framework integration
 
-`firm.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
+`firm.queue.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
 is opt-in, behind its own extra, and **nothing in core imports it** — if you don't use it, it costs
 nothing. You still define jobs the normal way with `@bq.job`.
 
+!!! note "Moved from `firm.contrib`"
+
+    These live under `firm.queue.contrib` as of the next release, so that each module's
+    integrations sit under that module's own path — the same shape `firm.cache.contrib.*`
+    already has. `firm.contrib` read like a firm-wide namespace while everything in it only ever
+    configured the queue.
+
+    The old `firm.contrib.flask`, `firm.contrib.fastapi` and `firm.contrib.sqlalchemy` keep
+    working and emit a `DeprecationWarning`; they are removed in 2.0. They re-export the same
+    objects, so `is` and `isinstance` still hold across both spellings.
+
 | Import | Install | What it does |
 |---|---|---|
-| `firm.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
-| `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+| `firm.queue.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.queue.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.queue.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
 
 ## FastAPI
 
 ```python
 from fastapi import FastAPI
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
 app = FastAPI(lifespan=lifespan(database_url="postgresql://localhost/app"))
 
@@ -32,7 +43,7 @@ process** — convenient for development or a single-process deploy; it's stoppe
 
 ```python
 from flask import Flask
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import Firm
 
 app = Flask(__name__)
 app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
@@ -59,7 +70,7 @@ single-process only — otherwise every web worker starts its own supervisor).
 rollback — so you never enqueue a job for a request that didn't persist:
 
 ```python
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 def create_order(session, payload):
     order = Order(**payload)

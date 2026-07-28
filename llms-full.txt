@@ -120,8 +120,8 @@ Database drivers and optional features are extras on the module packages:
 |---|---|---|
 | `firm-queue[postgres]` / `firm-cache[postgres]` / … | `psycopg` | running on PostgreSQL |
 | `firm-queue[mysql]` / `firm-cache[mysql]` / … | `pymysql` | running on MySQL / MariaDB |
-| `firm-queue[flask]` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) |
-| `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) |
+| `firm-queue[flask]` | `flask` | the Flask integration ([`firm.queue.contrib.flask`](contrib.md)) |
+| `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.queue.contrib.fastapi`](contrib.md)) |
 | `firm-cache[encryption]` | `cryptography` | cache at-rest encryption (Fernet) |
 | `firm-cache[msgpack]` | `msgpack` | the cache msgpack value coder |
 
@@ -362,22 +362,18 @@ cache.decrement("hits")            # -> 10
 cache.decrement("hits", by=4)      # -> 6
 ```
 
-### Coders: JSON (default), msgpack, pickle
+### Coders: JSON vs default pickle
 
-`JSONCoder` is the default: human-readable bytes, portable across languages, and safe to decode no matter who wrote the row. `MsgpackCoder` takes the same value shapes into a compact binary form (needs the `msgpack` extra). `PickleCoder` handles any Python object but executes code on load — opt in only when every writer to the cache table is trusted.
+The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
 
 ```python
-from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, PickleCoder
 
-# JSONCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
 cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
 cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
 
-# pip install "firm-cache[msgpack]" — smaller rows, and bytes round-trip as bytes
-cache = Cache(database_url="sqlite:///cache.db", coder=MsgpackCoder())
-
-# arbitrary Python objects, at the cost of code execution on load
+# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 ```
 
@@ -925,8 +921,8 @@ from sqlalchemy.orm import Session
 
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.fastapi import lifespan
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.fastapi import lifespan
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 DATABASE_URL = "postgresql://localhost/app"
 
@@ -1005,7 +1001,7 @@ A complete single-file Flask app: `Firm(app)` configures the queue from `app.con
 from flask import Flask, jsonify
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import Firm
 
 app = Flask(__name__)
 app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
@@ -4388,21 +4384,32 @@ precision, matching `firm.cache` and `firm.queue`.
 
 # Framework integration
 
-`firm.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
+`firm.queue.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
 is opt-in, behind its own extra, and **nothing in core imports it** — if you don't use it, it costs
 nothing. You still define jobs the normal way with `@bq.job`.
 
+!!! note "Moved from `firm.contrib`"
+
+    These live under `firm.queue.contrib` as of the next release, so that each module's
+    integrations sit under that module's own path — the same shape `firm.cache.contrib.*`
+    already has. `firm.contrib` read like a firm-wide namespace while everything in it only ever
+    configured the queue.
+
+    The old `firm.contrib.flask`, `firm.contrib.fastapi` and `firm.contrib.sqlalchemy` keep
+    working and emit a `DeprecationWarning`; they are removed in 2.0. They re-export the same
+    objects, so `is` and `isinstance` still hold across both spellings.
+
 | Import | Install | What it does |
 |---|---|---|
-| `firm.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
-| `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+| `firm.queue.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.queue.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.queue.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
 
 ## FastAPI
 
 ```python
 from fastapi import FastAPI
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
 app = FastAPI(lifespan=lifespan(database_url="postgresql://localhost/app"))
 
@@ -4420,7 +4427,7 @@ process** — convenient for development or a single-process deploy; it's stoppe
 
 ```python
 from flask import Flask
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import Firm
 
 app = Flask(__name__)
 app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
@@ -4447,7 +4454,7 @@ single-process only — otherwise every web worker starts its own supervisor).
 rollback — so you never enqueue a job for a request that didn't persist:
 
 ```python
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 def create_order(session, payload):
     order = Order(**payload)
@@ -5071,7 +5078,7 @@ Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ## firm.cache
 
 ```python
-from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, PickleCoder
 
 # database_url is positional; everything after it is keyword-only (defaults shown):
 cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
@@ -5090,8 +5097,7 @@ cache.increment(key, by=1)          # -> int
 cache.decrement(key, by=1)          # -> int
 cache.clear()
 cache.close()                       # or:  with Cache(...) as cache: ...
-# keys are str|bytes; values go through the coder (JSONCoder by default; MsgpackCoder for
-# compact binary rows, PickleCoder for arbitrary Python objects — see cache/encryption-and-coders).
+# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
 ```
 
@@ -5150,13 +5156,13 @@ record(conn, action, subject=None, actor=None, data=None, changes=None,
 ```python
 # FastAPI: app = FastAPI(lifespan=lifespan(database_url=..., embed_workers=False,
 #                                          queues=("*",), threads=3))
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
 # Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
 #   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import Firm
 
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```
 

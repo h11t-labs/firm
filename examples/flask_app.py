@@ -13,8 +13,8 @@ from flask import Flask
 import firm.queue as bq
 from firm._core.database import create_engine_for
 from firm.cache import Cache
-from firm.contrib.flask import Firm
 from firm.queue import schema as queue_schema
+from firm.queue.contrib.flask import Firm
 
 DB = "sqlite:///firm-flask.db"
 
