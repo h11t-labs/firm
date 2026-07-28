@@ -16,7 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=1.0.0",
+    "firm-core~=1.0",
     "click>=8.1",
 ]
 

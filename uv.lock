@@ -426,7 +426,7 @@ wheels = [
 
 [[package]]
 name = "firm"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/firm" }
 
 [package.optional-dependencies]
@@ -518,7 +518,7 @@ provides-extras = ["postgres", "mysql"]
 
 [[package]]
 name = "firm-cache"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/firm-cache" }
 dependencies = [
     { name = "click" },
@@ -640,7 +640,7 @@ provides-extras = ["flask", "fastapi", "postgres", "mysql"]
 
 [[package]]
 name = "firm-stack"
-version = "1.0.0"
+version = "1.1.0"
 source = { editable = "packages/firm-stack" }
 
 [package.optional-dependencies]
@@ -706,7 +706,7 @@ provides-extras = ["queue", "cache", "channel", "audit", "ui", "flask", "fastapi
 
 [[package]]
 name = "firm-ui"
-version = "1.0.0"
+version = "1.0.1"
 source = { editable = "packages/firm-ui" }
 dependencies = [
     { name = "firm-audit" },
