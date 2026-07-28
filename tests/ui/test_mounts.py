@@ -13,6 +13,7 @@ import sys
 import types
 from collections.abc import Callable
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 import pytest
 
@@ -135,7 +136,16 @@ def django_client(dashboard) -> Callable[..., Client]:
             return _wrap(client.get(path_, headers=headers))
 
         def post(path_: str, data: dict | None = None, **headers) -> Response:
-            return _wrap(client.post(path_, data=data or {}, headers=headers))
+            # Form-encoded, as a browser posts the dashboard's own forms; Django's test client
+            # would otherwise default to multipart.
+            return _wrap(
+                client.post(
+                    path_,
+                    data=urlencode(data or {}),
+                    content_type="application/x-www-form-urlencoded",
+                    headers=headers,
+                )
+            )
 
         return Client(get, post)
 
@@ -184,6 +194,18 @@ def test_mounted_action_runs_and_redirects_into_the_mount(mount, seed) -> None:
     assert response.headers["location"] == f"{PREFIX}/jobs?state=failed"
     with seed.engine.connect() as conn:
         assert queries.job_detail(conn, job_id)["state"] == "ready"
+
+
+def test_mounted_form_body_is_read_and_applied(mount) -> None:
+    """A settings POST is the one route with a body: each adapter has to deliver it (the app asks
+    for it only after auth and the size check, so it is handed over lazily)."""
+    response = mount(host_auth=True).post(
+        f"{PREFIX}/settings/theme", {"theme": "dark", "return": f"{PREFIX}/cache"}
+    )
+    assert response.status == 303
+    assert response.headers["location"] == f"{PREFIX}/cache"
+    assert "firm_theme=dark" in response.headers["set-cookie"]
+    assert "Path=/firm/" in response.headers["set-cookie"]
 
 
 def test_mounted_cross_origin_post_is_rejected(mount, seed) -> None:

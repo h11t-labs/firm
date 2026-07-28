@@ -16,6 +16,7 @@ runs in the threadpool rather than on the event loop.
 
 from __future__ import annotations
 
+import anyio.from_thread
 from fastapi import APIRouter, Request, Response
 from starlette.concurrency import run_in_threadpool
 
@@ -52,15 +53,17 @@ def router(
             path=f"/{subpath}",
             query=scope["query_string"].decode("latin-1"),
             headers=Headers(request.headers.items()),
-            # Starlette has already buffered the body by the time a route runs; the host's own
-            # request-size limit is the one that applies before it, and the dashboard rejects
-            # anything over its own limit below.
-            body=await request.body(),
             peer=request.client.host if request.client else "",
             prefix=mount_prefix(full_path, subpath),
             host=request.headers.get("host", ""),
         )
-        result = await run_in_threadpool(app.handle, ui_request)
+        # The body stays in the receive channel until the app asks for it, which it only does once
+        # the request has authenticated and passed the size limit — the same order the standalone
+        # server keeps. Reading it means stepping back onto the event loop from the worker thread,
+        # which is what anyio's portal is for.
+        result = await run_in_threadpool(
+            app.handle, ui_request, read_body=lambda: anyio.from_thread.run(request.body)
+        )
         response = Response(content=result.body, status_code=result.status)
         for name, value in result.headers:
             if name.lower() == "set-cookie":  # repeatable: never collapse it into headers[]

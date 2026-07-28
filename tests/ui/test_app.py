@@ -174,6 +174,38 @@ def test_oversized_body_is_rejected(app: DashboardApp) -> None:
     assert _post(app, "/settings/theme", huge).status == 413
 
 
+def test_ambiguous_content_length_is_refused(app: DashboardApp) -> None:
+    """Two conflicting Content-Length lines (Headers joins repeats) is the shape request smuggling
+    is built on: refuse it rather than pick a reading the transport below may not share."""
+    for value in ("12, 4096", "-1", "0x10"):
+        request = UIRequest(
+            "POST",
+            "/settings/theme",
+            headers=Headers([("Host", "app.example"), ("Content-Length", value)]),
+            body=b"theme=dark",
+        )
+        assert app.handle(request).status == 400
+
+
+@pytest.mark.parametrize(
+    ("hostile", "expected"),
+    [
+        ("//evil.example", "/evil.example"),  # protocol-relative -> not an open redirect
+        ('/t/x" onmouseover=alert(1) x="', "/t/x%22%20onmouseover=alert(1)%20x=%22"),
+        ("/t/<script>", "/t/%3Cscript%3E"),
+        ("/t/a%20b", "/t/a%20b"),  # already encoded: left alone, not double-encoded
+    ],
+)
+def test_hostile_mount_prefix_is_neutralized(dashboard, hostile: str, expected: str) -> None:
+    """A host application can mount the dashboard under a URL segment of its own
+    (``/tenants/<name>/firm``), so the prefix is not automatically trustworthy: it has to be safe
+    to put in a Location header and in an HTML attribute."""
+    assert UIRequest("GET", "/", prefix=hostile).prefix == expected
+    body = _get(DashboardApp(dashboard), "/", prefix=hostile).body.decode()
+    assert '" onmouseover' not in body
+    assert "<script>" not in body
+
+
 def test_mounting_without_stating_who_authenticates_is_refused(dashboard) -> None:
     with pytest.raises(ValueError, match="host_auth=True"):
         build_app(dashboard)

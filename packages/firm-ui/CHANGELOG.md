@@ -24,6 +24,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Changed
 
+- A POST whose `Content-Length` is not a plain number — including two conflicting header lines —
+  is answered `400` instead of being read under one of the two lengths. Every transport now agrees
+  on how much body there is, or refuses the request.
 - The dashboard's read queries moved into the packages that own the data (`firm.queue.queries`,
   `firm.cache.queries`, `firm.channel.queries`, `firm.audit.queries`), where they are now a
   supported API. firm-ui builds on them like any other consumer and keeps only presentation:

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from importlib import resources
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from sqlalchemy.engine import Connection
 
@@ -69,6 +69,26 @@ def static_dir() -> Path:
 
 
 # -- request / response --------------------------------------------------------------------------
+
+# What may stand unencoded in the mount prefix: RFC 3986's path characters, plus ``%`` so an
+# already-encoded prefix is not encoded twice.
+_PREFIX_SAFE = "/%-._~!$&'()*+,;=:@"
+
+
+def _clean_prefix(raw: str) -> str:
+    """Normalize a mount prefix into something that can be pasted into a URL, a ``Location``, or an
+    HTML attribute without further thought.
+
+    The prefix reaches us from the host application's routing, which can carry a URL segment of its
+    own (``/tenants/<name>/firm``) — so it is not automatically trustworthy. Leading slashes are
+    collapsed, because ``//host`` is protocol-relative to a browser and would turn every redirect
+    into an open one; everything outside the path alphabet (quotes and angle brackets above all) is
+    percent-encoded, so a prefix cannot break out of the attribute it is rendered into.
+    """
+    prefix = raw.rstrip("/")
+    if not prefix:
+        return ""
+    return quote(f"/{prefix.lstrip('/')}", safe=_PREFIX_SAFE)
 
 
 class Headers(Mapping[str, str]):
@@ -122,10 +142,7 @@ class UIRequest:
         object.__setattr__(self, "method", self.method.upper())
         path = self.path if self.path.startswith("/") else f"/{self.path}"
         object.__setattr__(self, "path", path)
-        prefix = self.prefix.rstrip("/")
-        if prefix and not prefix.startswith("/"):
-            prefix = f"/{prefix}"
-        object.__setattr__(self, "prefix", prefix)
+        object.__setattr__(self, "prefix", _clean_prefix(self.prefix))
         if not self.host:
             object.__setattr__(self, "host", self.headers.get("Host", ""))
 
@@ -394,9 +411,15 @@ class _Handler:
             return denied
         dash = self.dash
         path = self.request.path
+        # A Content-Length that is not a plain number is either malformed or two conflicting
+        # header lines joined (Headers joins repeats) — the shape request smuggling is built on.
+        # Refuse it rather than pick a reading of it: the transport below may pick the other one.
+        raw_length = self.request.headers.get("Content-Length", "")
+        if raw_length and not re.fullmatch(r"[0-9]+", raw_length):
+            return self.error("Malformed Content-Length.", 400)
         # Both the announced and the actual size, so the limit holds whether the transport hands
         # over a buffered body or a reader (and for a chunked body, which announces no length).
-        announced = _to_int(self.request.headers.get("Content-Length", "0"), 0)
+        announced = _to_int(raw_length, 0)
         if announced > MAX_BODY_BYTES or len(self.request.body) > MAX_BODY_BYTES:
             return self.error("Request body too large.", 413)
         body = read_body() if read_body is not None else self.request.body

@@ -30,8 +30,9 @@ The stylesheet is served by the mount itself. To route it through ``staticfiles`
 from __future__ import annotations
 
 from collections.abc import Callable
+from urllib.parse import urlencode
 
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, RawPostDataException
 from django.urls import URLPattern, re_path
 from django.views.decorators.csrf import csrf_exempt
 
@@ -75,13 +76,23 @@ def dashboard_view(
         )
         # Lazily: reading request.body applies Django's own upload limits, and it only happens
         # once the request has authenticated and passed the dashboard's size limit.
-        result = app.handle(ui_request, read_body=lambda: request.body)
+        result = app.handle(ui_request, read_body=lambda: _body(request))
         response = HttpResponse(result.body, status=result.status)
         for name, value in result.headers:
             response[name] = value
         return response
 
     return view
+
+
+def _body(request: HttpRequest) -> bytes:
+    """The raw request body — or the parsed form re-encoded, when middleware upstream has already
+    consumed the stream (Django then refuses to hand out ``request.body``). The dashboard's forms
+    are small and form-encoded, so the round trip is lossless for every POST it serves."""
+    try:
+        return request.body
+    except RawPostDataException:
+        return urlencode(request.POST, doseq=True).encode("utf-8")
 
 
 def dashboard_urls(
