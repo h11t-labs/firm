@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 flask = ["flask>=3.0"]                 # firm.contrib.flask integration
-fastapi = ["fastapi>=0.110"]           # firm.contrib.fastapi integration
+fastapi = ["fastapi>=0.140.7"]           # firm.contrib.fastapi integration
 postgres = ["firm-core[postgres]"]     # PostgreSQL driver (via firm-core)
 mysql = ["firm-core[mysql]"]           # MySQL / MariaDB driver (via firm-core)
 
