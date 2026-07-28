@@ -113,6 +113,9 @@ from firm.queue import queries
 queries.STATES                                     # the valid `state` values, in display order
 queries.state_counts(conn, queue=None)             # -> dict[str, int]  (per state, plus total)
 queries.queue_rows(conn, now)                      # -> list[dict]  (name, size, latency, paused)
+queries.queue_names(conn)                          # -> list[str]  (queues with ready jobs)
+queries.queue_size(conn, queue)                    # -> int
+queries.queue_latency(conn, queue, now)            # -> float  (seconds, 0.0 if empty)
 queries.jobs_by_state(conn, state, limit=50, offset=0, queue=None)   # -> list[dict]
 queries.job_detail(conn, job_id)                   # -> dict | None
 queries.processes(conn, now, alive_threshold=300.0)  # -> list[dict]  (+ age, alive)

@@ -104,6 +104,32 @@ def test_queue_rows_reports_size_and_paused(engine, runtime, seed) -> None:
     assert rows["default"]["paused"] is False
 
 
+def test_queue_rows_includes_a_paused_queue_with_no_ready_work(engine, runtime) -> None:
+    # A paused queue with nothing ready must still show up (that is how an operator finds the
+    # pause to lift), with a zero size/latency rather than a missing row.
+    queues.pause(runtime, "drained")
+    with engine.connect() as conn:
+        rows = queries.queue_rows(conn, now_utc())
+    assert rows == [{"name": "drained", "size": 0, "latency": 0.0, "paused": True}]
+
+
+def test_single_queue_reads_match_queue_rows(engine, runtime, seed) -> None:
+    # queue_names/queue_size/queue_latency are the single-queue flavor of queue_rows (and what
+    # queues.all_queues/size/latency delegate to); the two views must agree.
+    seed.ready(queue="mailers")
+    seed.ready(queue="mailers")
+    seed.ready(queue="default")
+    now = now_utc()
+    with engine.connect() as conn:
+        rows = {r["name"]: r for r in queries.queue_rows(conn, now)}
+        assert queries.queue_names(conn) == ["default", "mailers"]
+        for name, row in rows.items():
+            assert queries.queue_size(conn, name) == row["size"]
+            assert queries.queue_latency(conn, name, now) == row["latency"]
+        assert queries.queue_size(conn, "absent") == 0
+        assert queries.queue_latency(conn, "absent", now) == 0.0
+
+
 def test_processes_alive_vs_stale(engine, seed) -> None:
     seed.process(name="fresh", age_seconds=0.0)
     seed.process(name="stale", age_seconds=10_000.0)

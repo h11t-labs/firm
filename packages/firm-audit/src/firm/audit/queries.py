@@ -223,44 +223,35 @@ def audit_detail(conn: Connection, event_id: int) -> dict[str, Any] | None:
 _MAX_AFFECTED_JSON = 64 * 1024
 
 
-def _tampered_row_ids(raw: str | None) -> set[int]:
-    """The integer row ids the latest verify run flagged as tampered, from its
-    ``affected_identifiers`` JSON. Parses defensively — malformed/absent/oversized/deeply-nested
-    data yields an empty set, never an exception (booleans are excluded even though ``bool`` is an
-    ``int`` subclass)."""
+def _parse_affected(raw: str | None) -> tuple[set[int], bool]:
+    """One defensive parse of the ``affected_identifiers`` JSON, yielding both signals
+    :func:`row_integrity_context` needs: the integer row ids the latest verify run flagged as
+    tampered (booleans excluded even though ``bool`` is an ``int`` subclass), and whether the
+    verifier truncated the list (the ``kind="more"`` overflow marker) — when it did, the id set is
+    *incomplete*, so a sealed row not in it may still be one of the un-listed tampered rows and a
+    reader must not vouch for it as verified (Bug #8). Malformed/absent/oversized/deeply-nested
+    data yields ``(set(), False)``, never an exception."""
     if not raw or len(raw) > _MAX_AFFECTED_JSON:
-        return set()
+        return set(), False
     try:
         items = json.loads(raw)
     except (ValueError, TypeError, RecursionError):
-        return set()
+        return set(), False
     if not isinstance(items, list):
-        return set()
+        return set(), False
     ids: set[int] = set()
+    truncated = False
     for item in items:
-        if not isinstance(item, dict) or item.get("verdict") != "tampered":
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") == "more":
+            truncated = True
+        if item.get("verdict") != "tampered":
             continue
         id_ = item.get("id")
         if isinstance(id_, int) and not isinstance(id_, bool):
             ids.add(id_)
-    return ids
-
-
-def _affected_is_truncated(raw: str | None) -> bool:
-    """Whether the verifier truncated its ``affected_identifiers`` — i.e. more rows were flagged
-    tampered than the JSON carries individual ids for (the ``kind="more"`` overflow marker). When it
-    did, the set from :func:`_tampered_row_ids` is *incomplete*, so a sealed row not in it may
-    still be one of the un-listed tampered rows — a reader must not vouch for it as verified
-    (Bug #8)."""
-    if not raw or len(raw) > _MAX_AFFECTED_JSON:
-        return False
-    try:
-        items = json.loads(raw)
-    except (ValueError, TypeError, RecursionError):
-        return False
-    if not isinstance(items, list):
-        return False
-    return any(isinstance(i, dict) and i.get("kind") == "more" for i in items)
+    return ids, truncated
 
 
 def row_integrity_context(conn: Connection) -> dict[str, Any]:
@@ -273,17 +264,14 @@ def row_integrity_context(conn: Connection) -> dict[str, Any]:
     max_to = conn.execute(select(func.max(_seals.c.to_id)).where(_seals.c.kind == "seal")).scalar()
     status = verify_status_row(conn)
     affected = status["affected_identifiers"] if status else None
-    # When the latest run is tampered AND its affected list was truncated, the known tampered-id set
-    # is incomplete — a sealed row not in it may still be one of the un-listed tampered rows, so it
-    # must not be reported as verified (Bug #8).
-    truncated = bool(
-        status and status["outcome"] == "tampered" and _affected_is_truncated(affected)
-    )
+    tampered_ids, truncated = _parse_affected(affected)
     return {
         "active": any_record or status is not None,
         "max_sealed_to_id": max_to or 0,
-        "tampered_ids": _tampered_row_ids(affected),
-        "tampered_truncated": truncated,
+        "tampered_ids": tampered_ids,
+        # The truncation marker only matters on a tampered run: that is when the incomplete id set
+        # would otherwise let a sealed row falsely read as verified (Bug #8).
+        "tampered_truncated": bool(status and status["outcome"] == "tampered" and truncated),
     }
 
 

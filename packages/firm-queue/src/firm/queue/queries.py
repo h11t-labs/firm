@@ -39,7 +39,7 @@ _EXEC_TABLES = {
 }
 
 # The states, in display order. "finished" is derived from jobs.finished_at, not an exec table.
-STATES = ["ready", "scheduled", "blocked", "claimed", "failed", "finished"]
+STATES = ("ready", "scheduled", "blocked", "claimed", "failed", "finished")
 
 _STATE_TS = {
     "ready": _ready.c.created_at,
@@ -88,27 +88,62 @@ def state_counts(conn: Connection, queue: str | None = None) -> dict[str, int]:
     return counts
 
 
+def _latency(now: datetime, oldest: datetime | None) -> float:
+    """Seconds ``oldest`` has been waiting as of ``now`` — the one definition of queue latency
+    (0.0 when the queue is empty, clamped at 0.0 against clock skew)."""
+    return 0.0 if oldest is None else max(0.0, (now - oldest).total_seconds())
+
+
+def queue_names(conn: Connection) -> list[str]:
+    """Distinct queue names that currently have ready jobs, sorted."""
+    rows = conn.execute(select(_ready.c.queue_name).distinct().order_by(_ready.c.queue_name))
+    return [row[0] for row in rows]
+
+
+def queue_size(conn: Connection, queue: str) -> int:
+    """Number of ready jobs in ``queue``."""
+    return (
+        conn.execute(
+            select(func.count()).select_from(_ready).where(_ready.c.queue_name == queue)
+        ).scalar()
+        or 0
+    )
+
+
+def queue_latency(conn: Connection, queue: str, now: datetime) -> float:
+    """Seconds since the oldest ready job in ``queue`` was enqueued (0.0 if empty), as of
+    ``now``."""
+    oldest = conn.execute(
+        select(func.min(_ready.c.created_at)).where(_ready.c.queue_name == queue)
+    ).scalar()
+    return _latency(now, oldest)
+
+
 def queue_rows(conn: Connection, now: datetime) -> list[dict[str, Any]]:
     """One row per queue that has ready work or is paused: ``name``, ``size``, ``latency``
-    (seconds since the oldest ready job, measured against ``now``) and ``paused``."""
-    ready_names = {r[0] for r in conn.execute(select(_ready.c.queue_name).distinct())}
+    (seconds since the oldest ready job, measured against ``now``) and ``paused``. Two queries
+    total — one grouped over the ready executions, one over the pauses — however many queues
+    there are."""
+    stats = {
+        r.queue_name: r
+        for r in conn.execute(
+            select(
+                _ready.c.queue_name,
+                func.count().label("size"),
+                func.min(_ready.c.created_at).label("oldest"),
+            ).group_by(_ready.c.queue_name)
+        )
+    }
     paused_names = {r[0] for r in conn.execute(select(_pauses.c.queue_name))}
-    rows: list[dict[str, Any]] = []
-    for name in sorted(ready_names | paused_names):
-        size = (
-            conn.execute(
-                select(func.count()).select_from(_ready).where(_ready.c.queue_name == name)
-            ).scalar()
-            or 0
-        )
-        oldest = conn.execute(
-            select(func.min(_ready.c.created_at)).where(_ready.c.queue_name == name)
-        ).scalar()
-        latency = 0.0 if oldest is None else max(0.0, (now - oldest).total_seconds())
-        rows.append(
-            {"name": name, "size": size, "latency": latency, "paused": name in paused_names}
-        )
-    return rows
+    return [
+        {
+            "name": name,
+            "size": stats[name].size if name in stats else 0,
+            "latency": _latency(now, stats[name].oldest if name in stats else None),
+            "paused": name in paused_names,
+        }
+        for name in sorted(stats.keys() | paused_names)
+    ]
 
 
 def jobs_by_state(
@@ -154,21 +189,30 @@ def jobs_by_state(
 
 def job_detail(conn: Connection, job_id: int) -> dict[str, Any] | None:
     """One job with its derived ``state`` (plus ``error``/``process_id`` where the state has
-    them), or ``None`` when no such job exists."""
-    job = conn.execute(select(_jobs).where(_jobs.c.id == job_id)).first()
+    them), or ``None`` when no such job exists. A single query: the job outer-joined against
+    every execution table (a job appears in at most one), with :data:`STATES` order deciding
+    the state when an execution row exists."""
+    stmt = select(
+        _jobs,
+        *(table.c.job_id.label(f"{state}_job_id") for state, table in _EXEC_TABLES.items()),
+        _failed.c.error.label("failed_error"),
+        _claimed.c.process_id.label("claimed_process_id"),
+    ).where(_jobs.c.id == job_id)
+    for table in _EXEC_TABLES.values():
+        stmt = stmt.outerjoin(table, table.c.job_id == _jobs.c.id)
+    job = conn.execute(stmt).first()
     if job is None:
         return None
     state = "finished" if job.finished_at is not None else "unknown"
     error: str | None = None
     process_id: int | None = None
-    for name, table in _EXEC_TABLES.items():
-        row = conn.execute(select(table).where(table.c.job_id == job_id)).first()
-        if row is not None:
+    for name in _EXEC_TABLES:
+        if getattr(job, f"{name}_job_id") is not None:
             state = name
             if name == "failed":
-                error = row.error
+                error = job.failed_error
             if name == "claimed":
-                process_id = row.process_id
+                process_id = job.claimed_process_id
             break
     return {
         "id": job.id,

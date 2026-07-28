@@ -13,6 +13,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   supported API. firm-ui builds on them like any other consumer and keeps only presentation:
   styling, pagination glue, auth, and decoding binary columns for display. The four private
   `firm.ui.*_queries` modules are gone; import from the owning package instead.
+- A configured database that cannot be reached or inspected now raises
+  `DashboardConnectionError` (a clean CLI error, password masked) instead of silently starting
+  the dashboard without that part's tab — a bad password or unreachable host no longer reads as
+  "not configured". A reachable database without firm tables still just disables the part.
 
 ## [1.0.1] - 2026-07-28
 

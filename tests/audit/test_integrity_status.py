@@ -22,7 +22,7 @@ from firm.audit import AuditLog, schema
 from firm.audit.queries import (
     _MAX_AFFECTED_JSON,
     IntegrityConfig,
-    _tampered_row_ids,
+    _parse_affected,
     integrity_config,
     integrity_state,
     row_integrity_context,
@@ -233,19 +233,19 @@ def test_context_not_truncated_without_the_more_marker(audit: AuditLog) -> None:
     assert ctx["tampered_truncated"] is False
 
 
-def test_tampered_row_ids_survives_deeply_nested_json() -> None:
+def test_parse_affected_survives_deeply_nested_json() -> None:
     # Bug #3. A DB-write attacker could set affected_identifiers to a deeply-nested JSON blob;
     # json.loads raises RecursionError (not ValueError/TypeError), which used to 500 the audit page
-    # on every render (parsed twice per request). It must degrade to an empty set instead.
+    # on every render. It must degrade to the empty result instead.
     deep = "[" * 5000 + "]" * 5000
-    assert _tampered_row_ids(deep) == set()
+    assert _parse_affected(deep) == (set(), False)
 
 
-def test_tampered_row_ids_rejects_oversized_json() -> None:
+def test_parse_affected_rejects_oversized_json() -> None:
     # An oversized blob is rejected before json.loads — the verifier only ever writes a handful of
     # small findings, so anything past the cap is corrupt or hostile.
     huge = '[{"kind":"row","id":1,"verdict":"tampered"}]' + " " * _MAX_AFFECTED_JSON
-    assert _tampered_row_ids(huge) == set()
+    assert _parse_affected(huge) == (set(), False)
 
 
 # -- integrity_state: the six state-table rows -------------------------------------------------

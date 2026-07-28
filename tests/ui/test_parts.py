@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import func, insert, select
 
 from firm._core.clock import now_utc
@@ -15,7 +16,7 @@ from firm.cache import schema as cache_schema
 from firm.channel import schema as channel_schema
 from firm.channel.keys import channel_hash
 from firm.ui import actions
-from firm.ui.context import build_dashboard
+from firm.ui.context import DashboardConnectionError, build_dashboard
 
 
 def test_dashboard_enables_present_parts(runtime, db_url) -> None:
@@ -32,6 +33,15 @@ def test_dashboard_empty_when_no_tables(tmp_path) -> None:
         assert dash.parts == []
     finally:
         dash.close()
+
+
+def test_dashboard_raises_when_a_database_is_unreachable(tmp_path) -> None:
+    # A URL that cannot be connected to (here: a SQLite file in a directory that does not exist)
+    # must raise, not read as "no tables → part disabled": a dashboard that silently starts
+    # without a tab would hide the operator's misconfiguration.
+    url = f"sqlite:///{tmp_path / 'no_such_dir' / 'firm.db'}"
+    with pytest.raises(DashboardConnectionError, match="cannot inspect database"):
+        build_dashboard(database_url=url)
 
 
 def test_clear_cache_action(runtime, seed) -> None:

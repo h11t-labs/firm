@@ -10,9 +10,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 - `firm.queue.queries`: the read-query layer the dashboard used to keep to itself, now a supported
   surface for your own dashboards, exporters, and health checks — `state_counts`, `queue_rows`,
-  `jobs_by_state`, `job_detail`, `processes`, `recurring`, and `STATES`. Each takes a SQLAlchemy
-  `Connection` and returns plain dicts. A negative `limit`/`offset` or an unknown `state` now
-  raises `ValueError` instead of a bare `KeyError` or a backend-specific result.
+  `jobs_by_state`, `job_detail`, `processes`, `recurring`, and `STATES`, plus the single-queue
+  reads `queue_names`, `queue_size`, and `queue_latency` (which `queues.all_queues`/`size`/
+  `latency` now delegate to). Each takes a SQLAlchemy `Connection` and returns plain dicts. A
+  negative `limit`/`offset` or an unknown `state` now raises `ValueError` instead of a bare
+  `KeyError` or a backend-specific result. `queue_rows` runs two queries however many queues
+  there are, and `job_detail` one.
 
 ### Changed
 
