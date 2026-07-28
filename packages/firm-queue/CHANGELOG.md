@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm.queue.queries`: the read-query layer the dashboard used to keep to itself, now a supported
+  surface for your own dashboards, exporters, and health checks — `state_counts`, `queue_rows`,
+  `jobs_by_state`, `job_detail`, `processes`, `recurring`, and `STATES`. Each takes a SQLAlchemy
+  `Connection` and returns plain dicts. A negative `limit`/`offset` or an unknown `state` now
+  raises `ValueError` instead of a bare `KeyError` or a backend-specific result.
+
 ### Changed
 
 - `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future

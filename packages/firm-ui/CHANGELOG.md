@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard's read queries moved into the packages that own the data (`firm.queue.queries`,
+  `firm.cache.queries`, `firm.channel.queries`, `firm.audit.queries`), where they are now a
+  supported API. firm-ui builds on them like any other consumer and keeps only presentation:
+  styling, pagination glue, auth, and decoding binary columns for display. The four private
+  `firm.ui.*_queries` modules are gone; import from the owning package instead.
+
 ## [1.0.1] - 2026-07-28
 
 ### Changed

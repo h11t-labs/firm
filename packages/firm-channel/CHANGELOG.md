@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm.channel.queries`: the read-query layer the dashboard used to keep to itself, now a
+  supported surface for your own dashboards, exporters, and health checks — `channel_stats`,
+  `channel_top`, and `channel_recent`, `Connection` in / dicts out. Channel names and payloads come
+  back as raw `bytes`, so decoding for display is the caller's decision. A negative `limit`/`offset`
+  raises `ValueError`.
+
 ### Changed
 
 - `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future
