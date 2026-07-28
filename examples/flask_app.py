@@ -2,8 +2,8 @@
 
     uv run flask --app examples.flask_app run
 
-Run workers in a separate process with `flask --app examples.flask_app firm worker`
-(or pass `embed_workers=True` to Firm(...) to run one inside the dev server).
+Run workers in a separate process with `flask --app examples.flask_app firm-queue worker`
+(or pass `embed_workers=True` to FirmQueue(...) to run one inside the dev server).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import firm.queue as bq
 from firm._core.database import create_engine_for
 from firm.cache import Cache
 from firm.queue import schema as queue_schema
-from firm.queue.contrib.flask import Firm
+from firm.queue.contrib.flask import FirmQueue
 
 DB = "sqlite:///firm-flask.db"
 
@@ -32,8 +32,8 @@ def send_welcome(user_id: int) -> None:
 
 
 app = Flask(__name__)
-app.config["FIRM_DATABASE_URL"] = DB
-Firm(app)  # configures the queue + registers `flask firm worker`
+app.config["FIRM_QUEUE_DATABASE_URL"] = DB
+FirmQueue(app)  # configures the queue + registers `flask firm-queue worker`
 
 
 @app.post("/welcome/<int:user_id>")

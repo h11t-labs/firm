@@ -34,15 +34,22 @@ def lifespan(
     queues: tuple[str, ...] = ("*",),
     threads: int = 3,
 ) -> Callable[[Any], contextlib.AbstractAsyncContextManager[None]]:
-    """Build a FastAPI ``lifespan`` that configures firm on startup (and optionally runs a
+    """Build a FastAPI ``lifespan`` that configures firm-queue on startup (and optionally runs a
     worker+dispatcher), tearing the workers down on shutdown."""
 
     @contextlib.asynccontextmanager
     async def _lifespan(_app: Any) -> AsyncIterator[None]:
-        url = database_url or os.environ.get("FIRM_QUEUE_DATABASE_URL")
+        # The queue's own key wins; FIRM_DATABASE_URL is the suite-wide fallback, the same
+        # shape `firm-ui` and the Flask extension use.
+        url = (
+            database_url
+            or os.environ.get("FIRM_QUEUE_DATABASE_URL")
+            or os.environ.get("FIRM_DATABASE_URL")
+        )
         if not url:
             raise RuntimeError(
-                "firm FastAPI lifespan needs database_url= or FIRM_QUEUE_DATABASE_URL."
+                "The firm-queue FastAPI lifespan needs database_url=, "
+                "FIRM_QUEUE_DATABASE_URL, or FIRM_DATABASE_URL."
             )
         configure(database_url=url)
         # Build (don't start) before the try, so a partial-start failure inside still hits the

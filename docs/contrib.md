@@ -4,22 +4,33 @@
 is opt-in, behind its own extra, and **nothing in core imports it** — if you don't use it, it costs
 nothing. You still define jobs the normal way with `@bq.job`.
 
-!!! note "Moved from `firm.contrib`"
+!!! note "Renamed from `firm.contrib` / `Firm`"
 
     These live under `firm.queue.contrib` as of the next release, so that each module's
-    integrations sit under that module's own path — the same shape `firm.cache.contrib.*`
-    already has. `firm.contrib` read like a firm-wide namespace while everything in it only ever
-    configured the queue.
+    integrations sit under that module's own path. `firm.contrib` read like a firm-wide namespace
+    while everything in it only ever configured the queue — and it squats the name a genuinely
+    suite-wide integration would want. As integrations land for the other modules they grow their
+    own `contrib` too, so the queue must not be the odd one out.
 
-    The old `firm.contrib.flask`, `firm.contrib.fastapi` and `firm.contrib.sqlalchemy` keep
-    working and emit a `DeprecationWarning`; they are removed in 2.0. They re-export the same
-    objects, so `is` and `isinstance` still hold across both spellings.
+    The Flask extension is renamed `Firm` → `FirmQueue` for the same reason, along with
+    `app.extensions["firm"]` → `app.extensions["firm_queue"]` and `flask firm` →
+    `flask firm-queue`.
+
+    Everything above shipped in 1.0.0, so every old spelling keeps working and warns; all of them
+    are removed in 2.0. The old import paths re-export the same objects, so `is` and `isinstance`
+    still hold across both.
 
 | Import | Install | What it does |
 |---|---|---|
 | `firm.queue.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.queue.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
+| `firm.queue.contrib.flask.FirmQueue` | `firm-queue[flask]` | a Flask extension + a `flask firm-queue worker` command |
 | `firm.queue.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+
+There is no `firm.cache.contrib.flask` or `firm.channel.contrib.fastapi`, and that is deliberate.
+The queue needs framework glue because it has process-global state and background threads that
+must be tied to the app lifecycle; `Cache`, `Channel` and `audit.record` are plain objects you
+construct yourself, so there is nothing to hook. Django is the exception — it has pluggable
+backend contracts to fill — which is why the integrations for the other modules start there.
 
 ## FastAPI
 
@@ -43,11 +54,11 @@ process** — convenient for development or a single-process deploy; it's stoppe
 
 ```python
 from flask import Flask
-from firm.queue.contrib.flask import Firm
+from firm.queue.contrib.flask import FirmQueue
 
 app = Flask(__name__)
-app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
-Firm(app)                         # or Firm(app, database_url="...")
+app.config["FIRM_QUEUE_DATABASE_URL"] = "postgresql://localhost/app"
+FirmQueue(app)                    # or FirmQueue(app, database_url="...")
 
 @app.post("/welcome/<int:user_id>")
 def welcome(user_id):
@@ -55,13 +66,17 @@ def welcome(user_id):
     return "", 202
 ```
 
+The URL is looked up in `database_url=`, then `app.config`, then the environment; within each of
+those the queue's own `FIRM_QUEUE_DATABASE_URL` wins over the suite-wide `FIRM_DATABASE_URL`, so
+one shared setting still configures every module while a single module can override it.
+
 The extension configures the queue and registers a CLI group, so you run workers with:
 
 ```bash
-flask firm worker --threads 5 --queues default,mailers
+flask firm-queue worker --threads 5 --queues default,mailers
 ```
 
-`Firm(app, embed_workers=True)` runs the worker inside the web process instead (dev /
+`FirmQueue(app, embed_workers=True)` runs the worker inside the web process instead (dev /
 single-process only — otherwise every web worker starts its own supervisor).
 
 ## Transactional enqueue
@@ -86,5 +101,5 @@ def create_order(session, payload):
 ## Production shape
 
 Embed workers for dev; in production run them as **separate processes** (`firm-queue start`
-or `flask firm worker`) so you scale web and worker capacity independently. See
+or `flask firm-queue worker`) so you scale web and worker capacity independently. See
 [Workers & the supervisor](queue/workers-and-supervisor.md).

@@ -257,9 +257,10 @@ queries.row_status(row, ctx)          # -> "sealed"|"unsealed"|"unprotected"|"ta
 #                                          queues=("*",), threads=3))
 from firm.queue.contrib.fastapi import lifespan
 
-# Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
-#   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
-from firm.queue.contrib.flask import Firm
+# Flask: FirmQueue(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
+#   reads app.config/env FIRM_QUEUE_DATABASE_URL, then FIRM_DATABASE_URL;
+#   registers `flask firm-queue worker`
+from firm.queue.contrib.flask import FirmQueue
 
 from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
