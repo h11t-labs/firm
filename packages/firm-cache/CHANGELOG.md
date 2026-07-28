@@ -8,6 +8,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
+- **Django cache backend** (`firm.cache.contrib.django.FirmCache`, needs the `[django]` extra):
+  point `CACHES` at it and use Django's normal cache API. firm-cache has no per-entry expiry, so
+  a per-call `timeout=` that differs from the alias-wide `TIMEOUT` raises rather than silently
+  writing an entry that outlives what the caller asked for; `OPTIONS={"ON_ENTRY_TIMEOUT": "warn"}`
+  downgrades that to a warning.
+
+### Added
+
 - `MsgpackCoder`: the value coder the `firm-cache[msgpack]` extra was already advertising, now
   shipped. Same value shapes as the JSON default in a compact binary form, and just as safe to
   decode (no code execution on load). `from firm.cache import MsgpackCoder`.

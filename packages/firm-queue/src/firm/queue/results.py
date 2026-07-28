@@ -21,6 +21,7 @@ from .._core.database import immediate_transaction
 from .._core.dialects import Dialect
 from . import schema, semaphore
 from .config import QueueSettings
+from .hooks import HOOKS, Execution
 from .job import RetryPolicy
 from .registry import REGISTRY, UnknownJob
 from .serialization import deserialize
@@ -70,7 +71,11 @@ def execute_claimed(runtime: Runtime, job_id: int, process_id: int | None = None
 
     args, kwargs = deserialize(row.arguments)
     try:
-        job.perform(*args, **kwargs)
+        # Middleware wraps the body rather than bracketing it, so a `finally` in a middleware
+        # still runs when the job raises — which is the whole point for things like closing
+        # Django's ORM connections. A middleware that raises lands in the same failure path.
+        with HOOKS.around_perform(Execution(job=job, job_id=job_id, attempts=row.attempts)):
+            job.perform(*args, **kwargs)
     except BaseException as exc:
         # BaseException on purpose: a job body raising SystemExit/KeyboardInterrupt must
         # still be finalized as a failure. Letting it escape would kill the worker's poll

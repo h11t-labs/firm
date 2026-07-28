@@ -19,7 +19,8 @@ database is the single source of truth, accessed through SQLAlchemy with per-dia
 
 - **One fewer moving part.** If you already run PostgreSQL, MySQL, or SQLite, you already have
   everything you need. Nothing else to deploy, monitor, or secure.
-- **Transactional.** Enqueue a job in the same transaction as the row it depends on.
+- **Transaction-aware.** Tie an enqueue to your own transaction's commit, so a rolled-back request
+  enqueues nothing — see [transactional enqueue](contrib.md#transactional-enqueue).
 - **Inspectable.** Jobs and cache entries are just rows — query them, back them up, debug them.
 
 ## Quick taste
@@ -71,4 +72,5 @@ SQLite (default), **PostgreSQL**, and **MySQL/MariaDB** are all supported and te
   **[channel: getting started](channel/getting-started.md)**, or
   **[audit: getting started](audit/getting-started.md)**.
 - Coming from Rails? See **[Comparison to Rails](comparison-to-rails.md)**.
+- On Django? See **[Django](django.md)**.
 - Contributing? See **[Testing & contributing](testing-and-contributing.md)**.

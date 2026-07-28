@@ -48,3 +48,10 @@ def test_new_paths_do_not_warn() -> None:
             warnings.simplefilter("always")
             importlib.reload(mod)
         assert not [w for w in caught if issubclass(w.category, DeprecationWarning)], module
+
+
+def test_django_has_no_deprecated_alias() -> None:
+    """The Django integration was never released under `firm.contrib`, so there is nothing to
+    stay compatible with — an alias would only invite people onto a path due to be removed."""
+    with pytest.raises(ImportError):
+        importlib.import_module("firm.contrib.django")

@@ -6,6 +6,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- **Django handle** (`firm.audit.contrib.django.audit`, needs the `[django]` extra): a
+  module-level `AuditLog` that binds itself to `DATABASES` on first use, in the shape of
+  `django.core.cache.cache`. Nothing to add to `INSTALLED_APPS`. Reuses firm-queue's engine when
+  it is pointed at the same database, and rebinds when the database changes (`manage.py test`).
+  The handle deliberately exposes no background retention/sealing/verification settings: those
+  start a thread per process, and belong in one singular process instead.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

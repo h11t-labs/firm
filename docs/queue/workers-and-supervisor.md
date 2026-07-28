@@ -104,3 +104,36 @@ Events follow `"{role}_{phase}"` where role ∈ `worker/dispatcher/scheduler/sup
 `start/stop/exit`. A hook that raises never breaks the lifecycle — its error is routed to the
 `on_thread_error` handlers. Errors raised inside a poll loop (worker/dispatcher/scheduler) are routed
 there too.
+
+## Per-job middleware
+
+`around_perform` wraps every job body this process runs — the place for cleanup that has to happen
+whether the job returned or raised, and for timing, tracing, or logging around the work:
+
+```python
+import time
+
+from firm.queue.hooks import around_perform
+
+@around_perform
+def time_it(execution):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        print(f"{execution.job.class_name} took {time.monotonic() - started:.3f}s")
+```
+
+The function must `yield` exactly once; firm wraps it with `contextlib.contextmanager`. The
+`execution` argument carries `job`, `job_id` and `attempts` — not the job's arguments, which
+routinely hold user data.
+
+Two differences from the lifecycle hooks above. Middleware is registered per *process*, so the
+worker has to import it (`--import`, or an app config under Django), not only whatever enqueues.
+And unlike a lifecycle hook, **an exception here fails the job**, retries included: middleware
+wraps the unit of work, so if it breaks, the job did not run cleanly. Registration order is
+outermost-first, like a stack of decorators. It runs on the worker's job thread, on the path of
+every job — keep it cheap.
+
+[The Django integration](../django.md) uses this to close Django's ORM connections after each job,
+which is otherwise a `try/finally` in every job body.

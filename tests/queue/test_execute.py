@@ -348,3 +348,83 @@ def test_perform_missing_class_with_concurrency_key_fails_gracefully(
     assert count(schema.failed_executions) == 1
     assert count(schema.claimed_executions) == 0
     assert count(schema.semaphores) == 0
+
+
+# --- around_perform middleware, through a real execution ------------------------------------
+
+
+def test_middleware_wraps_a_real_job_execution(runtime: Runtime) -> None:
+    from firm.queue.hooks import HOOKS, Execution
+
+    _SINK.clear()
+    seen: list[tuple[str, int]] = []
+
+    def spy(execution: Execution):
+        seen.append(("before", execution.job_id))
+        try:
+            yield
+        finally:
+            seen.append(("after", execution.job_id))
+
+    HOOKS.register_middleware(spy)
+    try:
+        job_id = record_job.enqueue(1)
+        assert run_ready(runtime) == 1
+    finally:
+        HOOKS.clear()
+
+    assert _SINK == [1]
+    assert seen == [("before", job_id), ("after", job_id)]
+
+
+def test_middleware_cleanup_runs_for_a_failing_job(
+    runtime: Runtime, count: Callable[..., int]
+) -> None:
+    """The Django integration leans on this: connections must be released after a job that
+    raised, or a worker leaks one per failure."""
+    from firm.queue.hooks import HOOKS, Execution
+
+    cleaned: list[int] = []
+
+    def cleanup(execution: Execution):
+        try:
+            yield
+        finally:
+            cleaned.append(execution.job_id)
+
+    HOOKS.register_middleware(cleanup)
+    try:
+        boom_job.enqueue()
+        assert run_ready(runtime) == 1
+    finally:
+        HOOKS.clear()
+
+    assert len(cleaned) == 1
+    assert count(schema.failed_executions) == 1
+
+
+def test_broken_middleware_fails_the_job_instead_of_passing_it(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """A job whose middleware blew up did not run cleanly, so it must not be recorded as
+    finished — otherwise instrumentation failures silently swallow work."""
+    from firm.queue.hooks import HOOKS, Execution
+
+    _SINK.clear()
+
+    def broken(_execution: Execution):
+        raise RuntimeError("middleware is broken")
+        yield  # pragma: no cover
+
+    HOOKS.register_middleware(broken)
+    try:
+        record_job.enqueue(99)
+        assert run_ready(runtime) == 1
+    finally:
+        HOOKS.clear()
+
+    assert _SINK == []  # the body never ran
+    assert count(schema.failed_executions) == 1
+    with engine.connect() as conn:
+        error = conn.execute(select(schema.failed_executions.c.error)).scalar()
+    assert "middleware is broken" in (error or "")
