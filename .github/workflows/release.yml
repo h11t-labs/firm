@@ -21,7 +21,9 @@ jobs:
       version: ${{ steps.select.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      # setup-uv publishes no floating major/minor tags since v8 (supply-chain hardening),
+      # so this is pinned to an exact immutable tag and bumped deliberately.
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Parse tag
         id: select
         run: |
@@ -96,7 +98,7 @@ jobs:
         with:
           name: dist
           path: dist/
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Publish to PyPI
         # --check-url skips files already on PyPI, making all-package tags idempotent.
         run: uv publish --check-url https://pypi.org/simple/ dist/*
