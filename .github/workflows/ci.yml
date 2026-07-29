@@ -17,7 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      # setup-uv publishes no floating major/minor tags since v8 (supply-chain hardening),
+      # so this is pinned to an exact immutable tag and bumped deliberately.
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Check lockfile is current
         run: uv lock --check
       - name: Sync workspace
@@ -33,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Sync workspace
         run: uv sync --locked
       - name: Run tests with coverage (SQLite)
@@ -49,7 +51,7 @@ jobs:
         python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           python-version: ${{ matrix.python }}
       - name: Sync workspace
@@ -92,7 +94,7 @@ jobs:
       FIRM_TEST_MYSQL_URL: mysql://firm:firm@127.0.0.1:3306/firm
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: Sync workspace
         run: uv sync --locked
       - name: Run tests (SQLite + PostgreSQL + MySQL)
