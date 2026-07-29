@@ -23,6 +23,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `firm-core` minor. Ships with the next release of this package. See
   `docs/testing-and-contributing.md` § Cross-package pins.
 
+- The Flask extension now resolves its database URL from `FIRM_QUEUE_DATABASE_URL` before
+  `FIRM_DATABASE_URL`, looking in `app.config` before the environment, and the FastAPI lifespan
+  falls back to `FIRM_DATABASE_URL` as well. One shared setting still configures every module,
+  and a single module can now override it — the shape `firm-ui` already had.
+
+  **Check this if you set `app.config["FIRM_QUEUE_DATABASE_URL"]`.** 1.0.0 ignored that key
+  entirely, so if you set it *and* something else that did resolve (`app.config`'s
+  `FIRM_DATABASE_URL`, or `FIRM_QUEUE_DATABASE_URL` in the environment), your queue has been
+  running against the other one. It now resolves to the `app.config` queue key — probably what
+  you meant when you set it, but it does move a running queue to a different database, and jobs
+  already in the old one stay there. The extension raises a `RuntimeWarning` naming both URLs
+  when it sees that disagreement, so this cannot pass silently; the same URL under both keys is
+  not a conflict and stays quiet. Apps that set only `FIRM_DATABASE_URL`, only the environment,
+  or `database_url=` are unaffected.
+
+  Apps setting *neither* key anywhere used to raise `RuntimeError` at startup and now start if
+  `FIRM_DATABASE_URL` is in the environment — the shared setting `firm-ui` already reads.
+
+### Deprecated
+
+Everything below shipped in 1.0.0, keeps working, warns, and is removed in 2.0. All of it is the
+same correction: the framework integrations configure **the queue**, not the suite, so nothing
+they own should be named as if it spoke for firm as a whole. `firm.contrib` in particular squats
+the name a genuinely suite-wide integration would want, and the other modules grow their own
+`contrib` as integrations land for them.
+
+- The integrations moved from `firm.contrib.*` to **`firm.queue.contrib.*`**, so that each
+  module's integrations sit under that module's own path. The old modules re-export the same
+  objects, so `is` and `isinstance` still hold across both spellings.
+
+- The Flask extension class is renamed `Firm` → **`FirmQueue`**. Reading `Firm` off
+  `firm.queue.contrib.flask` warns and hands back the very same class — not a subclass — so an
+  `isinstance` check in a half-migrated codebase keeps holding.
+
+  ```python
+  from firm.contrib.flask import Firm  # deprecated path and name
+  from firm.queue.contrib.flask import FirmQueue  # use this
+  ```
+
+- `app.extensions["firm"]` is now **`app.extensions["firm_queue"]`**; both keys are set, and they
+  point at the same extension instance.
+
+- The Flask CLI group `flask firm` is now **`flask firm-queue`**. Both are registered; the old one
+  raises a `DeprecationWarning` and prints a rename notice on stderr before running.
+
+`app.extensions["firm"]` is the one deprecation that cannot warn — it is a plain dict key, and
+reading it runs no code of ours. Grep for it rather than relying on warnings.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

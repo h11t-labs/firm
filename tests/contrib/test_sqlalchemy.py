@@ -7,8 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import firm.queue as bq
-from firm.contrib.sqlalchemy import enqueue_after_commit
 from firm.queue import schema
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 
 @bq.job()

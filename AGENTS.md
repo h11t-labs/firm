@@ -8,7 +8,7 @@ conventions below. (For *using* the library, see [`llms.txt`](llms.txt); this fi
 
 **firm** — pure-Python ports of the Rails Solid stack: `firm.queue` (background jobs),
 `firm.cache` (caching), `firm.channel` (pub/sub), and `firm.audit` (append-only audit log,
-original to firm), plus an optional `firm.ui` dashboard and `firm.contrib` (Flask/FastAPI
+original to firm), plus an optional `firm.ui` dashboard and `firm.queue.contrib` (Flask/FastAPI
 glue). No Redis; runs on SQLite/PostgreSQL/MySQL via SQLAlchemy.
 
 ## Commands
@@ -47,8 +47,10 @@ module carries its own.
   `tagged_json` (the queue/audit JSON envelope), `alembic_env` (shared migrations runner),
   `schema_setup` (create_all + version-table stamping). **Core never imports a feature module.**
 - `packages/firm-ui/src/firm/ui/` — optional dashboard (`firm-ui`; depends on all four modules).
-  `packages/firm-queue/src/firm/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships **inside
-  firm-queue** (it only depends on queue). **Nothing in core imports `ui` or `contrib`.**
+  `packages/firm-queue/src/firm/queue/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships
+  **inside firm-queue** (it only configures the queue). `packages/firm-queue/src/firm/contrib/`
+  is the deprecated pre-1.1 location, now only aliases, removed in 2.0. **Nothing in core imports
+  `ui` or `contrib`.**
 - `packages/firm/` — meta-package (no code; installs the four modules; `firm[ui]`/`firm[all]`).
 - `tests/<module>/`, `docs/`, `examples/`, `scripts/` stay at the repo root.
 
