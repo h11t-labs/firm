@@ -1,15 +1,11 @@
 """The dashboard itself — routing, pages, and actions — with no HTTP transport attached.
 
-Everything here speaks :class:`UIRequest` in and :class:`UIResponse` out, so the same dashboard
-runs behind the stdlib server (``firm-ui serve``, see :mod:`firm.ui.server`) and mounted inside a
-host application's own routing (see :mod:`firm.ui.contrib`). A transport adapter is then only a
-translation: build a :class:`UIRequest`, call :meth:`DashboardApp.handle`, write the
-:class:`UIResponse`.
+:class:`UIRequest` in, :class:`UIResponse` out, so a transport is only a translation: the stdlib
+server in :mod:`firm.ui.server` and the framework mounts in :mod:`firm.ui.contrib` both build a
+request, call :meth:`DashboardApp.handle`, and write the response.
 
 Routes are matched by hand; GETs render pages, POSTs run an action and redirect back. Each route
 is guarded by whether that part (queue / cache / channel / audit) is enabled on the dashboard.
-Every URL the pages build carries :attr:`UIRequest.prefix`, so a dashboard mounted under
-``/firm`` links to ``/firm/jobs`` — see :class:`firm.ui.render.Urls`.
 """
 
 from __future__ import annotations
@@ -63,8 +59,7 @@ _STATIC_PATH = "/static/style.css"
 
 def static_dir() -> Path:
     """The directory holding the dashboard's stylesheet, for a host application that would rather
-    serve it through its own static pipeline (Django ``STATICFILES_DIRS``, an nginx ``alias``, …).
-    Point :class:`DashboardApp`'s ``static_url`` at wherever you publish it."""
+    publish it through its own static pipeline — then point ``static_url`` at where it lands."""
     return Path(str(_STATIC_DIR))
 
 
@@ -76,14 +71,12 @@ _PREFIX_SAFE = "/%-._~!$&'()*+,;=:@"
 
 
 def _clean_prefix(raw: str) -> str:
-    """Normalize a mount prefix into something that can be pasted into a URL, a ``Location``, or an
-    HTML attribute without further thought.
+    """Make a mount prefix safe to paste into a URL, a ``Location``, or an HTML attribute.
 
-    The prefix reaches us from the host application's routing, which can carry a URL segment of its
-    own (``/tenants/<name>/firm``) — so it is not automatically trustworthy. Leading slashes are
-    collapsed, because ``//host`` is protocol-relative to a browser and would turn every redirect
-    into an open one; everything outside the path alphabet (quotes and angle brackets above all) is
-    percent-encoded, so a prefix cannot break out of the attribute it is rendered into.
+    It arrives from the host's routing, which can carry a URL segment of its own
+    (``/tenants/<name>/firm``), so it is not automatically trustworthy: leading slashes collapse
+    (``//host`` is protocol-relative — an open redirect on every action) and anything outside the
+    path alphabet is percent-encoded, quotes and angle brackets above all.
     """
     prefix = raw.rstrip("/")
     if not prefix:
@@ -92,11 +85,9 @@ def _clean_prefix(raw: str) -> str:
 
 
 class Headers(Mapping[str, str]):
-    """Case-insensitive request headers — what every HTTP layer agrees on, and all the dashboard
-    needs from one. Build one from any header collection's ``.items()``; repeated header lines are
-    joined with ``", "`` (the separator ``Cookie`` and the rest of the parsers this code hands them
-    to already accept). Look values up with an explicit default — ``headers.get("Origin", "")`` —
-    as with any other ``Mapping``."""
+    """Case-insensitive request headers, built from any header collection's ``.items()``. Repeated
+    header lines are joined with ``", "``, the separator ``Cookie`` and the other parsers these are
+    handed to already accept."""
 
     __slots__ = ("_items",)
 
@@ -121,12 +112,10 @@ class Headers(Mapping[str, str]):
 class UIRequest:
     """One dashboard request, independent of how it arrived.
 
-    ``path`` is *mount-relative* (``/jobs`` whether the dashboard owns the root or is mounted at
-    ``/firm``) and ``prefix`` is where it is mounted (``""`` or ``/firm``, never trailing-slashed);
-    the two concatenated are the URL the client asked for. ``host`` is the authority the client
-    addressed — the CSRF origin check compares ``Origin``/``Referer`` against it, and a framework
-    that resolves the host itself (Django's ``ALLOWED_HOSTS``, a proxy-aware Flask) should pass its
-    own answer rather than leave it to the raw ``Host`` header.
+    ``path`` is mount-relative (``/jobs`` either way) and ``prefix`` is where the dashboard is
+    mounted (``""`` or ``/firm``); concatenated they are the URL the client asked for. ``host`` and
+    ``scheme`` are what the origin check compares against, so a transport that resolves them itself
+    (Django's ``ALLOWED_HOSTS``, a proxy-aware Flask) should pass its own answer.
     """
 
     method: str
@@ -190,11 +179,10 @@ def _redirect(location: str, *, cookie: str | None = None) -> UIResponse:
 class DashboardApp:
     """The dashboard as a callable unit: :meth:`handle` turns a request into a response.
 
-    ``authenticator`` runs at the top of every request; ``None`` means this deployment
-    authenticates somewhere else (the loopback bind of ``firm-ui serve``, or the host application
-    a mount sits behind — :mod:`firm.ui.contrib` makes stating that explicit).
-    ``channel_trim_retention`` (seconds) controls the trim button's cutoff, and ``static_url``
-    points the stylesheet link somewhere else than the built-in route.
+    ``authenticator`` runs at the top of every request; ``None`` means something else authenticates
+    (the loopback bind of ``firm-ui serve``, or the host application a mount sits behind).
+    ``channel_trim_retention`` (seconds) is the trim button's cutoff; ``static_url`` moves the
+    stylesheet link off the built-in route.
     """
 
     dashboard: Dashboard
@@ -207,17 +195,16 @@ class DashboardApp:
     ) -> UIResponse:
         """Route ``request`` and return the response to send.
 
-        ``read_body`` is for a transport that has not buffered the request body yet: it is called
-        only once a POST has passed authentication and the ``Content-Length`` limit, so an
-        unauthenticated caller can never make the server read a body it announced. A transport
-        whose framework already parsed the body just puts it on the request and leaves this unset.
+        ``read_body`` is for a transport that has not buffered the body yet: it is called only once
+        a POST has passed authentication and the size limit, so an unauthenticated caller can never
+        make the server read a body it announced. Leave it unset if the body is already on hand.
         """
         return _Handler(self, request).run(read_body)
 
 
 class _Handler:
-    """One request's worth of state. Its methods return responses instead of writing them, which is
-    the only structural difference from the socket-bound handler this grew out of."""
+    """One request's worth of state. Its methods return responses instead of writing them — the
+    only structural difference from the socket-bound handler this grew out of."""
 
     def __init__(self, app: DashboardApp, request: UIRequest) -> None:
         self.app = app

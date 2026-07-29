@@ -7,10 +7,8 @@ Then open http://127.0.0.1:8000/firm/ — it answers 403 until you send the demo
 (``curl -H 'X-Demo-Admin: yes' http://127.0.0.1:8000/firm/``). Run examples/quickstart.py first if
 the database has no firm tables yet. Needs ``firm-ui[fastapi]``.
 
-The point: the dashboard is a router on your own domain, guarded by the dependency you already
-use for admin routes — which is what ``host_auth=True`` states. The dashboard's work is
-synchronous database I/O, so the adapter runs each request in the threadpool; the event loop is
-never blocked. Pass ``authenticator=`` instead if you would rather firm-ui checked the request.
+The dependency below is what guards the dashboard — which is what ``host_auth=True`` states. Swap
+it for the one you already use on admin routes.
 """
 
 from __future__ import annotations
@@ -26,8 +24,7 @@ from firm.ui.contrib.fastapi import router
 
 DB = os.environ.get("FIRM_DATABASE_URL", "sqlite:///firm-quickstart.db")
 
-# One Dashboard for the process — it owns database engines, so it is built once at startup and
-# closed on shutdown, not per request.
+# It owns database engines: one per process, built at startup and closed on shutdown.
 dashboard = build_dashboard(database_url=DB)
 
 
@@ -38,8 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def require_admin(request: Request) -> None:
-    """The host application's rule. Stand-in for your real dependency — an OAuth2 scope check, a
-    session lookup, ``Depends(get_current_admin)``."""
+    """Stand-in for your real dependency — an OAuth2 scope check, ``Depends(get_current_admin)``."""
     if request.headers.get("X-Demo-Admin") != "yes":
         raise HTTPException(status_code=403, detail="admins only")
 

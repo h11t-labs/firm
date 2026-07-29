@@ -1,10 +1,8 @@
 """A tiny stdlib HTTP server for the dashboard (no web framework).
 
 ``ThreadingHTTPServer`` + ``BaseHTTPRequestHandler`` is plenty for a single-user, localhost ops
-tool. This module is only the transport: it turns a socket request into a
-:class:`firm.ui.app.UIRequest`, hands it to :class:`firm.ui.app.DashboardApp`, and writes the
-:class:`firm.ui.app.UIResponse` back. Routing, pages, and actions all live in :mod:`firm.ui.app`,
-which is what the framework mounts in :mod:`firm.ui.contrib` reuse.
+tool. Only the transport lives here — socket to :class:`firm.ui.app.UIRequest`, response back out;
+routing, pages, and actions are in :mod:`firm.ui.app`.
 """
 
 from __future__ import annotations
@@ -77,10 +75,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._framing_ok():
             return
-        # The body is read only if the app asks for it — it declines to before the request has
-        # authenticated and passed the size limit. If it never asks, the announced bytes are still
-        # in the socket, so the connection has to close: keep-alive would misparse them as the
-        # next request.
+        # If the app never asks for the body, the announced bytes are still in the socket and
+        # keep-alive would misparse them as the next request — so close instead.
         read = False
 
         def read_body() -> bytes:

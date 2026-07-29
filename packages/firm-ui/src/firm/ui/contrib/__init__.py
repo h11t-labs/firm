@@ -1,33 +1,19 @@
-"""Mount the dashboard inside a host application, on its domain and behind its own auth.
+"""Mount the dashboard inside a host application — one adapter per framework, behind its own extra.
 
-One adapter per framework, each behind its own extra — ``firm-ui[django]``, ``firm-ui[flask]``,
-``firm-ui[fastapi]`` — and each a thin translation between that framework's request/response
-objects and the pair in :mod:`firm.ui.app`. Import the one you need; nothing here is imported by
-``firm.ui`` itself, so the framework dependency stays optional::
+Each adapter translates between its framework's request/response objects and the pair in
+:mod:`firm.ui.app`; nothing here is imported by ``firm.ui``, so the framework dependency stays
+optional. See ``docs/ui.md`` for the per-framework snippets and ``examples/mounted_dashboard_*.py``
+for runnable ones.
 
-    from firm.ui.contrib.flask import blueprint
-    app.register_blueprint(blueprint(dash, host_auth=True), url_prefix="/firm")
+Two things hold for every mount and are not visible from any single adapter:
 
-``firm-ui serve`` is unaffected — it is the same :class:`firm.ui.app.DashboardApp` behind the
-stdlib transport.
-
-Two things every mount has to settle, and both are explicit here rather than defaulted:
-
-* **Who authenticates.** Pass an ``authenticator`` (firm-ui checks it itself, exactly as the
-  standalone server does), or ``host_auth=True`` to say the host application already guards this
-  route — with its own decorator, dependency, or middleware. Neither one set is an error, so a
-  mount can never silently mean "no auth at all".
-* **CSRF.** The dashboard's destructive actions are plain POST forms guarded by a same-origin
-  ``Origin``/``Referer`` check, not by the host framework's CSRF token (the forms are rendered by
-  firm-ui and carry no token). The adapters therefore exempt these routes from the host's token
-  check where the host applies one by default; the same-origin guard runs on every POST.
-
-One thing a mount inherits rather than decides: how much of a request body reaches memory. The
-dashboard refuses a body over 1 MiB and asks for it only after the request has authenticated, but
-a request that announces no length (a chunked one) is buffered by the host's server before either
-check can run — so the host's own request-size limit is the bound (Django's
-``DATA_UPLOAD_MAX_MEMORY_SIZE``, Flask's ``MAX_CONTENT_LENGTH``, whatever sits in front of an ASGI
-app). The standalone server frames bodies by ``Content-Length`` alone and rejects the rest.
+* A mount states who authenticates it — ``authenticator=`` or ``host_auth=True``, never neither
+  (see :func:`build_app`). The adapters exempt their routes from the host's CSRF token check,
+  since the dashboard renders its own tokenless forms; its same-origin guard runs on every POST.
+* A body that announces no length (a chunked one) is buffered by the host's server before the
+  dashboard's own 1 MiB limit can apply, so the host's request-size limit is the bound there
+  (Django's ``DATA_UPLOAD_MAX_MEMORY_SIZE``, Flask's ``MAX_CONTENT_LENGTH``). The standalone
+  server frames bodies by ``Content-Length`` alone and rejects the rest.
 """
 
 from __future__ import annotations
@@ -47,9 +33,8 @@ def build_app(
     channel_trim_retention: float | None = None,
     static_url: str | None = None,
 ) -> DashboardApp:
-    """Shared construction for the framework adapters — including the guard that a mount states
-    who authenticates it. This mirrors the standalone server's refusal to bind a non-loopback
-    address without authentication: "nothing configured" must never quietly mean "open"."""
+    """Shared construction for the adapters, refusing a mount that names no authentication —
+    the standalone server's refusal to bind a public address unguarded, one layer up."""
     if authenticator is None and not host_auth:
         raise ValueError(
             "Mounting the dashboard needs either authenticator=<Authenticator> (firm-ui checks it) "
@@ -60,10 +45,9 @@ def build_app(
 
 
 def mount_prefix(full_path: str, subpath: str) -> str:
-    """Where the dashboard is mounted, derived from the path the client asked for and the part of
-    it the mount's catch-all route matched. Frameworks report the mount point in their own ways
-    (and not at all through ``include_router``), so taking the difference is the one method that
-    holds for all of them."""
+    """The mount point, as the difference between the path the client asked for and the part the
+    catch-all route matched — frameworks report it in their own ways, and ``include_router`` not
+    at all, so the difference is the one method that holds for all of them."""
     relative = "/" + subpath.lstrip("/")
     if relative == "/":
         return full_path.rstrip("/")

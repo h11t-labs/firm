@@ -1,17 +1,9 @@
 """Mount the dashboard in a FastAPI (or plain Starlette) application (``firm-ui[fastapi]``).
 
-::
-
-    from firm.ui import build_dashboard
-    from firm.ui.contrib.fastapi import router
-
-    dash = build_dashboard(database_url="sqlite:///app.db")
     app.include_router(router(dash, host_auth=True), prefix="/firm",
                        dependencies=[Depends(require_admin)])
 
-``host_auth=True`` says the dependency (or middleware) guards the route; pass ``authenticator=``
-instead to let firm-ui check it. The dashboard's work is synchronous database I/O, so each request
-runs in the threadpool rather than on the event loop.
+See :mod:`firm.ui.contrib`; a runnable app is in ``examples/mounted_dashboard_fastapi.py``.
 """
 
 from __future__ import annotations
@@ -34,7 +26,9 @@ def router(
     channel_trim_retention: float | None = None,
     static_url: str | None = None,
 ) -> APIRouter:
-    """A router serving the whole dashboard under whatever ``prefix`` you include it at."""
+    """The whole dashboard, under whatever ``prefix`` you include it at. Its work is synchronous
+    database I/O, so each request runs in the threadpool, never on the event loop. ``dashboard``
+    owns database engines: build it once at startup, close it on shutdown."""
     app = build_app(
         dashboard,
         authenticator=authenticator,
@@ -46,9 +40,8 @@ def router(
 
     async def dispatch(request: Request, subpath: str) -> Response:
         scope = request.scope
-        # scope["path"] is already percent-decoded. root_path covers an app mounted under a path,
-        # but Starlette versions disagree on whether it is still part of scope["path"] — so add it
-        # only when it is not there already, or a nested mount doubles its own prefix.
+        # Starlette versions disagree on whether root_path is still part of scope["path"], so add
+        # it only when absent — otherwise a nested mount doubles its own prefix.
         root, path = scope.get("root_path", ""), scope["path"]
         inside_root = root and (path == root or path.startswith(f"{root}/"))
         full_path = path if inside_root else f"{root}{path}"
@@ -62,10 +55,8 @@ def router(
             host=request.headers.get("host", ""),
             scheme=request.url.scheme,
         )
-        # The body stays in the receive channel until the app asks for it, which it only does once
-        # the request has authenticated and passed the size limit — the same order the standalone
-        # server keeps. Reading it means stepping back onto the event loop from the worker thread,
-        # which is what anyio's portal is for.
+        # The app asks for the body only after auth and its size check, so it stays in the receive
+        # channel until then; reading it from the worker thread is what anyio's portal is for.
         result = await run_in_threadpool(
             app.handle, ui_request, read_body=lambda: anyio.from_thread.run(request.body)
         )
@@ -77,9 +68,8 @@ def router(
                 response.headers[name] = value
         return response
 
-    # Two routes, each with its own signature: a ``subpath`` that is not part of the path pattern
-    # would be read from the *query string* instead, and letting ``?subpath=`` pick the page would
-    # hand any caller a way around the routes.
+    # Two routes, two signatures: a `subpath` outside the path pattern would be read from the
+    # query string instead, and `?subpath=` picking the page is a way around the routes.
     async def root_route(request: Request) -> Response:
         return await dispatch(request, "")
 

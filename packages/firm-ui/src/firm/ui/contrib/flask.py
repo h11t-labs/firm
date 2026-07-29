@@ -1,16 +1,8 @@
 """Mount the dashboard in a Flask application (``firm-ui[flask]``).
 
-::
-
-    from firm.ui import build_dashboard
-    from firm.ui.contrib.flask import blueprint
-
-    dash = build_dashboard(database_url="sqlite:///app.db")
     app.register_blueprint(blueprint(dash, host_auth=True), url_prefix="/firm")
 
-``host_auth=True`` says your application guards the route (a ``before_request`` on the blueprint,
-Flask-Login, your session check); pass ``authenticator=`` instead to let firm-ui check it. Build
-the dashboard once at startup and close it on shutdown — it owns database engines.
+See :mod:`firm.ui.contrib`; a runnable app is in ``examples/mounted_dashboard_flask.py``.
 """
 
 from __future__ import annotations
@@ -32,7 +24,8 @@ def blueprint(
     channel_trim_retention: float | None = None,
     static_url: str | None = None,
 ) -> Blueprint:
-    """A blueprint serving the whole dashboard under whatever ``url_prefix`` you register it at."""
+    """The whole dashboard, under whatever ``url_prefix`` you register it at. ``dashboard`` owns
+    database engines: build it once at startup, close it on shutdown."""
     app = build_app(
         dashboard,
         authenticator=authenticator,
@@ -57,8 +50,7 @@ def blueprint(
             host=request.host,
             scheme=request.scheme,
         )
-        # Lazily: the body is buffered only once the request has authenticated and passed the
-        # dashboard's size limit.
+        # Passed as a reader, not a value: the app calls it only after auth and its size check.
         result = app.handle(ui_request, read_body=lambda: request.get_data())
         return Response(result.body, status=result.status, headers=result.headers)
 

@@ -2,29 +2,12 @@
 
 ``urls.py``::
 
-    from django.contrib.admin.views.decorators import staff_member_required
-    from django.urls import include, path
-    from firm.ui import build_dashboard
-    from firm.ui.contrib.django import dashboard_urls
-
-    dash = build_dashboard(database_url="sqlite:///app.db")
-
     urlpatterns = [
         path("firm/", include(dashboard_urls(dash, host_auth=True,
                                              decorator=staff_member_required))),
     ]
 
-``decorator`` wraps the view, so the permission rule stays in the host project (any view
-decorator works — ``staff_member_required``, ``permission_required``, ``login_required``);
-``host_auth=True`` records that it is the one guarding the dashboard. Pass ``authenticator=``
-instead to let firm-ui check the request itself.
-
-The view is CSRF-exempt: the dashboard renders its own forms and carries no Django CSRF token, so
-Django's token check would reject every action. Its own same-origin ``Origin``/``Referer`` guard
-runs on every POST instead — see :mod:`firm.ui.contrib`.
-
-The stylesheet is served by the mount itself. To route it through ``staticfiles`` instead, add
-``firm.ui.app.static_dir()`` to ``STATICFILES_DIRS`` and pass the published URL as ``static_url``.
+See :mod:`firm.ui.contrib`; a runnable project is in ``examples/mounted_dashboard_django.py``.
 """
 
 from __future__ import annotations
@@ -52,8 +35,8 @@ def dashboard_view(
     channel_trim_retention: float | None = None,
     static_url: str | None = None,
 ) -> DashboardView:
-    """The dashboard as one Django view. It takes the rest of the URL as a ``subpath`` argument,
-    so route it with a catch-all pattern — :func:`dashboard_urls` does that for you."""
+    """The dashboard as one Django view, taking the rest of the URL as ``subpath`` — so route it
+    with a catch-all pattern, which :func:`dashboard_urls` does for you."""
     app = build_app(
         dashboard,
         authenticator=authenticator,
@@ -75,8 +58,7 @@ def dashboard_view(
             host=request.get_host(),  # validated against ALLOWED_HOSTS
             scheme=request.scheme,
         )
-        # Lazily: reading request.body applies Django's own upload limits, and it only happens
-        # once the request has authenticated and passed the dashboard's size limit.
+        # Passed as a reader, not a value: the app calls it only after auth and its size check.
         result = app.handle(ui_request, read_body=lambda: _body(request))
         response = HttpResponse(result.body, status=result.status)
         for name, value in result.headers:
@@ -106,7 +88,14 @@ def dashboard_urls(
     static_url: str | None = None,
 ) -> list[URLPattern]:
     """URL patterns for the whole dashboard, to ``include()`` under any prefix. ``decorator`` is
-    applied to the view — that is where the host project's permission rule goes."""
+    where the host project's permission rule goes (``staff_member_required``,
+    ``permission_required(...)``, your own). ``dashboard`` owns database engines: build it once at
+    startup, close it on shutdown.
+
+    The view is CSRF-exempt — the dashboard renders its own tokenless forms, so Django's token
+    check would reject every action; the same-origin guard is what protects them. The stylesheet
+    is served by the mount unless you publish :func:`firm.ui.static_dir` yourself and pass
+    ``static_url``."""
     view = dashboard_view(
         dashboard,
         authenticator=authenticator,

@@ -15,13 +15,11 @@ Everything is in this one file so it runs without a project layout; in a real pr
                                              decorator=staff_member_required))),
     ]
 
-``decorator`` is where the permission rule stays — ``staff_member_required``,
-``permission_required("ops.view_firm")``, your own. The demo uses a hand-rolled one so it needs no
-auth tables. ``host_auth=True`` states that the decorator is what guards the dashboard; pass
-``authenticator=`` instead to have firm-ui check the request itself.
+``decorator`` is what guards the dashboard — which is what ``host_auth=True`` states. It is
+normally ``staff_member_required``; the demo hand-rolls one so it needs no auth tables.
 
-Note firm's own database (``FIRM_DATABASE_URL``) is separate from Django's ``DATABASES`` — the
-dashboard reads it through its own engines, not through the ORM, so this demo configures none.
+firm's own database (``FIRM_DATABASE_URL``) is separate from Django's ``DATABASES``: the dashboard
+reads it through its own engines, not the ORM, so this demo configures none.
 """
 
 from __future__ import annotations
@@ -52,14 +50,12 @@ settings.configure(
 )
 django.setup()
 
-# One Dashboard for the process: it owns database engines, so build it at import time rather than
-# per request.
+# It owns database engines: one per process, built at startup.
 dashboard = build_dashboard(database_url=DB)
 
 
 def admin_only(view):
-    """The host project's permission rule. Stand-in for ``staff_member_required`` — which is what
-    you would actually pass, and needs ``django.contrib.auth`` set up."""
+    """Stand-in for ``staff_member_required``, which needs ``django.contrib.auth`` set up."""
 
     def wrapper(request, *args, **kwargs):
         if request.headers.get("X-Demo-Admin") != "yes":
