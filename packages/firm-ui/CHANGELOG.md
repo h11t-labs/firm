@@ -6,8 +6,33 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard can be **mounted inside a host application** — on its domain, in its routing,
+  behind its own permissions — instead of running as a second process. One adapter per framework,
+  each behind its own extra: `firm.ui.contrib.django.dashboard_urls` (`firm-ui[django]`),
+  `firm.ui.contrib.flask.blueprint` (`firm-ui[flask]`), and `firm.ui.contrib.fastapi.router`
+  (`firm-ui[fastapi]`). Links, form actions, and the preference cookies all carry the mount
+  prefix. A mount must state who authenticates it — `authenticator=` (firm-ui checks) or
+  `host_auth=True` (the host application does); neither raises `ValueError`, so mounting can never
+  silently mean "no auth at all".
+- `firm.ui.DashboardApp` — the dashboard with no transport attached: `handle(UIRequest) ->
+  UIResponse`, the seam the adapters and the stdlib server both sit on. With `firm.ui.UIRequest`,
+  `firm.ui.UIResponse`, and `firm.ui.Headers`, that is all a mount for another framework needs.
+- `static_url=` points the stylesheet link at your own static pipeline, and `firm.ui.static_dir()`
+  says where the file lives so you can publish it there.
+
 ### Changed
 
+- Request framing is now unambiguous or refused: a `Content-Length` that is not a plain number
+  (including two conflicting header lines), a request framed by both `Content-Length` and
+  `Transfer-Encoding`, and — on the standalone server, which frames by `Content-Length` alone — any
+  chunked request are all answered `400`. Each was a body the layer in front could read differently
+  than this one.
+- The same-origin guard now knows the scheme the dashboard was reached over: served over HTTPS, it
+  accepts an HTTPS origin only, so a page on plain HTTP at the same host can no longer post to it.
+  A deployment that terminates TLS in a proxy and reports `http` to the application still accepts
+  the browser's HTTPS origin.
 - The dashboard's read queries moved into the packages that own the data (`firm.queue.queries`,
   `firm.cache.queries`, `firm.channel.queries`, `firm.audit.queries`), where they are now a
   supported API. firm-ui builds on them like any other consumer and keeps only presentation:

@@ -45,6 +45,78 @@ It points at existing databases — it never creates or migrates a schema.
 Queue actions reuse the library's own helpers (`queues.pause/resume`, `maintenance.retry_failed`),
 so the UI applies exactly the same semantics as the library and CLIs.
 
+## Mount it in your application
+
+Everything above is unchanged and still the default: `firm-ui` is its own process, serving the
+dashboard at the root of its own port. Mounting is the alternative for when you already run a web
+application — then the dashboard doesn't need a second process, and can live in your own routing,
+on your own domain, behind the permissions you already have. One adapter per framework, each
+behind its own extra (`firm-ui[django]`, `firm-ui[flask]`, `firm-ui[fastapi]`). Build the
+`Dashboard` once at startup — it owns database engines — and close it on shutdown.
+
+Take the standalone process when the dashboard should stay reachable while the application is
+down or being deployed, or when ops and the application are separately owned. Mount it when you
+would otherwise be duplicating the application's own access rules in proxy config.
+
+```python
+# Django — urls.py
+from django.contrib.admin.views.decorators import staff_member_required
+from django.urls import include, path
+from firm.ui import build_dashboard
+from firm.ui.contrib.django import dashboard_urls
+
+dash = build_dashboard(database_url="sqlite:///app.db")
+
+urlpatterns = [
+    path("firm/", include(dashboard_urls(dash, host_auth=True,
+                                         decorator=staff_member_required))),
+]
+```
+
+Runnable: [examples/mounted_dashboard_django.py](../examples/mounted_dashboard_django.py).
+
+```python
+# Flask
+from firm.ui.contrib.flask import blueprint
+
+app.register_blueprint(blueprint(dash, host_auth=True), url_prefix="/firm")
+```
+
+Runnable: [examples/mounted_dashboard_flask.py](../examples/mounted_dashboard_flask.py).
+
+```python
+# FastAPI
+from fastapi import Depends
+from firm.ui.contrib.fastapi import router
+
+app.include_router(router(dash, host_auth=True), prefix="/firm",
+                   dependencies=[Depends(require_admin)])
+```
+
+Runnable: [examples/mounted_dashboard_fastapi.py](../examples/mounted_dashboard_fastapi.py).
+
+Every mount has to say **who authenticates it**, and neither answer is a default: pass
+`host_auth=True` when your application guards the route (the decorator, dependency, or middleware
+above), or `authenticator=` to have firm-ui check the request itself with any of the backends
+below. Setting neither raises `ValueError` at mount time, so a mount can't silently mean "no auth
+at all" — the same rule as the standalone server's refusal to bind a public address unguarded.
+
+Everything else keeps working as it does standalone: links and form actions carry the mount prefix,
+the destructive actions stay behind the same-origin `Origin`/`Referer` guard, and the preference
+cookies are scoped to the mount path. The dashboard renders its own forms and carries no framework
+CSRF token, so the adapters exempt these routes from a host's token check (Django's) — the
+same-origin guard is what protects them.
+
+The stylesheet is served by the mount at `<prefix>/static/style.css`. To publish it through your
+own static pipeline instead, add `firm.ui.static_dir()` to that pipeline (Django's
+`STATICFILES_DIRS`, an nginx `alias`, …) and pass `static_url="/assets/firm.css"` — pages then link
+there and no request for it reaches your application.
+
+Under the adapters is a plain, transport-free `DashboardApp`: `handle(UIRequest) -> UIResponse`,
+where `UIRequest` carries the method, the mount-relative path, query, headers, body, peer, and the
+mount `prefix`. Writing a mount for a framework not listed here is that translation and nothing
+more.
+
 ## Building your own
 
 Everything the dashboard reads comes from each part's own read-query module

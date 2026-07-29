@@ -36,6 +36,10 @@ must be tied to the app lifecycle; `Cache`, `Channel` and `audit.record` are pla
 construct yourself, so there is nothing to hook. Django is the exception — it has pluggable
 backend contracts to fill — which is why the integrations for the other modules start there.
 
+The dashboard has framework glue of its own — `firm.ui.contrib` mounts it in a Django, Flask, or
+FastAPI application instead of running it as a second process. See
+[Dashboard § Mount it in your application](ui.md#mount-it-in-your-application).
+
 ## FastAPI
 
 ```python

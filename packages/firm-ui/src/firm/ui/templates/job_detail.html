@@ -6,8 +6,8 @@
 <span class="pill lg"><Dot state={{ job.state }} />{{ job.state }}</span>
 {%- if job.state == "failed" %}
 <div class="pagehead-actions">
-<form class="inline" method="post" action="/job/{{ job.id }}/retry"><button>{{ icons.retry }}Retry</button></form>
-<form class="inline" method="post" action="/job/{{ job.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>
+<form class="inline" method="post" action="{{ urls.prefix }}/job/{{ job.id }}/retry"><button>{{ icons.retry }}Retry</button></form>
+<form class="inline" method="post" action="{{ urls.prefix }}/job/{{ job.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>
 </div>
 {%- endif %}
 </div>

@@ -47,6 +47,8 @@ module carries its own.
   `tagged_json` (the queue/audit JSON envelope), `alembic_env` (shared migrations runner),
   `schema_setup` (create_all + version-table stamping). **Core never imports a feature module.**
 - `packages/firm-ui/src/firm/ui/` — optional dashboard (`firm-ui`; depends on all four modules).
+  Transport-free core in `app.py` (`DashboardApp.handle(UIRequest) -> UIResponse`), with `server.py`
+  (stdlib) and `ui/contrib/` (Django/Flask/FastAPI mounts, behind extras) as its only transports.
   `packages/firm-queue/src/firm/queue/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships
   **inside firm-queue** (it only configures the queue). `packages/firm-queue/src/firm/contrib/`
   is the deprecated pre-1.1 location, now only aliases, removed in 2.0. **Nothing in core imports

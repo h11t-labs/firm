@@ -266,6 +266,31 @@ from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```
 
+## firm.ui (optional — the `firm-ui` package)
+
+```python
+from firm.ui import BasicAuth, build_dashboard, serve, static_dir
+dash = build_dashboard(database_url=None, queue_url=None, cache_url=None,
+                       channel_url=None, audit_url=None)   # -> Dashboard (close() when done)
+serve(dash, host="127.0.0.1", port=8787, authenticator=None, channel_trim_retention=None)
+
+# the dashboard without a transport: handle(UIRequest) -> UIResponse
+from firm.ui import DashboardApp, Headers, UIRequest, UIResponse
+app = DashboardApp(dash, authenticator=None, channel_trim_retention=None, static_url=None)
+app.handle(UIRequest("GET", "/jobs", query="state=failed", headers=Headers(...),
+                     body=b"", peer="", prefix="/firm", host="app.example"))
+static_dir()   # -> Path  (the stylesheet's directory, to serve it from your own pipeline)
+```
+
+Mounts (each behind its own extra — `[django]` / `[flask]` / `[fastapi]`). Every one needs either
+`authenticator=` or `host_auth=True`; both unset raises `ValueError`:
+
+```python
+from firm.ui.contrib.django import dashboard_urls, dashboard_view   # decorator=…, host_auth=…
+from firm.ui.contrib.flask import blueprint                          # -> Blueprint
+from firm.ui.contrib.fastapi import router                           # -> APIRouter
+```
+
 ## Command-line tools
 
 ```bash

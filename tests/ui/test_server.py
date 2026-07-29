@@ -81,6 +81,21 @@ def _post_form(url: str, fields: dict[str, str], cookie: str = "") -> tuple[int,
         return exc.code, dict(exc.headers.items())
 
 
+def test_chunked_request_is_refused(base_url) -> None:
+    """The stdlib handler frames a body by Content-Length alone, so a chunked body would be left in
+    the socket and read as the next request — the back half of a smuggling pair. Refuse it."""
+    import socket
+
+    host, port = base_url.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        sock.sendall(
+            b"POST /cache/clear HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nhello\r\n0\r\n\r\n"
+        )
+        sock.settimeout(5)
+        assert b"400" in sock.recv(1024).split(b"\r\n", 1)[0]
+
+
 def test_overview_renders_with_all_four_tabs(base_url, seed) -> None:
     seed.ready()
     seed.failed()
