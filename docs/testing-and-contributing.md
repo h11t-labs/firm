@@ -12,7 +12,7 @@ firm/
 ├── pyproject.toml                 # virtual workspace root: members, dev tools, lint/type config
 ├── packages/
 │   ├── firm-core/    src/firm/_core/    # shared: engine, dialects, poller, clock, config, process
-│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + firm.contrib + migrations/
+│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + queue/contrib/ + migrations/
 │   ├── firm-cache/   src/firm/cache/     # firm.cache  (cache)  + migrations/
 │   ├── firm-channel/ src/firm/channel/   # firm.channel (pub/sub) + migrations/
 │   ├── firm-audit/   src/firm/audit/     # firm.audit  (audit log) + migrations/

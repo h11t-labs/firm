@@ -28,8 +28,8 @@ Database drivers and optional features are extras on the module packages:
 |---|---|---|
 | `firm-queue[postgres]` / `firm-cache[postgres]` / … | `psycopg` | running on PostgreSQL |
 | `firm-queue[mysql]` / `firm-cache[mysql]` / … | `pymysql` | running on MySQL / MariaDB |
-| `firm-queue[flask]` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) |
-| `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) |
+| `firm-queue[flask]` | `flask` | the Flask integration ([`firm.queue.contrib.flask`](contrib.md)) |
+| `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.queue.contrib.fastapi`](contrib.md)) |
 | `firm-cache[encryption]` | `cryptography` | cache at-rest encryption (Fernet) |
 | `firm-cache[msgpack]` | `msgpack` | the cache msgpack value coder |
 

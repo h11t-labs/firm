@@ -1,14 +1,40 @@
 # Framework integration
 
-`firm.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
+`firm.queue.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
 is opt-in, behind its own extra, and **nothing in core imports it** — if you don't use it, it costs
 nothing. You still define jobs the normal way with `@bq.job`.
 
+!!! note "Renamed from `firm.contrib` / `Firm`"
+
+    These live under `firm.queue.contrib` as of the next release, so that each module's
+    integrations sit under that module's own path. `firm.contrib` read like a firm-wide namespace
+    while everything in it only ever configured the queue — and it squats the name a genuinely
+    suite-wide integration would want. As integrations land for the other modules they grow their
+    own `contrib` too, so the queue must not be the odd one out.
+
+    The Flask extension is renamed `Firm` → `FirmQueue` for the same reason, along with
+    `app.extensions["firm"]` → `app.extensions["firm_queue"]` and `flask firm` →
+    `flask firm-queue`.
+
+    Everything above shipped in 1.0.0, so every old spelling keeps working, and all of them are
+    removed in 2.0. The old import paths re-export the same objects, so `is` and `isinstance`
+    still hold across both.
+
+    The old import paths, the `Firm` name and `flask firm` raise a `DeprecationWarning` you can
+    grep a migration for. **`app.extensions["firm"]` cannot** — it is an ordinary dict key that
+    both spellings point at, and reading it runs no code of ours. Search for it by hand.
+
 | Import | Install | What it does |
 |---|---|---|
-| `firm.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.contrib.flask.Firm` | `firm-queue[flask]` | a Flask extension + a `flask firm worker` command |
-| `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+| `firm.queue.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.queue.contrib.flask.FirmQueue` | `firm-queue[flask]` | a Flask extension + a `flask firm-queue worker` command |
+| `firm.queue.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+
+There is no `firm.cache.contrib.flask` or `firm.channel.contrib.fastapi`, and that is deliberate.
+The queue needs framework glue because it has process-global state and background threads that
+must be tied to the app lifecycle; `Cache`, `Channel` and `audit.record` are plain objects you
+construct yourself, so there is nothing to hook. Django is the exception — it has pluggable
+backend contracts to fill — which is why the integrations for the other modules start there.
 
 The dashboard has framework glue of its own — `firm.ui.contrib` mounts it in a Django, Flask, or
 FastAPI application instead of running it as a second process. See
@@ -18,7 +44,7 @@ FastAPI application instead of running it as a second process. See
 
 ```python
 from fastapi import FastAPI
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
 app = FastAPI(lifespan=lifespan(database_url="postgresql://localhost/app"))
 
@@ -36,11 +62,11 @@ process** — convenient for development or a single-process deploy; it's stoppe
 
 ```python
 from flask import Flask
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import FirmQueue
 
 app = Flask(__name__)
-app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
-Firm(app)                         # or Firm(app, database_url="...")
+app.config["FIRM_QUEUE_DATABASE_URL"] = "postgresql://localhost/app"
+FirmQueue(app)                    # or FirmQueue(app, database_url="...")
 
 @app.post("/welcome/<int:user_id>")
 def welcome(user_id):
@@ -48,13 +74,17 @@ def welcome(user_id):
     return "", 202
 ```
 
+The URL is looked up in `database_url=`, then `app.config`, then the environment; within each of
+those the queue's own `FIRM_QUEUE_DATABASE_URL` wins over the suite-wide `FIRM_DATABASE_URL`, so
+one shared setting still configures every module while a single module can override it.
+
 The extension configures the queue and registers a CLI group, so you run workers with:
 
 ```bash
-flask firm worker --threads 5 --queues default,mailers
+flask firm-queue worker --threads 5 --queues default,mailers
 ```
 
-`Firm(app, embed_workers=True)` runs the worker inside the web process instead (dev /
+`FirmQueue(app, embed_workers=True)` runs the worker inside the web process instead (dev /
 single-process only — otherwise every web worker starts its own supervisor).
 
 ## Transactional enqueue
@@ -63,7 +93,7 @@ single-process only — otherwise every web worker starts its own supervisor).
 rollback — so you never enqueue a job for a request that didn't persist:
 
 ```python
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 def create_order(session, payload):
     order = Order(**payload)
@@ -79,5 +109,5 @@ def create_order(session, payload):
 ## Production shape
 
 Embed workers for dev; in production run them as **separate processes** (`firm-queue start`
-or `flask firm worker`) so you scale web and worker capacity independently. See
+or `flask firm-queue worker`) so you scale web and worker capacity independently. See
 [Workers & the supervisor](queue/workers-and-supervisor.md).

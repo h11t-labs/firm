@@ -250,18 +250,19 @@ queries.row_status(row, ctx)          # -> "sealed"|"unsealed"|"unprotected"|"ta
 # IntegrityState carries state, tone (ok/warn/danger/neutral), escalate, and cause tokens.
 ```
 
-## firm.contrib (optional — `[flask]` / `[fastapi]` extras)
+## firm.queue.contrib (optional — `[flask]` / `[fastapi]` extras)
 
 ```python
 # FastAPI: app = FastAPI(lifespan=lifespan(database_url=..., embed_workers=False,
 #                                          queues=("*",), threads=3))
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
-# Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
-#   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
-from firm.contrib.flask import Firm
+# Flask: FirmQueue(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
+#   reads app.config/env FIRM_QUEUE_DATABASE_URL, then FIRM_DATABASE_URL;
+#   registers `flask firm-queue worker`
+from firm.queue.contrib.flask import FirmQueue
 
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```
 
