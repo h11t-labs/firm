@@ -4733,10 +4733,16 @@ so the UI applies exactly the same semantics as the library and CLIs.
 
 ## Mount it in your application
 
-If you already run a web application, the dashboard doesn't need a second process: mount it in
-your own routing, on your own domain, behind the permissions you already have. One adapter per
-framework, each behind its own extra (`firm-ui[django]`, `firm-ui[flask]`, `firm-ui[fastapi]`).
-Build the `Dashboard` once at startup — it owns database engines — and close it on shutdown.
+Everything above is unchanged and still the default: `firm-ui` is its own process, serving the
+dashboard at the root of its own port. Mounting is the alternative for when you already run a web
+application — then the dashboard doesn't need a second process, and can live in your own routing,
+on your own domain, behind the permissions you already have. One adapter per framework, each
+behind its own extra (`firm-ui[django]`, `firm-ui[flask]`, `firm-ui[fastapi]`). Build the
+`Dashboard` once at startup — it owns database engines — and close it on shutdown.
+
+Take the standalone process when the dashboard should stay reachable while the application is
+down or being deployed, or when ops and the application are separately owned. Mount it when you
+would otherwise be duplicating the application's own access rules in proxy config.
 
 ```python
 # Django — urls.py
@@ -4753,12 +4759,16 @@ urlpatterns = [
 ]
 ```
 
+Runnable: [examples/mounted_dashboard_django.py](../examples/mounted_dashboard_django.py).
+
 ```python
 # Flask
 from firm.ui.contrib.flask import blueprint
 
 app.register_blueprint(blueprint(dash, host_auth=True), url_prefix="/firm")
 ```
+
+Runnable: [examples/mounted_dashboard_flask.py](../examples/mounted_dashboard_flask.py).
 
 ```python
 # FastAPI
@@ -4768,6 +4778,8 @@ from firm.ui.contrib.fastapi import router
 app.include_router(router(dash, host_auth=True), prefix="/firm",
                    dependencies=[Depends(require_admin)])
 ```
+
+Runnable: [examples/mounted_dashboard_fastapi.py](../examples/mounted_dashboard_fastapi.py).
 
 Every mount has to say **who authenticates it**, and neither answer is a default: pass
 `host_auth=True` when your application guards the route (the decorator, dependency, or middleware
