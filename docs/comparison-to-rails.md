@@ -52,5 +52,8 @@ reproduced, and a few pieces are still future work:
 - **Active Support / Notifications instrumentation** — replaced by lifecycle hooks + your own
   logging.
 - **Cache sharding** (multi-database consistent hashing) and the **Mission Control** dashboard.
+- **Continuations** (`ActiveJob::Continuable`) — checkpointing inside a job and resuming after an
+  interruption. A recovered job restarts from the top, which is why jobs must be idempotent.
 
-See the [roadmap](#) — `IMPROVEMENTS.md` in the repo root — for the full list of planned work.
+See `IMPROVEMENTS.md` in the repo root for the roadmap — the six things planned next. Everything
+else lives in the issue tracker.
