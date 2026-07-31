@@ -20,4 +20,4 @@ firm package versions involved.
 
 ## Supported versions
 
-Pre-1.0, only the latest release of each package receives security fixes.
+The latest release of each package receives security fixes.

@@ -35,6 +35,8 @@ dev = [
     "pymysql>=1.1",
     "django>=4.2",
     "flask>=3.0",
+    # Higher than firm-queue's published `fastapi>=0.110` extra floor on purpose: the dev/test
+    # suite runs against a recent FastAPI, while the shipped floor stays low for compatibility.
     "fastapi>=0.139.2",
     # Only here as the transport behind starlette's TestClient (we never import it); starlette
     # 1.3 deprecated the httpx 0.x line in favour of httpx2.
