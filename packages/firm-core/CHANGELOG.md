@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Fixed
+
+- `create_engine_for` no longer crashes on in-memory SQLite (`sqlite://`,
+  `sqlite:///:memory:`, `mode=memory`): these use `SingletonThreadPool`, which rejects the
+  `pool_size`/`max_overflow` kwargs we always passed. They now use `StaticPool` with
+  `check_same_thread=False`, which also shares one connection so every thread sees the same
+  database instead of its own empty one.
+- The shared Alembic online-migration runner now disposes its engine in a `finally`, so a
+  failing `run_migrations()` no longer leaks the connection pool.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the
