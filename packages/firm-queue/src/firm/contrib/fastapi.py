@@ -1,76 +1,37 @@
-"""FastAPI integration — a lifespan that configures firm-queue with your app.
+"""Deprecated alias for :mod:`firm.queue.contrib.fastapi`.
 
-    from fastapi import FastAPI
-    from firm.contrib.fastapi import lifespan
-
-    app = FastAPI(lifespan=lifespan(database_url="postgresql://localhost/app"))
-
-    @app.post("/welcome/{user_id}")
-    def welcome(user_id: int):
-        send_welcome.enqueue(user_id)   # a normal @bq.job
-
-Pass ``embed_workers=True`` to also run a worker+dispatcher in the app process (handy for dev or a
-single-process deploy); in production run workers separately with ``firm-queue start``.
-
-The helper itself only needs the standard library + firm; the ``[fastapi]`` extra just
-installs FastAPI for your app.
+Importing this module warns and re-exports the real one, so ``is`` comparisons and
+``isinstance`` keep holding across both paths. See :mod:`firm.contrib` for why it moved.
+Removed in 2.0.
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
-from collections.abc import AsyncIterator, Callable
-from typing import Any
+import warnings
+from typing import TYPE_CHECKING, Any
 
-from firm.queue import configure
-from firm.queue.config import current_runtime
+if TYPE_CHECKING:  # resolved lazily at runtime; declared here so type checkers and editors see it
+    from firm.queue.contrib.fastapi import lifespan
 
-
-def lifespan(
-    *,
-    database_url: str | None = None,
-    embed_workers: bool = False,
-    queues: tuple[str, ...] = ("*",),
-    threads: int = 3,
-) -> Callable[[Any], contextlib.AbstractAsyncContextManager[None]]:
-    """Build a FastAPI ``lifespan`` that configures firm on startup (and optionally runs a
-    worker+dispatcher), tearing the workers down on shutdown."""
-
-    @contextlib.asynccontextmanager
-    async def _lifespan(_app: Any) -> AsyncIterator[None]:
-        url = database_url or os.environ.get("FIRM_QUEUE_DATABASE_URL")
-        if not url:
-            raise RuntimeError(
-                "firm FastAPI lifespan needs database_url= or FIRM_QUEUE_DATABASE_URL."
-            )
-        configure(database_url=url)
-        # Build (don't start) before the try, so a partial-start failure inside still hits the
-        # finally and gets stop()'d — never leaking daemon threads or a stale process row.
-        supervisor = _make_supervisor(queues, threads) if embed_workers else None
-        try:
-            if supervisor is not None:
-                supervisor.start()
-            yield
-        finally:
-            if supervisor is not None:
-                supervisor.stop()
-
-    return _lifespan
+warnings.warn(
+    "firm.contrib.fastapi has moved to firm.queue.contrib.fastapi; the old path is removed in 2.0.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
-def _make_supervisor(queues: tuple[str, ...], threads: int) -> Any:
-    from firm.queue.supervisor import (
-        DispatcherConfig,
-        SupervisorConfig,
-        ThreadSupervisor,
-        WorkerConfig,
-    )
+def __getattr__(name: str) -> Any:
+    # Resolved per access, not bound once at import: a module reload rebuilds the target, and a
+    # snapshot taken here would then be a different object from the one the new path hands out.
+    if name == "lifespan":
+        from firm.queue.contrib import fastapi as _new
 
-    return ThreadSupervisor(
-        current_runtime(),
-        SupervisorConfig(
-            workers=[WorkerConfig(queues=queues, threads=threads)],
-            dispatchers=[DispatcherConfig()],
-        ),
-    )
+        return _new.lifespan
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted([*globals(), "lifespan"])
+
+
+__all__ = ["lifespan"]

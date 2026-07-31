@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm.cache.queries`: the read-query layer the dashboard used to keep to itself, now a supported
+  surface for your own dashboards, exporters, and health checks — `cache_stats` and `cache_recent`,
+  `Connection` in / dicts out. Keys come back as raw `bytes` (a cache key is arbitrary bytes), so
+  decoding for display is the caller's decision. A negative `limit`/`offset` raises `ValueError`.
+
+## [1.1.0] - 2026-07-28
+
+### Added
+
+- `MsgpackCoder`: the value coder the `firm-cache[msgpack]` extra was already advertising, now
+  shipped. Same value shapes as the JSON default in a compact binary form, and just as safe to
+  decode (no code execution on load). `from firm.cache import MsgpackCoder`.
+  Payloads carry a one-byte `0xc1` tag so that rows written by another coder read as misses
+  instead of being misdecoded — without it, a JSON-written int `1` (the byte `b"1"`) is a valid
+  msgpack fixint and would read back as `49`. Readers outside firm must strip that byte.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

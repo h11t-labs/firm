@@ -16,7 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=1.0.0",
+    "firm-core~=1.0",
     "click>=8.1",
 ]
 
@@ -35,7 +35,7 @@ Issues = "https://github.com/h11t-labs/firm/issues"
 Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-channel/CHANGELOG.md"
 
 [build-system]
-requires = ["uv_build>=0.11.29,<0.12"]
+requires = ["uv_build>=0.12.0,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

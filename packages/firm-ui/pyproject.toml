@@ -1,6 +1,6 @@
 [project]
 name = "firm-ui"
-version = "1.0.0"
+version = "1.0.1"
 description = "Optional web dashboard for firm — watch queues, cache, channels, and the audit log. Standard-library server; Jinja2 for templates."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,14 +16,19 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=1.0.0",
-    "firm-queue~=1.0.0",
-    "firm-cache~=1.0.0",
-    "firm-channel~=1.0.0",
-    "firm-audit~=1.0.0",
+    "firm-core~=1.0",
+    "firm-queue~=1.0",
+    "firm-cache~=1.0",
+    "firm-channel~=1.0",
+    "firm-audit~=1.0",
     "jinja2>=3.1.6",
     "jinjax>=0.65",
 ]
+
+[project.optional-dependencies]
+django = ["django>=4.2"]               # firm.ui.contrib.django mount
+flask = ["flask>=3.0"]                 # firm.ui.contrib.flask mount
+fastapi = ["fastapi>=0.110"]           # firm.ui.contrib.fastapi mount
 
 [project.scripts]
 firm-ui = "firm.ui.cli:main"
@@ -36,9 +41,10 @@ Issues = "https://github.com/h11t-labs/firm/issues"
 Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-ui/CHANGELOG.md"
 
 [build-system]
-requires = ["uv_build>=0.11.29,<0.12"]
+requires = ["uv_build>=0.12.0,<0.13"]
 build-backend = "uv_build"
 
+# firm.ui.contrib (the framework mounts) is a sub-package of firm.ui, so it ships with it.
 [tool.uv.build-backend]
 source-include = ["CHANGELOG.md"]
 module-name = "firm.ui"

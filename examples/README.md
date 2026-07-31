@@ -9,10 +9,16 @@ Runnable scripts. Each creates a local SQLite database (`firm-*.db`) for the dem
 | [embedded_worker.py](embedded_worker.py) | running the queue *inside* your app process with `ThreadSupervisor` | `uv run python examples/embedded_worker.py` |
 | [audit_logging.py](audit_logging.py) | same-transaction audit events, a queue job's lifecycle, and `history()` querying | `uv run python examples/audit_logging.py` |
 | [fastapi_app.py](fastapi_app.py) | a FastAPI app (lifespan + enqueue + read-through cache) | `uv run uvicorn examples.fastapi_app:app` |
-| [flask_app.py](flask_app.py) | a Flask app (`Firm` extension + enqueue + cache) | `uv run flask --app examples.flask_app run` |
+| [flask_app.py](flask_app.py) | a Flask app (`FirmQueue` extension + enqueue + cache) | `uv run flask --app examples.flask_app run` |
 | [secured_dashboard.py](secured_dashboard.py) | the firm-ui dashboard behind Basic auth + a custom Authenticator | `uv run python examples/secured_dashboard.py` |
+| [mounted_dashboard_flask.py](mounted_dashboard_flask.py) | the dashboard mounted in a Flask app, behind its session check | `uv run flask --app examples.mounted_dashboard_flask run` |
+| [mounted_dashboard_fastapi.py](mounted_dashboard_fastapi.py) | the dashboard mounted in a FastAPI app, behind a dependency | `uv run uvicorn examples.mounted_dashboard_fastapi:app` |
+| [mounted_dashboard_django.py](mounted_dashboard_django.py) | the dashboard mounted in a Django project, behind a view decorator | `uv run python examples/mounted_dashboard_django.py` |
 
-Install what each needs, e.g. `pip install "firm-queue[fastapi]"` or `pip install "firm-queue[flask]"`.
+Install what each needs, e.g. `pip install "firm-queue[fastapi]"` or `pip install "firm-queue[flask]"`;
+the three mounted-dashboard demos need `firm-ui[flask]` / `firm-ui[fastapi]` / `firm-ui[django]`.
+The last three point at the database from `FIRM_DATABASE_URL` (default `sqlite:///firm-quickstart.db`),
+so run `quickstart.py` first to have something to look at.
 These demos create the schema directly for convenience; production uses the bundled Alembic
 migrations (see [Database backends](../docs/database-backends.md)).
 

@@ -104,10 +104,29 @@ task = RecurringTask(key="nightly", schedule="0 3 * * *", job=my_job, args=(), k
 Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ```
 
+Read queries (for custom dashboards) — each takes a live SQLAlchemy `Connection` and returns
+plain dicts; this is what the `firm-ui` dashboard is built on:
+
+```python
+from firm.queue import queries
+
+queries.STATES                                     # the valid `state` values, in display order
+queries.state_counts(conn, queue=None)             # -> dict[str, int]  (per state, plus total)
+queries.queue_rows(conn, now)                      # -> list[dict]  (name, size, latency, paused)
+queries.queue_names(conn)                          # -> list[str]  (queues with ready jobs)
+queries.queue_size(conn, queue)                    # -> int
+queries.queue_latency(conn, queue, now)            # -> float  (seconds, 0.0 if empty)
+queries.jobs_by_state(conn, state, limit=50, offset=0, queue=None)   # -> list[dict]
+queries.job_detail(conn, job_id)                   # -> dict | None
+queries.processes(conn, now, alive_threshold=300.0)  # -> list[dict]  (+ age, alive)
+queries.recurring(conn)                            # -> list[dict]
+# a negative limit/offset, or an unknown state, raises ValueError.
+```
+
 ## firm.cache
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 # database_url is positional; everything after it is keyword-only (defaults shown):
 cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
@@ -126,8 +145,20 @@ cache.increment(key, by=1)          # -> int
 cache.decrement(key, by=1)          # -> int
 cache.clear()
 cache.close()                       # or:  with Cache(...) as cache: ...
-# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
+# keys are str|bytes; values go through the coder (JSONCoder by default; MsgpackCoder for
+# compact binary rows, PickleCoder for arbitrary Python objects — see cache/encryption-and-coders).
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
+```
+
+Read queries (for custom dashboards), `Connection` in / dicts out:
+
+```python
+from firm.cache import queries
+
+queries.cache_stats(conn)                        # -> {"entries": int, "estimated_size": int}
+queries.cache_recent(conn, limit=50, offset=0)   # -> list[dict]  (id, key, byte_size, created_at)
+# `key` is raw bytes (a cache key is arbitrary bytes — decode it yourself for display);
+# a negative limit/offset raises ValueError.
 ```
 
 ## firm.channel
@@ -144,6 +175,18 @@ channel.subscribe(name, callback)   # callback(payload: bytes); only future mess
 channel.unsubscribe(name, callback)
 channel.trim()                      # -> int
 channel.close()                     # or:  with Channel(...) as channel: ...
+```
+
+Read queries (for custom dashboards), `Connection` in / dicts out:
+
+```python
+from firm.channel import queries
+
+queries.channel_stats(conn)                       # -> {"messages": int, "channels": int}
+queries.channel_top(conn, limit=25, offset=0)     # -> list[dict]  (channel, count, last)
+queries.channel_recent(conn, limit=50, offset=0)  # -> list[dict]  (id, channel, payload, created_at)
+# `channel` and `payload` are raw bytes (decode them yourself for display);
+# a negative limit/offset raises ValueError.
 ```
 
 ## firm.audit
@@ -180,19 +223,72 @@ record(conn, action, subject=None, actor=None, data=None, changes=None,
 # data/changes/context: dicts stored as JSON text (not native JSON/JSONB).
 ```
 
-## firm.contrib (optional — `[flask]` / `[fastapi]` extras)
+Read queries (for custom dashboards), `Connection` in / dicts out — paginated search where
+`history()` is a plain filtered read, plus the tamper-evidence status:
+
+```python
+from firm.audit import queries
+
+queries.audit_stats(conn)            # -> {"events": int, "actions": int, "last_event_at": dt|None}
+queries.audit_count(conn, action=None, subject=None, subject_type=None, subject_id=None,
+                    actor=None, actor_type=None, actor_id=None, correlation_id=None)   # -> int
+queries.audit_search(conn, **same_filters, sort="created_at", dir="desc",
+                     limit=25, offset=0)   # -> list[dict]  (the history() shape + row_mac)
+queries.audit_detail(conn, event_id)       # -> dict | None
+queries.SORT_COLUMNS, queries.DEFAULT_SORT # the sortable columns and the default
+# filters behave exactly as in history() (a bare string filters by type only, and passing both
+# forms for one field raises ValueError); an unknown sort/dir falls back to the default, and a
+# negative limit/offset raises ValueError.
+
+# tamper-evidence (only meaningful when a key is configured; see audit/tamper-evidence):
+queries.verify_status_row(conn)                       # -> dict | None  (the verifier's status row)
+queries.integrity_config(conn, key_configured=True)   # -> IntegrityConfig
+queries.integrity_state(status, config, now=None,
+                        verify_max_age=..., anchor_max_age=...)   # -> IntegrityState (pure)
+queries.row_integrity_context(conn)   # -> dict  (the per-row signals, gathered once)
+queries.row_status(row, ctx)          # -> "sealed"|"unsealed"|"unprotected"|"tampered"|... | None
+# IntegrityState carries state, tone (ok/warn/danger/neutral), escalate, and cause tokens.
+```
+
+## firm.queue.contrib (optional — `[flask]` / `[fastapi]` extras)
 
 ```python
 # FastAPI: app = FastAPI(lifespan=lifespan(database_url=..., embed_workers=False,
 #                                          queues=("*",), threads=3))
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
-# Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
-#   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
-from firm.contrib.flask import Firm
+# Flask: FirmQueue(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
+#   reads app.config/env FIRM_QUEUE_DATABASE_URL, then FIRM_DATABASE_URL;
+#   registers `flask firm-queue worker`
+from firm.queue.contrib.flask import FirmQueue
 
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
+```
+
+## firm.ui (optional — the `firm-ui` package)
+
+```python
+from firm.ui import BasicAuth, build_dashboard, serve, static_dir
+dash = build_dashboard(database_url=None, queue_url=None, cache_url=None,
+                       channel_url=None, audit_url=None)   # -> Dashboard (close() when done)
+serve(dash, host="127.0.0.1", port=8787, authenticator=None, channel_trim_retention=None)
+
+# the dashboard without a transport: handle(UIRequest) -> UIResponse
+from firm.ui import DashboardApp, Headers, UIRequest, UIResponse
+app = DashboardApp(dash, authenticator=None, channel_trim_retention=None, static_url=None)
+app.handle(UIRequest("GET", "/jobs", query="state=failed", headers=Headers(...),
+                     body=b"", peer="", prefix="/firm", host="app.example"))
+static_dir()   # -> Path  (the stylesheet's directory, to serve it from your own pipeline)
+```
+
+Mounts (each behind its own extra — `[django]` / `[flask]` / `[fastapi]`). Every one needs either
+`authenticator=` or `host_auth=True`; both unset raises `ValueError`:
+
+```python
+from firm.ui.contrib.django import dashboard_urls, dashboard_view   # decorator=…, host_auth=…
+from firm.ui.contrib.flask import blueprint                          # -> Blueprint
+from firm.ui.contrib.fastapi import router                           # -> APIRouter
 ```
 
 ## Command-line tools
