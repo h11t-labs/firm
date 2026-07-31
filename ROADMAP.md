@@ -28,9 +28,10 @@ filter it out on read — no schema change, no migration.
 
 ## 2. Per-exception retry and discard
 
-`retry_on(TimeoutError, attempts=5)` / `discard_on(ValueError)`, like Active Job. Retries are
-uniform today, which forces a single backoff policy onto every way a job can fail. The
-most-requested parity gap.
+`retry_on(TimeoutError, attempts=5)` / `discard_on(ValueError)`, like Active Job. A job's retry
+policy is uniform today — one `attempts` count and one backoff for every way it can fail — so a
+transient timeout and a permanent `ValueError` are retried identically, and giving up early on the
+second means catching it inside the job.
 
 `firm-queue`: `job.py`, `results.py`.
 

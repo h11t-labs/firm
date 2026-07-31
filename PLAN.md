@@ -226,8 +226,8 @@ acquire-after-skip-lock failing and dropping the freed slot).
 **Fix:** decide with a live test, not by reading: under 2.6's harness, hammer
 acquire/release/promote on one key from N sessions on PG and MySQL and assert no lost slots and
 no stranded blocked rows beyond the maintenance interval. If stranding reproduces, serialize
-per-key with `SELECT ... FOR UPDATE` on the semaphore row inside `begin_claim_tx` (IMPROVEMENTS
-§1 sketch) — measure before/after.
+per-key with `SELECT ... FOR UPDATE` on the semaphore row inside `begin_claim_tx` — measure
+before/after.
 
 ### 2.4 MySQL/MariaDB `SKIP LOCKED` has no version floor — LOW
 **Files:** `packages/firm-core/src/firm/_core/database.py` (`create_engine_for`),
@@ -406,7 +406,7 @@ what makes 2.6's stress tests actually run). Use `astral-sh/setup-uv`; cache by 
 
 ## Out of scope (deliberately)
 
-`IMPROVEMENTS.md`'s feature roadmap (LISTEN/NOTIFY wake-ups, bulk enqueue, per-exception
+Feature work (LISTEN/NOTIFY wake-ups, bulk enqueue, per-exception
 retry_on/discard_on, job middleware, fugit schedules, unique jobs, continuations, cache
 sharding/compression, metrics/tracing, PyPI publish) — those are features, not defects. If any
 are wanted, plan them separately after this list is green.
