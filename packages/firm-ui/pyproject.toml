@@ -28,7 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 django = ["django>=4.2"]               # firm.ui.contrib.django mount
 flask = ["flask>=3.0"]                 # firm.ui.contrib.flask mount
-fastapi = ["fastapi>=0.110"]           # firm.ui.contrib.fastapi mount
+fastapi = ["fastapi>=0.141.1"]           # firm.ui.contrib.fastapi mount
 
 [project.scripts]
 firm-ui = "firm.ui.cli:main"
