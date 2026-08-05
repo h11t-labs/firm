@@ -29,7 +29,7 @@ dev = [
     "zensical==0.0.51",
     "croniter>=6.2.4",
     "click>=8.1",
-    "cryptography>=42",
+    "cryptography>=50.0.0",
     "msgpack>=1.0",
     "psycopg[binary]>=3.3.4",
     "pymysql>=1.1",
