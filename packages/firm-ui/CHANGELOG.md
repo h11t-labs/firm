@@ -24,6 +24,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Changed
 
+- The `fastapi` extra now requires `fastapi>=0.141.1`, keeping the dashboard adapter on the
+  current supported FastAPI line.
+
 - Request framing is now unambiguous or refused: a `Content-Length` that is not a plain number
   (including two conflicting header lines), a request framed by both `Content-Length` and
   `Transfer-Encoding`, and — on the standalone server, which frames by `Content-Length` alone — any
