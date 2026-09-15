@@ -40,7 +40,7 @@ dev = [
     "fastapi>=0.141.1",
     # Only here as the transport behind starlette's TestClient (we never import it); starlette
     # 1.3 deprecated the httpx 0.x line in favour of httpx2.
-    "httpx2>=2.10.0",
+    "httpx2>=2.12.0",
     "pre-commit>=4.6.2",
 ]
 
