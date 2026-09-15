@@ -19,6 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Changed
 
+- The `fastapi` extra now requires `fastapi>=0.141.1`, keeping the integration on the current
+  supported FastAPI line.
+
 - `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future
   `firm-core` minor. Ships with the next release of this package. See
   `docs/testing-and-contributing.md` § Cross-package pins.

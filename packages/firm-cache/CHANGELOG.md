@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Changed
+
+- The `encryption` extra now requires `cryptography>=50.0.0`, incorporating the latest
+  cryptography fixes and dropping older cryptography releases from the supported install set.
+
 ### Added
 
 - `firm.cache.queries`: the read-query layer the dashboard used to keep to itself, now a supported
