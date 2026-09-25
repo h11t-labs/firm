@@ -9,7 +9,7 @@
 <div class="actions">
 <PageSize current={{ per_page }} options={{ pagesize }} />
 {%- if state == "failed" and jobs %}
-<form class="inline" method="post" action="/failed/retry-all"{{ confirm("Retry all failed jobs?") }}><button>{{ icons.retry }}Retry all</button></form>
+<form class="inline" method="post" action="{{ urls.prefix }}/failed/retry-all"{{ confirm("Retry all failed jobs?") }}><button>{{ icons.retry }}Retry all</button></form>
 {%- endif %}
 </div>
 </div>
@@ -17,13 +17,13 @@
 <div class="tw"><table><tr><th>Job</th><th>Class</th><th>Queue</th><th>Priority</th><th>Attempts</th><th>When</th><th></th></tr>
 {% for j in jobs %}
 {% set attempts = j.attempts or 0 %}
-<tr><td><a href="/job/{{ j.id }}{% if queue %}?queue={{ queue | urlquote }}{% endif %}">#{{ j.id }}</a></td>
+<tr><td><a href="{{ urls.prefix }}/job/{{ j.id }}{% if queue %}?queue={{ queue | urlquote }}{% endif %}">#{{ j.id }}</a></td>
 <td class="mono">{{ j.class_name }}</td>
 <td><a class="pill" href="{{ jobs_href(state, j.queue_name) }}">{{ j.queue_name }}</a></td>
 <td class="secondary">{{ j.priority }}</td>
 <td>{% if attempts > 1 %}<span class="text-warn">{{ attempts }}</span>{% else %}{{ attempts }}{% endif %}</td>
 <td class="secondary"><When value={{ j.ts }} /></td>
-<td class="right">{% if state == "failed" %}<form class="inline" method="post" action="/job/{{ j.id }}/retry"><button>{{ icons.retry }}Retry</button></form> <form class="inline" method="post" action="/job/{{ j.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>{% endif %}</td></tr>
+<td class="right">{% if state == "failed" %}<form class="inline" method="post" action="{{ urls.prefix }}/job/{{ j.id }}/retry"><button>{{ icons.retry }}Retry</button></form> <form class="inline" method="post" action="{{ urls.prefix }}/job/{{ j.id }}/discard"{{ confirm("Discard this failed job? This cannot be undone.") }}><button class="danger">{{ icons.trash }}Discard</button></form>{% endif %}</td></tr>
 {% endfor %}
 </table></div>
 <Pagination nav={{ pagination }} />
