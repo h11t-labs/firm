@@ -532,9 +532,15 @@ def test_attack_matrix(
         built.audit.close()
 
 
-def test_orphaned_floor_watermark_marks_present_pruned_region_tampered(
+def test_orphaned_floor_watermark_is_an_interrupted_prune_not_tampering(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An anchor FLOOR line the database never committed — a crash or rollback between
+    retention's anchor append and its DB commit; only constructible with the trusted seal
+    key — leaves the rows *and their covering seals* fully present. That is an interrupted
+    prune: verify warns (it used to wedge into a permanent false TAMPERED) and retention
+    resumes the prune. A floor over a region whose seals are gone still refuses/verifies as
+    tampered (see test_restore_below_committed_floor_still_tampered in test_retention.py)."""
     built = _build_log(tmp_path, monkeypatch, Lifecycle("sealed", True, "single"))
     try:
         first_seal = _range_seals(built.audit)[0]
@@ -555,9 +561,14 @@ def test_orphaned_floor_watermark_marks_present_pruned_region_tampered(
             at=retired_at,
         )
 
-        assert built.audit.verify(full=True).outcome == "tampered"
-        assert built.audit.retention.run_once() == 0
-        assert built.audit.retention.last_refused_tampered == 1
+        report = built.audit.verify(full=True)
+        assert report.outcome == "warning"
+        assert any("interrupted" in finding.message for finding in report.findings)
+        # Retention resumes: every sealed-and-expired range prunes (both target seals, 4 rows),
+        # nothing is laundered past verification, and no refusal fires.
+        assert built.audit.retention.run_once() == 4
+        assert built.audit.retention.last_refused_tampered == 0
+        assert built.audit.verify(full=True).outcome == "ok"
     finally:
         built.audit.close()
 

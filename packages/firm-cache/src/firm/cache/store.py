@@ -269,6 +269,8 @@ class Cache:
                     current = int(decoded)
             new_value = current + by
             write_entry(conn, kb, self.coder.dumps(new_value), self.encrypted)
+        if self.auto_expire:
+            self.expiry.maybe_trigger(1)
         return new_value
 
     def decrement(self, key: str | bytes, by: int = 1) -> int:
