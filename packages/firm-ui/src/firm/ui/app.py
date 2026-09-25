@@ -299,13 +299,15 @@ class _Handler:
     def _notice(self) -> tuple[str | None, int | None]:
         """The post-action notice a page load carries (``?notice=<token>[&n=<count>]``), if any.
         The token passes through raw — the render layer only knows a fixed set and renders
-        nothing for anything else; the count becomes a non-negative int or is dropped."""
+        nothing for anything else. The count must be plain ASCII digits of a size a row count can
+        have, or it is dropped: ``int()`` alone would take ``1_000``, non-ASCII digits, and a
+        4300-digit number that no layout survives."""
         params = self.request.params
         notice = params.get("notice", [None])[0]
         if notice is None:
             return None, None
-        count = _to_int(params.get("n", [""])[0], -1)
-        return notice, (count if count >= 0 else None)
+        raw = params.get("n", [""])[0]
+        return notice, (int(raw) if re.fullmatch(r"[0-9]{1,18}", raw) else None)
 
     def _notice_redirect(self, path: str, notice: str, count: int | None = None) -> UIResponse:
         """Redirect after an action to ``path`` (a fixed route, never from the request), carrying

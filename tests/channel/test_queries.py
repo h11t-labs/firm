@@ -49,7 +49,7 @@ def test_channel_stats_top_and_recent(channel: Channel) -> None:
 def test_channel_count_matches_the_busiest_channels_grouping(channel: Channel) -> None:
     """``channels`` is the row total for paging ``channel_top``, which groups by the raw channel —
     so it counts raw channels too. Two channels whose ``channel_hash`` collides are two rows there;
-    counting hashes made them one, and the pager came up a row short."""
+    counting hashes would make them one, and a pager a row short."""
     with channel.engine.begin() as conn:
         for name in (b"alpha", b"beta"):
             conn.execute(

@@ -12,20 +12,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   supported surface for your own dashboards, exporters, and health checks — `channel_stats`,
   `channel_top`, and `channel_recent`, `Connection` in / dicts out. Channel names and payloads come
   back as raw `bytes`, so decoding for display is the caller's decision. A negative `limit`/`offset`
-  raises `ValueError`.
+  raises `ValueError`. `channel_stats()["channels"]` counts distinct channel names — the rows
+  `channel_top` groups by — so it can serve as that table's pager total.
 
 ### Changed
 
 - `firm-core` pin widened from `~=1.0.0` to `~=1.0`, so this package no longer blocks a future
   `firm-core` minor. Ships with the next release of this package. See
   `docs/testing-and-contributing.md` § Cross-package pins.
-
-### Fixed
-
-- `channel_stats()["channels"]` counts distinct channel names instead of distinct `channel_hash`
-  values, so it always matches the rows `channel_top` groups by — the dashboard uses it as the
-  busiest-channels pager total. Two channels whose hashes collided used to count as one, and the
-  pager's total then fell short of the table.
 
 ## [1.0.0] - 2026-07-23
 

@@ -437,8 +437,8 @@ def _when(value: datetime | None) -> Markup:
 # A write action redirects back with ``?notice=<token>`` (plus ``&n=<count>`` for the bulk
 # actions), so the page it lands on can tell a refused or no-op action from a successful one — a
 # plain redirect made "retry refused" and "retried" look identical. The server always picks the
-# token from this fixed set and the count is an integer, so the rendered message never carries
-# request input. An unknown token renders nothing.
+# token from this fixed set and the count is an integer, so no request text reaches the page. An
+# unknown token renders nothing, and so does a count notice without a valid count.
 
 
 def _plural(n: int, singular: str, plural: str) -> str:
@@ -491,10 +491,11 @@ def _notice_view(notice: str | None, count: int | None, request_path: str) -> di
     if spec is None:
         return None
     tone, message = spec
-    n = max(count or 0, 0)
     if tone == "count":
-        tone = "ok" if n > 0 else "warn"
-    return {"tone": tone, "message": message(n), "dismiss": _strip_notice(request_path)}
+        if count is None or count < 0:
+            return None
+        tone = "ok" if count > 0 else "warn"
+    return {"tone": tone, "message": message(count or 0), "dismiss": _strip_notice(request_path)}
 
 
 # Context defaults for the layout chrome -- always present so `layout.html` never has to guard

@@ -25,8 +25,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   and trim land back on their page with a notice, so a refused or no-op action no longer looks
   like a success: a refused retry reads "Nothing to retry", the bulk actions report their count,
   and a count of 0 shows as a warning. The notice rides on the redirect
-  (`?notice=<token>[&n=<count>]`) and works on every transport and under a mount prefix; it only
-  ever renders one of a fixed set of messages, so nothing from the URL is reflected into the page.
+  (`?notice=<token>[&n=<count>]`) and works on every transport and under a mount prefix. The page
+  renders only a fixed message and, for the bulk actions, an integer count, so no text from the
+  URL reaches it.
 
 ### Changed
 
@@ -54,8 +55,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Fixed
 
-- A `/job/<id>` or `/audit/<id>` URL whose id runs past Python's int-string limit (more than 4300
-  digits) answered `500`; it is a `404` now, like any other id no row can have.
+- A route id past Python's int-string limit (more than 4300 digits) — on the job and audit pages
+  or the retry/discard actions — answered `500`; it is a `404` now, like any other id no row can
+  have.
+- The Channels tab's busiest-channels pager counted distinct channel hashes while the table lists
+  distinct channel names; it counts names now, so the pager total always matches the table.
 
 ## [1.0.1] - 2026-07-28
 

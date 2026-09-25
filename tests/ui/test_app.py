@@ -145,6 +145,29 @@ def test_mounted_notice_links_stay_within_the_mount(app: DashboardApp, seed) -> 
     assert 'content="5; url=/firm/jobs?state=failed"' in body
     assert 'name="return" value="/firm/jobs?state=failed"' in body
     assert "notice=retried" not in body
+    overview = _get(app, "/", query="notice=paused", prefix="/firm").body.decode()
+    assert "Queue paused." in overview
+    assert 'class="notice-x" href="/firm/"' in overview
+    assert 'content="5; url=/firm/"' in overview
+
+
+def test_dismissing_a_notice_keeps_the_page_filter(app: DashboardApp, seed) -> None:
+    # The notice-free URL is rebuilt from the parsed query, so a queue name that needs escaping
+    # has to survive the round trip — or dismissing the notice would change the filter.
+    seed.failed()
+    query = "state=failed&queue=a%26b+%C3%A9&notice=retried"
+    body = _get(app, "/jobs", query=query).body.decode()
+    assert 'class="notice-x" href="/jobs?state=failed&amp;queue=a%26b%20%C3%A9"' in body
+
+
+@pytest.mark.parametrize("n", ["", "abc", "-1", "1_000", "%D9%A3", "9" * 19])
+def test_count_notice_without_a_plain_count_renders_nothing(app: DashboardApp, n: str) -> None:
+    """A count notice renders only with a count the server could have sent: plain ASCII digits of
+    a row count's size. What ``int()`` alone would also take — ``1_000``, non-ASCII digits, a
+    number no layout survives — renders no bar, like an unknown token."""
+    query = "notice=cache-cleared" + (f"&n={n}" if n else "")
+    body = _get(app, "/cache", query=query).body.decode()
+    assert 'class="notice' not in body
 
 
 # -- preferences -----------------------------------------------------------------------------------
