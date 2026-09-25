@@ -8,7 +8,7 @@ conventions below. (For *using* the library, see [`llms.txt`](llms.txt); this fi
 
 **firm** — pure-Python ports of the Rails Solid stack: `firm.queue` (background jobs),
 `firm.cache` (caching), `firm.channel` (pub/sub), and `firm.audit` (append-only audit log,
-original to firm), plus an optional `firm.ui` dashboard and `firm.contrib` (Flask/FastAPI
+original to firm), plus an optional `firm.ui` dashboard and `firm.queue.contrib` (Flask/FastAPI
 glue). No Redis; runs on SQLite/PostgreSQL/MySQL via SQLAlchemy.
 
 ## Commands
@@ -47,15 +47,20 @@ module carries its own.
   `tagged_json` (the queue/audit JSON envelope), `alembic_env` (shared migrations runner),
   `schema_setup` (create_all + version-table stamping). **Core never imports a feature module.**
 - `packages/firm-ui/src/firm/ui/` — optional dashboard (`firm-ui`; depends on all four modules).
-  `packages/firm-queue/src/firm/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships **inside
-  firm-queue** (it only depends on queue). **Nothing in core imports `ui` or `contrib`.**
+  Transport-free core in `app.py` (`DashboardApp.handle(UIRequest) -> UIResponse`), with `server.py`
+  (stdlib) and `ui/contrib/` (Django/Flask/FastAPI mounts, behind extras) as its only transports.
+  `packages/firm-queue/src/firm/queue/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships
+  **inside firm-queue** (it only configures the queue). `packages/firm-queue/src/firm/contrib/`
+  is the deprecated pre-1.1 location, now only aliases, removed in 2.0. **Nothing in core imports
+  `ui` or `contrib`.**
 - `packages/firm/` — meta-package (no code; installs the four modules; `firm[ui]`/`firm[all]`).
 - `tests/<module>/`, `docs/`, `examples/`, `scripts/` stay at the repo root.
 
 ## Conventions
 
 - **Lineage:** name `solid_queue`/`solid_cache`/`solid_cable` ONLY in `README.md`,
-  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`, and the packages'
+  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`,
+  `docs/testing-and-contributing.md` (the upstream-parity discussion), and the packages'
   PyPI `keywords`/`description` metadata (discoverability). Elsewhere — code, comments,
   every other doc — use firm's own voice. All tables/indexes are `firm_*`.
 - **Independence:** queue/cache/channel never import each other; importing `firm.queue` pulls no

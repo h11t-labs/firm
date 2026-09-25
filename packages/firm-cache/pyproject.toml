@@ -1,6 +1,6 @@
 [project]
 name = "firm-cache"
-version = "1.0.0"
+version = "1.1.0"
 description = "Database-backed cache store (a pure-Python port of Rails' Solid Cache). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,12 +16,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=1.0.0",
+    "firm-core~=1.0",
     "click>=8.1",
 ]
 
 [project.optional-dependencies]
-encryption = ["cryptography>=42"]      # at-rest encryption (Fernet)
+encryption = ["cryptography>=50.0.0"]      # at-rest encryption (Fernet)
 msgpack = ["msgpack>=1.0"]             # msgpack value coder
 postgres = ["firm-core[postgres]"]     # PostgreSQL driver (via firm-core)
 mysql = ["firm-core[mysql]"]           # MySQL / MariaDB driver (via firm-core)
@@ -37,7 +37,7 @@ Issues = "https://github.com/h11t-labs/firm/issues"
 Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-cache/CHANGELOG.md"
 
 [build-system]
-requires = ["uv_build>=0.11.29,<0.12"]
+requires = ["uv_build>=0.12.0,<0.13"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]

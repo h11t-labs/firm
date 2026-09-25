@@ -171,18 +171,22 @@ cache.decrement("hits")            # -> 10
 cache.decrement("hits", by=4)      # -> 6
 ```
 
-### Coders: JSON vs default pickle
+### Coders: JSON (default), msgpack, pickle
 
-The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
+`JSONCoder` is the default: human-readable bytes, portable across languages, and safe to decode no matter who wrote the row. `MsgpackCoder` takes the same value shapes into a compact binary form (needs the `msgpack` extra). `PickleCoder` handles any Python object but executes code on load — opt in only when every writer to the cache table is trusted.
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
+# JSONCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
 cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
 cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
 
-# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
+# pip install "firm-cache[msgpack]" — smaller rows, and bytes round-trip as bytes
+cache = Cache(database_url="sqlite:///cache.db", coder=MsgpackCoder())
+
+# arbitrary Python objects, at the cost of code execution on load
 cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 ```
 
@@ -730,8 +734,8 @@ from sqlalchemy.orm import Session
 
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.fastapi import lifespan
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.fastapi import lifespan
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 DATABASE_URL = "postgresql://localhost/app"
 
@@ -803,22 +807,24 @@ firm-queue start --import app --mode fork
 
 ## Flask app (full) {#flask}
 
-A complete single-file Flask app: `Firm(app)` configures the queue from `app.config["FIRM_DATABASE_URL"]`, routes enqueue jobs, and a cached endpoint reuses computed results. Run workers out-of-process with `flask firm worker`; flip `embed_workers=True` only for local dev.
+A complete single-file Flask app: `FirmQueue(app)` configures the queue from `app.config["FIRM_DATABASE_URL"]`, routes enqueue jobs, and a cached endpoint reuses computed results. Run workers out-of-process with `flask firm-queue worker`; flip `embed_workers=True` only for local dev.
 
 ```python
 # app.py
 from flask import Flask, jsonify
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import FirmQueue
 
 app = Flask(__name__)
+# One shared URL for every module here; set FIRM_QUEUE_DATABASE_URL to point the queue elsewhere.
 app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
 
-# Reads app.config["FIRM_DATABASE_URL"] and calls bq.configure() for you.
-# embed_workers=False (default) -> run workers separately via `flask firm worker`.
+# Reads app.config["FIRM_QUEUE_DATABASE_URL"], then ["FIRM_DATABASE_URL"], and calls
+# bq.configure() for you.
+# embed_workers=False (default) -> run workers separately via `flask firm-queue worker`.
 # Set embed_workers=True to run an in-process ThreadSupervisor (dev / single process only).
-Firm(app)  # or: Firm(app, embed_workers=True, queues=("*",), threads=3)
+FirmQueue(app)  # or: FirmQueue(app, embed_workers=True, queues=("*",), threads=3)
 
 # A cache backed by the same database (its own tables; create_schema=True auto-creates them).
 cache = Cache(database_url=app.config["FIRM_DATABASE_URL"])
@@ -854,8 +860,8 @@ Run the web server and a worker process side by side:
 flask --app app run
 
 # Terminal 2 — a worker + dispatcher, running until Ctrl-C.
-# `firm` is the CLI group, `worker` the command (registered by Firm(app)).
-flask --app app firm worker --queues "*" --threads 3
+# `firm-queue` is the CLI group, `worker` the command (registered by FirmQueue(app)).
+flask --app app firm-queue worker --queues "*" --threads 3
 ```
 
 ---
