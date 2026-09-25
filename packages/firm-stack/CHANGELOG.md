@@ -6,6 +6,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-28
+
+### Changed
+
+- `firm-stack[cache]`, `[encryption]`, `[msgpack]` and `[all]` now require **`firm-cache~=1.1`**,
+  so they deliver the `MsgpackCoder` that `firm-stack[msgpack]` advertises. Raising the floor is
+  what makes `pip install -U firm-stack` actually move an installed `firm-cache` along: pip
+  upgrades a dependency only when the new release requires it.
+- Every other pin is widened from `~=1.0.0` to `~=1.0`. The old form (`==1.0.*`) made this package
+  and a module's next minor uninstallable together — a resolver conflict rather than a missed
+  upgrade. See `docs/testing-and-contributing.md` § Cross-package pins.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

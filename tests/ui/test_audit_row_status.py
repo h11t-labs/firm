@@ -1,19 +1,15 @@
-"""Specs for the per-row tamper-evidence status shown in the audit events table + detail page.
+"""Specs for the per-row tamper-evidence marks in the audit events table + detail page.
 
-Mirrors the split in :mod:`firm.ui.audit_queries` / :mod:`firm.ui.render`:
-
-* :func:`row_status` is pure over one row + a context dict, so its four states plus the
-  None-when-inactive case are asserted directly without a database;
-* :func:`row_integrity_context` is checked against a real (seeded) audit schema;
-* the table column / detail cell (and their conditional visibility) go through :mod:`firm.ui`.
+The status itself is derived by :func:`firm.audit.queries.row_status` (specced in
+``tests/audit/test_integrity_status.py``); this file covers how :mod:`firm.ui.render` shows it —
+the table column, the detail cell, and their conditional visibility.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from firm.ui import audit_queries, render
-from firm.ui.audit_queries import row_status
+from firm.ui import render
 
 NOW = datetime(2026, 7, 20, 12, 0, 0)
 
@@ -35,138 +31,6 @@ def _ctx(
         "tampered_ids": tampered or set(),
         "tampered_truncated": truncated,
     }
-
-
-# -- row_status: the four states + None-when-inactive -------------------------------------------
-
-
-def test_row_status_none_when_inactive() -> None:
-    # A plain audit log (no key, no seals, no verify) reports no status at all.
-    assert row_status({"id": 1, "row_mac": _MAC}, _ctx(active=False)) is None
-
-
-def test_row_status_sealed_within_seal_range() -> None:
-    assert row_status({"id": 3, "row_mac": _MAC}, _ctx(max_sealed=5)) == "sealed"
-
-
-def test_row_status_unsealed_past_the_newest_seal() -> None:
-    # Signed but beyond the newest sealed id — the grace-window tail.
-    assert row_status({"id": 9, "row_mac": _MAC}, _ctx(max_sealed=5)) == "unsealed"
-
-
-def test_row_status_unprotected_when_no_row_mac() -> None:
-    assert row_status({"id": 1, "row_mac": None}, _ctx(max_sealed=5)) == "unprotected"
-
-
-def test_row_status_tampered_dominates_a_sealed_row() -> None:
-    assert row_status({"id": 3, "row_mac": _MAC}, _ctx(max_sealed=5, tampered={3})) == "tampered"
-
-
-def test_row_status_degrades_to_unverified_when_findings_truncated() -> None:
-    # Bug #8. A tamper run flagged more rows than its affected list carries ids for (truncated). A
-    # sealed row NOT in the known tampered set could still be one of the un-listed tampered rows, so
-    # it must NOT read "Sealed & verified" — it degrades to the honest "unverified".
-    ctx = _ctx(max_sealed=5, tampered={2}, truncated=True)
-    assert row_status({"id": 4, "row_mac": _MAC}, ctx) == "unverified"  # sealed, but unvouched
-    # A row that IS in the known tampered set still reads tampered (priority unchanged).
-    assert row_status({"id": 2, "row_mac": _MAC}, ctx) == "tampered"
-    # Without truncation the same sealed row reads sealed & verified.
-    assert row_status({"id": 4, "row_mac": _MAC}, _ctx(max_sealed=5, tampered={2})) == "sealed"
-
-
-def test_row_status_tampered_dominates_an_unprotected_row() -> None:
-    # Priority is tampered first, before the row_mac-null check.
-    assert row_status({"id": 3, "row_mac": None}, _ctx(max_sealed=5, tampered={3})) == "tampered"
-
-
-# -- row_integrity_context: gathered once per page ---------------------------------------------
-
-
-def test_context_inactive_without_seals_or_verify(runtime) -> None:
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["active"] is False
-    assert ctx["max_sealed_to_id"] == 0
-    assert ctx["tampered_ids"] == set()
-
-
-def test_context_active_from_a_seal(runtime, seed) -> None:
-    seed.seal(to_id=7)
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["active"] is True
-    assert ctx["max_sealed_to_id"] == 7
-
-
-def test_context_activation_is_active_but_not_sealed_coverage(runtime, seed) -> None:
-    seed.seal(kind="activation", from_id=-1, to_id=7, row_count=None, rows_mac=None)
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["active"] is True
-    assert ctx["max_sealed_to_id"] == 0
-
-
-def test_context_active_from_a_verify_row_alone(runtime, seed) -> None:
-    seed.verify_status(outcome="ok")
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["active"] is True
-
-
-def test_context_collects_tampered_row_ids(runtime, seed) -> None:
-    affected = (
-        '[{"kind": "row", "label": "row 42", "id": 42, "verdict": "tampered"},'
-        '{"kind": "seal", "label": "seal 3", "verdict": "tampered"},'
-        '{"kind": "row", "label": "row 7", "id": 7, "verdict": "ok"}]'
-    )
-    seed.verify_status(outcome="tampered", tampered_count=1, affected_identifiers=affected)
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["tampered_ids"] == {42}  # only the tampered finding with an integer id
-
-
-def test_context_tampered_ids_survives_malformed_json(runtime, seed) -> None:
-    seed.verify_status(outcome="tampered", tampered_count=1, affected_identifiers="{not json")
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["tampered_ids"] == set()
-
-
-def test_context_flags_truncated_findings(runtime, seed) -> None:
-    # Bug #8. A tampered run whose affected list carries the "more" overflow marker sets
-    # tampered_truncated, so the table stops vouching for un-listed sealed rows.
-    affected = (
-        '[{"kind": "row", "label": "row 1", "id": 1, "verdict": "tampered"},'
-        '{"kind": "more", "label": "+40 more finding(s)", "verdict": "tampered"}]'
-    )
-    seed.verify_status(outcome="tampered", tampered_count=41, affected_identifiers=affected)
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["tampered_truncated"] is True
-    assert ctx["tampered_ids"] == {1}
-
-
-def test_context_not_truncated_without_the_more_marker(runtime, seed) -> None:
-    affected = '[{"kind": "row", "label": "row 1", "id": 1, "verdict": "tampered"}]'
-    seed.verify_status(outcome="tampered", tampered_count=1, affected_identifiers=affected)
-    with runtime.engine.connect() as conn:
-        ctx = audit_queries.row_integrity_context(conn)
-    assert ctx["tampered_truncated"] is False
-
-
-def test_tampered_row_ids_survives_deeply_nested_json() -> None:
-    # Bug #3. A DB-write attacker could set affected_identifiers to a deeply-nested JSON blob;
-    # json.loads raises RecursionError (not ValueError/TypeError), which used to 500 the audit page
-    # on every render (parsed twice per request). It must degrade to an empty set instead.
-    deep = "[" * 5000 + "]" * 5000
-    assert audit_queries._tampered_row_ids(deep) == set()
-
-
-def test_tampered_row_ids_rejects_oversized_json() -> None:
-    # An oversized blob is rejected before json.loads — the verifier only ever writes a handful of
-    # small findings, so anything past the cap is corrupt or hostile.
-    huge = '[{"kind":"row","id":1,"verdict":"tampered"}]' + " " * (audit_queries._MAX_AFFECTED_JSON)
-    assert audit_queries._tampered_row_ids(huge) == set()
 
 
 # -- the events table column -------------------------------------------------------------------

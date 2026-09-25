@@ -6,7 +6,7 @@
 <div class="cards">
 {% for card in cards %}<Card label={{ card.label }} number={{ card.number }} state={{ card.state }} href={{ card.href }} failed={{ card.failed }} />{% endfor %}
 </div>
-<form method="get" action="/audit" class="filters">
+<form method="get" action="{{ urls.prefix }}/audit" class="filters">
 {{ field("action", "Action") }}
 {{ field("subject", "Subject (Type:id)") }}
 {{ field("actor", "Actor (Type:id)") }}
@@ -14,7 +14,7 @@
 <input type="hidden" name="sort" value="{{ sort }}">
 <input type="hidden" name="dir" value="{{ dir }}">
 <button type="submit" class="primary">{{ icons.filter }}Filter</button>
-<a class="btn" href="/audit">{{ icons.x }}Reset</a>
+<a class="btn" href="{{ urls.prefix }}/audit">{{ icons.x }}Reset</a>
 </form>
 <Section title="Events"><PageSize current={{ per_page }} options={{ pagesize }} /></Section>
 {% if rows %}
@@ -24,7 +24,7 @@
 </tr>
 {% for r in rows %}
 {% set payload = r.data | json_preview %}
-<tr>{% if integrity_active %}<td class="row-status-cell">{{ r.status_icon }}</td>{% endif %}<td class="mono"><a href="/audit/{{ r.id }}">#{{ r.id }}</a></td>
+<tr>{% if integrity_active %}<td class="row-status-cell">{{ r.status_icon }}</td>{% endif %}<td class="mono"><a href="{{ urls.prefix }}/audit/{{ r.id }}">#{{ r.id }}</a></td>
 <td class="secondary"><When value={{ r.created_at }} /></td>
 <td class="mono"><a href="{{ audit_href({'action': r.action}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.action }}</a></td>
 <td class="mono">{% if r.subject_display %}<a href="{{ audit_href({'subject': r.subject_filter}, sort=sort, dir=dir, per_page=per_page) }}">{{ r.subject_display }}</a>{% else %}<Dash />{% endif %}</td>

@@ -32,8 +32,9 @@ atomic upsert.
   `decrement`, and `clear` — see [Operations](operations.md).
 - **Eviction** by age (`max_age`), total size (`max_size`), or entry count (`max_entries`), FIFO
   (oldest first) — see [Eviction & expiry](eviction.md).
-- **Pluggable serialization** (pickle / JSON / your own) and optional **at-rest encryption** —
-  see [Encryption & coders](encryption-and-coders.md).
+- **Values of any shape** — JSON by default, raw `bytes` and smaller rows via the msgpack coder,
+  arbitrary Python objects via the opt-in pickle coder, or bring your own — plus optional **at-rest
+  encryption**. See [Encryption & coders](encryption-and-coders.md).
 
 ```python
 from firm.cache import Cache
