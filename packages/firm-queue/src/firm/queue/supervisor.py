@@ -5,9 +5,13 @@ Two modes:
 * :class:`ThreadSupervisor` runs every component as a thread in one process. Simple, portable,
   great for development, tests, and embedding.
 * :class:`ForkSupervisor` forks a child process per component (the production default). The
-  supervisor reaps and restarts dead children, prunes processes with stale heartbeats and
-  recovers their in-flight jobs, and shuts down on signals: TERM/INT drain gracefully within
-  ``shutdown_timeout``; QUIT exits immediately.
+  supervisor reaps and restarts dead children, and shuts down on signals: TERM/INT drain
+  gracefully within ``shutdown_timeout``; QUIT exits immediately.
+
+Both supervisors prune processes with stale heartbeats and recover their in-flight jobs — at
+startup and periodically (fork mode inline in its supervise loop, thread mode via a
+:class:`~firm.queue.recovery.ReaperLoop`) — so a hard-killed process's claims are re-readied
+in every deployment shape.
 
 Forking happens **before** any threads are started, and each child calls ``runtime.reset()``
 first so it never reuses a SQLite handle inherited from the parent.
@@ -16,6 +20,7 @@ first so it never reuses a SQLite handle inherited from the parent.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import signal
 import threading
@@ -26,10 +31,10 @@ from types import FrameType
 from .._core import process as process_registry
 from .._core.config import Runtime
 from .._core.poller import InterruptiblePoller
-from .._core.process import HeartbeatPoller, ProcessInfo
+from .._core.process import HeartbeatPoller, ProcessExitError, ProcessInfo
 from .dispatcher import DispatcherLoop, MaintenanceLoop
 from .hooks import HOOKS
-from .recovery import recover_orphaned_claims
+from .recovery import ReaperLoop, reap_dead_processes, recover_orphaned_claims
 from .scheduler import RecurringTask, Scheduler, SchedulerLoop
 from .worker import Worker
 
@@ -125,17 +130,46 @@ def _build_loops(
 
 
 class ThreadSupervisor:
-    """Run all components as threads in the current process."""
+    """Run all components as threads in the current process.
+
+    If this process's registry row is pruned while it is still alive — its heartbeats stalled
+    past ``alive_threshold`` (a long database outage, a frozen process), so a reaper declared it
+    dead and re-readied its claims — the supervisor restarts its components under a fresh
+    registration rather than running on under the dead one, whose claims every other process's
+    recovery sweep would treat as orphaned. That is the thread-mode counterpart of fork mode,
+    where an evicted child exits and the supervisor forks a replacement.
+    """
 
     def __init__(self, runtime: Runtime, config: SupervisorConfig | None = None) -> None:
         self.runtime = runtime
         self.config = config or SupervisorConfig()
         self._loops: list[InterruptiblePoller] = []
         self.process_id: int | None = None
+        # Serializes start/stop against the post-eviction restart, which runs on its own thread.
+        # Reentrant, so a lifecycle hook that calls stop() cannot deadlock the thread firing it.
+        self._lock = threading.RLock()
+        self._running = False
+        # Identifies the current set of loops. Bumped by start(), stop() and every restart, and
+        # carried by each heartbeat's eviction callback and each retry: a restart requested for an
+        # earlier set (a stale heartbeat, a pending retry, a second request) does nothing.
+        self._generation = 0
 
     def start(self) -> None:
+        with self._lock:
+            self._running = True
+            self._generation += 1
+            generation = self._generation
+            process_id = self._register()
+            HOOKS.fire("supervisor_start")
+            if generation == self._generation:  # unless the hook stopped us
+                self._start_loops(process_id, generation)
+
+    def _register(self) -> int:
+        # Reap before the absent-row sweep: a hard-killed predecessor leaves a stale-heartbeat
+        # row that shields its claims from recover_orphaned_claims' absent-row filter.
+        reap_dead_processes(self.runtime, self.config.alive_threshold)
         recover_orphaned_claims(self.runtime)
-        self.process_id = process_registry.register(
+        process_id = process_registry.register(
             self.runtime.engine,
             ProcessInfo(
                 kind="Supervisor",
@@ -143,33 +177,99 @@ class ThreadSupervisor:
                 pid=os.getpid(),
             ),
         )
-        HOOKS.fire("supervisor_start")
+        self.process_id = process_id
+        return process_id
+
+    def _start_loops(self, process_id: int, generation: int) -> None:
         for child in self.config.child_configs():
             # Claims carry the supervisor's own (heartbeated) process row: if this process
             # dies, the row goes stale, gets pruned, and the claims are recovered. A NULL
             # process_id would make them invisible to recover_orphaned_claims forever.
-            loops = _build_loops(self.runtime, child, self.config.recurring, self.process_id)
+            loops = _build_loops(self.runtime, child, self.config.recurring, process_id)
             for loop in loops:
                 loop.start()
                 self._loops.append(loop)
             HOOKS.fire(f"{_kind_of(child)}_start")
+            if generation != self._generation:
+                return  # the hook stopped us: start nothing more
         heartbeat = HeartbeatPoller(
             self.runtime.engine,
-            self.process_id,
+            process_id,
             self.config.heartbeat_interval,
             on_error=HOOKS.fire_error,
+            on_evicted=functools.partial(self._on_evicted, generation, process_id),
         )
         heartbeat.start()
         self._loops.append(heartbeat)
+        # Fork mode reaps in _supervise; thread mode needs its own reaper or a hard-killed
+        # peer's (or predecessor's) claims are never recovered while we run.
+        reaper = ReaperLoop(
+            self.runtime,
+            self.config.heartbeat_interval,
+            self.config.alive_threshold,
+            on_error=HOOKS.fire_error,
+        )
+        reaper.start()
+        self._loops.append(reaper)
 
-    def stop(self) -> None:
+    def _stop_loops(self) -> None:
         for loop in reversed(self._loops):
             loop.stop(timeout=self.config.shutdown_timeout)
         self._loops.clear()
         if self.process_id is not None:
             process_registry.deregister(self.runtime.engine, self.process_id)
             self.process_id = None
+
+    def stop(self) -> None:
+        with self._lock:
+            self._running = False
+            self._generation += 1
+            self._stop_loops()
         HOOKS.fire("supervisor_stop")
+
+    def _on_evicted(self, generation: int, pruned: int) -> None:
+        # Runs on the heartbeat thread, which cannot stop (join) itself: hand off to another. The
+        # pruned row is already gone, and SQLite can hand its id to the next process to register,
+        # so forget it rather than ever deregistering it — if it is still ours (stop() and a
+        # restart only read process_id after joining this thread).
+        if self.process_id == pruned:
+            self.process_id = None
+        threading.Thread(
+            target=self._restart_after_eviction,
+            args=(generation, pruned),
+            name="supervisor-restart",
+            daemon=True,
+        ).start()
+
+    def _restart_after_eviction(self, generation: int, pruned: int) -> None:
+        if not self._running or generation != self._generation:
+            return  # stopping, or this heartbeat belonged to loops already replaced
+        # Reported from this thread rather than the heartbeat's, so an error hook may stop() us.
+        HOOKS.fire_error(
+            ProcessExitError(
+                f"supervisor process {pruned} was pruned as dead while still running;"
+                " restarting its components under a new registration"
+            )
+        )
+        self._restart(generation)
+
+    def _restart(self, generation: int) -> None:
+        with self._lock:
+            if not self._running or generation != self._generation:
+                return  # stopped, or restarted or started afresh since this was requested
+            self._generation += 1
+            generation = self._generation
+            try:
+                self._stop_loops()
+                self._start_loops(self._register(), generation)
+                return
+            except Exception as exc:
+                HOOKS.fire_error(exc)
+        # Could not come back up (database still unreachable?): never stay down silently, retry
+        # after a heartbeat interval. The next attempt first tears down anything half-started.
+        retry = threading.Timer(self.config.heartbeat_interval, self._restart, args=(generation,))
+        retry.daemon = True
+        retry.start()
 
     def __enter__(self) -> ThreadSupervisor:
         self.start()
@@ -251,6 +351,7 @@ class ForkSupervisor:
 
     def start(self) -> None:
         """Fork children and supervise until a shutdown signal; blocks the caller."""
+        reap_dead_processes(self.runtime, self.config.alive_threshold)
         recover_orphaned_claims(self.runtime)
         self.process_id = process_registry.register(
             self.runtime.engine,
@@ -295,9 +396,7 @@ class ForkSupervisor:
             self._reap_and_restart()
             now = time.monotonic()
             if now - last_prune >= self.config.heartbeat_interval:
-                dead = process_registry.prune_dead(self.runtime.engine, self.config.alive_threshold)
-                if dead:
-                    recover_orphaned_claims(self.runtime, dead)
+                reap_dead_processes(self.runtime, self.config.alive_threshold)
                 last_prune = now
             self._stop.wait(0.2)
 

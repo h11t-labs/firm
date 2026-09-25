@@ -79,6 +79,20 @@ reading it runs no code of ours. Grep for it rather than relying on warnings.
 
 ### Fixed
 
+- Crash recovery now works in every deployment shape, not just under `ForkSupervisor`. A
+  hard-killed process (SIGKILL, OOM) leaves its registry row behind with a stale heartbeat,
+  which shielded its in-flight claims from the absent-row recovery sweep — in thread mode
+  (`--mode thread`, or the embedded FastAPI/Flask adapters) and under standalone
+  `firm-queue work`/`drain`, those jobs sat in `firm_queue_claimed_executions` forever.
+  `ThreadSupervisor` and `firm-queue work` now prune stale-heartbeat processes and recover
+  their claims at startup and periodically (a new `ReaperLoop`); `firm-queue drain` prunes and
+  recovers at startup; both supervisors also reap at startup so a restart after a crash
+  recovers immediately instead of waiting out `alive_threshold`.
+- A `ThreadSupervisor` whose own registry row is pruned while it is still alive (its heartbeats
+  stalled past `alive_threshold`, e.g. through a long database outage) now restarts its
+  components under a fresh registration and reports the eviction through `on_thread_error`. It
+  used to keep claiming jobs under the pruned row, so any other process's startup recovery sweep
+  re-readied them while they were still running.
 - Recurring tasks now honor their job's concurrency controls. A scheduled job with
   `@job(concurrency={...})` is routed through the same semaphore acquire/block logic as a normal
   enqueue, stamping `jobs.concurrency_key` and landing in `blocked_executions` when the key is
