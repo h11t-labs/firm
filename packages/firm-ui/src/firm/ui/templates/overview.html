@@ -14,7 +14,7 @@
 <tr><td><a href="{{ jobs_href("ready", q.name) }}">{{ q.name }}</a>{% if q.paused %} <span class="pill warn">{{ icons.pause }}paused</span>{% endif %}</td>
 <td><div class="barcell"><Bar pct={{ q.bar_pct }} /><span class="secondary tnum val">{{ q.size | num }}</span></div></td>
 <td><Latency cls={{ q.latency_tag.cls }} text={{ q.latency_tag.text }} /></td>
-<td class="right"><form class="inline" method="post" action="/queue/{{ q.name | urlquote }}/{{ "resume" if q.paused else "pause" }}"><button>{{ icons.play if q.paused else icons.pause }}{{ "Resume" if q.paused else "Pause" }}</button></form></td></tr>
+<td class="right"><form class="inline" method="post" action="{{ urls.prefix }}/queue/{{ q.name | urlquote }}/{{ "resume" if q.paused else "pause" }}"><button>{{ icons.play if q.paused else icons.pause }}{{ "Resume" if q.paused else "Pause" }}</button></form></td></tr>
 {% endfor %}
 </table></div>
 {% else %}

@@ -10,9 +10,9 @@ cache.fetch("expensive", lambda: compute())
 
 from __future__ import annotations
 
-from .serialization import JSONCoder, PickleCoder
+from .serialization import JSONCoder, MsgpackCoder, PickleCoder
 from .store import Cache
 
 __version__ = "1.0.0"
 
-__all__ = ["Cache", "JSONCoder", "PickleCoder", "__version__"]
+__all__ = ["Cache", "JSONCoder", "MsgpackCoder", "PickleCoder", "__version__"]

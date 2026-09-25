@@ -81,6 +81,21 @@ def _post_form(url: str, fields: dict[str, str], cookie: str = "") -> tuple[int,
         return exc.code, dict(exc.headers.items())
 
 
+def test_chunked_request_is_refused(base_url) -> None:
+    """The stdlib handler frames a body by Content-Length alone, so a chunked body would be left in
+    the socket and read as the next request — the back half of a smuggling pair. Refuse it."""
+    import socket
+
+    host, port = base_url.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        sock.sendall(
+            b"POST /cache/clear HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nhello\r\n0\r\n\r\n"
+        )
+        sock.settimeout(5)
+        assert b"400" in sock.recv(1024).split(b"\r\n", 1)[0]
+
+
 def test_overview_renders_with_all_four_tabs(base_url, seed) -> None:
     seed.ready()
     seed.failed()
@@ -264,6 +279,19 @@ def test_channels_page_and_trim(base_url, seed) -> None:
     assert "ping" in body
     status, _ = _post(base_url + "/channels/trim")  # nothing old enough -> still 200
     assert status == 200
+
+
+def test_binary_columns_are_decoded_for_display(base_url, seed) -> None:
+    # The query layers hand cache keys and channel names/payloads over as bytes; the dashboard
+    # decodes them at the edge, so a page never shows a b'...' repr of plain UTF-8 text.
+    seed.cache_entry()  # key=b"user:1"
+    seed.channel_message()  # channel=b"room:1", payload=b"hello"
+    _, cache_body = _get(base_url + "/cache")
+    _, channel_body = _get(base_url + "/channels")
+    assert "user:1" in cache_body
+    assert "room:1" in channel_body and "hello" in channel_body
+    for body in (cache_body, channel_body):
+        assert "b&#39;" not in body and "b'" not in body
 
 
 def test_cache_page_size_selector_and_pagination(base_url, seed) -> None:

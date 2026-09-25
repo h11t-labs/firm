@@ -6,16 +6,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Changed
+
+- The `encryption` extra now requires `cryptography>=50.0.0`, incorporating the latest
+  cryptography fixes and dropping older cryptography releases from the supported install set.
+
+### Added
+
+- `firm.cache.queries`: the read-query layer the dashboard used to keep to itself, now a supported
+  surface for your own dashboards, exporters, and health checks — `cache_stats` and `cache_recent`,
+  `Connection` in / dicts out. Keys come back as raw `bytes` (a cache key is arbitrary bytes), so
+  decoding for display is the caller's decision. A negative `limit`/`offset` raises `ValueError`.
+- `firm-cache trim` accepts `--max-age`, `--max-size`, `--max-entries`, and `--batch-size` so a
+  one-shot eviction can target specific limits instead of only the process defaults.
+
 ### Fixed
 
 - `increment` (and `decrement`, which delegates to it) now triggers auto-expiry after committing,
   matching every other write path. An increment-only workload (rate limiters, counters) previously
   grew the table unbounded because no eviction pass was ever scheduled.
 
+## [1.1.0] - 2026-07-28
+
 ### Added
 
-- `firm-cache trim` accepts `--max-age`, `--max-size`, `--max-entries`, and `--batch-size` so a
-  one-shot eviction can target specific limits instead of only the process defaults.
+- `MsgpackCoder`: the value coder the `firm-cache[msgpack]` extra was already advertising, now
+  shipped. Same value shapes as the JSON default in a compact binary form, and just as safe to
+  decode (no code execution on load). `from firm.cache import MsgpackCoder`.
+  Payloads carry a one-byte `0xc1` tag so that rows written by another coder read as misses
+  instead of being misdecoded — without it, a JSON-written int `1` (the byte `b"1"`) is a valid
+  msgpack fixint and would read back as `49`. Readers outside firm must strip that byte.
 
 ## [1.0.0] - 2026-07-23
 

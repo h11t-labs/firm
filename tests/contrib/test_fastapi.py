@@ -11,9 +11,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 import firm.queue as bq
-from firm.contrib.fastapi import lifespan
 from firm.queue import schema
 from firm.queue.config import current_runtime, set_runtime
+from firm.queue.contrib.fastapi import lifespan
 
 
 @bq.job()
