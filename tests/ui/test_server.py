@@ -281,6 +281,98 @@ def test_channels_page_and_trim(base_url, seed) -> None:
     assert status == 200
 
 
+# -- post-action notices ---------------------------------------------------------------------------
+
+
+def test_refused_retry_shows_a_nothing_to_retry_notice(base_url, seed) -> None:
+    """A refused retry (the job is not failed, or is gone) must read differently from a successful
+    one — both used to land on the same plain page."""
+    status, body = _post(base_url + "/job/999999/retry")
+    assert status == 200
+    assert "Nothing to retry" in body
+    assert 'class="notice warn"' in body
+
+
+def test_retry_shows_a_retried_notice(base_url, seed) -> None:
+    job_id = seed.failed()
+    status, body = _post(f"{base_url}/job/{job_id}/retry")
+    assert status == 200
+    assert "Job re-enqueued for retry." in body
+    assert 'class="notice ok"' in body
+
+
+def test_refused_discard_shows_a_nothing_to_discard_notice(base_url, seed) -> None:
+    status, body = _post(base_url + "/job/999999/discard")
+    assert status == 200
+    assert "Nothing to discard" in body
+    assert 'class="notice warn"' in body
+
+
+def test_discard_shows_a_discarded_notice(base_url, seed) -> None:
+    job_id = seed.failed()
+    status, body = _post(f"{base_url}/job/{job_id}/discard")
+    assert status == 200
+    assert "Job discarded." in body
+    assert 'class="notice ok"' in body
+
+
+def test_retry_all_reports_its_count(base_url, seed) -> None:
+    for _ in range(3):
+        seed.failed()
+    status, body = _post(base_url + "/failed/retry-all")
+    assert status == 200
+    assert "Re-enqueued 3 failed jobs." in body
+    assert 'class="notice ok"' in body
+
+
+def test_clear_cache_reports_its_count(base_url, seed) -> None:
+    seed.cache_entry(key=b"a")
+    seed.cache_entry(key=b"b")
+    status, body = _post(base_url + "/cache/clear")
+    assert status == 200
+    assert "Cleared 2 cache entries." in body
+    assert 'class="notice ok"' in body
+
+
+def test_a_zero_count_reads_as_a_warning(base_url, seed) -> None:
+    """A bulk action that touched nothing ("cleared 0 entries") must not pass for a success."""
+    status, body = _post(base_url + "/cache/clear")
+    assert status == 200
+    assert "Cleared 0 cache entries." in body
+    assert 'class="notice warn"' in body
+
+
+def test_trim_reports_its_count(base_url, seed) -> None:
+    seed.channel_message(age_seconds=2 * 24 * 3600)  # past the default 1-day retention
+    status, body = _post(base_url + "/channels/trim")
+    assert status == 200
+    assert "Trimmed 1 message." in body
+    assert 'class="notice ok"' in body
+
+
+def test_pause_and_resume_show_notices(base_url, seed) -> None:
+    seed.ready(queue="default")
+    _, body = _post(base_url + "/queue/default/pause")
+    assert "Queue paused." in body
+    _, body = _post(base_url + "/queue/default/resume")
+    assert "Queue resumed." in body
+
+
+def test_notice_dismiss_link_drops_the_notice(base_url, seed) -> None:
+    status, body = _post(base_url + "/cache/clear")
+    assert status == 200
+    assert 'class="notice-x" href="/cache"' in body  # reloads without the notice, no JS needed
+
+
+def test_unknown_notice_token_renders_no_bar(base_url, seed) -> None:
+    """Only the server's own tokens render, so a crafted ``?notice=`` shows nothing — no request
+    text is reflected into the page."""
+    status, body = _get(base_url + "/cache?notice=<script>alert(1)</script>&n=9")
+    assert status == 200
+    assert 'class="notice' not in body
+    assert "<script>alert(1)</script>" not in body
+
+
 def test_binary_columns_are_decoded_for_display(base_url, seed) -> None:
     # The query layers hand cache keys and channel names/payloads over as bytes; the dashboard
     # decodes them at the edge, so a page never shows a b'...' repr of plain UTF-8 text.
@@ -775,6 +867,18 @@ def test_out_of_range_id_is_404_not_500(base_url, seed) -> None:
     seed.ready()
     with pytest.raises(HTTPError) as exc:
         urlopen(base_url + "/job/99999999999999999999999")
+    assert exc.value.code == 404
+
+
+@pytest.mark.parametrize(
+    ("route", "data"),
+    [("/job/{id}", None), ("/audit/{id}", None), ("/job/{id}/retry", b"")],
+)
+def test_id_past_the_int_string_limit_is_404_not_500(base_url, route, data) -> None:
+    """A digit run past CPython's int-string limit (4300 digits) makes ``int()`` itself raise
+    ``ValueError``, which surfaced as a 500. No row can have that id either, so it is a 404."""
+    with pytest.raises(HTTPError) as exc:
+        urlopen(base_url + route.format(id="9" * 5000), data=data)
     assert exc.value.code == 404
 
 

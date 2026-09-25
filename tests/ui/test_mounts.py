@@ -191,7 +191,7 @@ def test_mounted_action_runs_and_redirects_into_the_mount(mount, seed) -> None:
     job_id = seed.failed()
     response = mount(host_auth=True).post(f"{PREFIX}/job/{job_id}/retry")
     assert response.status == 303
-    assert response.headers["location"] == f"{PREFIX}/jobs?state=failed"
+    assert response.headers["location"] == f"{PREFIX}/jobs?state=failed&notice=retried"
     with seed.engine.connect() as conn:
         assert queries.job_detail(conn, job_id)["state"] == "ready"
 

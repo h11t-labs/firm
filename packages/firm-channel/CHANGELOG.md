@@ -20,6 +20,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `firm-core` minor. Ships with the next release of this package. See
   `docs/testing-and-contributing.md` § Cross-package pins.
 
+### Fixed
+
+- `channel_stats()["channels"]` counts distinct channel names instead of distinct `channel_hash`
+  values, so it always matches the rows `channel_top` groups by — the dashboard uses it as the
+  busiest-channels pager total. Two channels whose hashes collided used to count as one, and the
+  pager's total then fell short of the table.
+
 ## [1.0.0] - 2026-07-23
 
 First stable release: the PyPI classifier moves to **Production/Stable** and the

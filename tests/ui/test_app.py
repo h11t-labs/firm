@@ -131,7 +131,20 @@ def test_mounted_action_redirects_within_the_mount(app: DashboardApp, seed) -> N
     job_id = seed.failed()
     response = _post(app, f"/job/{job_id}/retry", prefix="/firm")
     assert response.status == 303
-    assert ("Location", "/firm/jobs?state=failed") in response.headers
+    assert ("Location", "/firm/jobs?state=failed&notice=retried") in response.headers
+
+
+def test_mounted_notice_links_stay_within_the_mount(app: DashboardApp, seed) -> None:
+    """The page an action lands on points everything that should drop the notice — the dismiss
+    link, the auto-refresh, the settings forms' return field — at the notice-free URL, prefix
+    kept."""
+    seed.failed()
+    body = _get(app, "/jobs", query="state=failed&notice=retried", prefix="/firm").body.decode()
+    assert "Job re-enqueued for retry." in body
+    assert 'class="notice-x" href="/firm/jobs?state=failed"' in body
+    assert 'content="5; url=/firm/jobs?state=failed"' in body
+    assert 'name="return" value="/firm/jobs?state=failed"' in body
+    assert "notice=retried" not in body
 
 
 # -- preferences -----------------------------------------------------------------------------------

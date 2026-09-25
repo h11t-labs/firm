@@ -21,6 +21,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `firm.ui.UIResponse`, and `firm.ui.Headers`, that is all a mount for another framework needs.
 - `static_url=` points the stylesheet link at your own static pipeline, and `firm.ui.static_dir()`
   says where the file lives so you can publish it there.
+- Dashboard actions now say what they did. Pause/resume, retry, discard, retry-all, clear cache,
+  and trim land back on their page with a notice, so a refused or no-op action no longer looks
+  like a success: a refused retry reads "Nothing to retry", the bulk actions report their count,
+  and a count of 0 shows as a warning. The notice rides on the redirect
+  (`?notice=<token>[&n=<count>]`) and works on every transport and under a mount prefix; it only
+  ever renders one of a fixed set of messages, so nothing from the URL is reflected into the page.
 
 ### Changed
 
@@ -45,6 +51,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `DashboardConnectionError` (a clean CLI error, password masked) instead of silently starting
   the dashboard without that part's tab — a bad password or unreachable host no longer reads as
   "not configured". A reachable database without firm tables still just disables the part.
+
+### Fixed
+
+- A `/job/<id>` or `/audit/<id>` URL whose id runs past Python's int-string limit (more than 4300
+  digits) answered `500`; it is a `404` now, like any other id no row can have.
 
 ## [1.0.1] - 2026-07-28
 

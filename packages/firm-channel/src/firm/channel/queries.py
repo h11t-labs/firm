@@ -34,11 +34,13 @@ def _check_window(limit: int, offset: int) -> None:
 
 
 def channel_stats(conn: Connection) -> dict[str, int]:
-    """Buffered message count and how many distinct channels they span."""
+    """Buffered message count and how many distinct channels they span.
+
+    ``channels`` counts the raw ``channel`` — the key ``channel_top`` groups by, so it is the row
+    total a pager over ``channel_top`` needs. Counting ``channel_hash`` would merge two channels
+    whose hashes collide into one."""
     total = conn.execute(select(func.count()).select_from(_messages)).scalar() or 0
-    distinct = (
-        conn.execute(select(func.count(func.distinct(_messages.c.channel_hash)))).scalar() or 0
-    )
+    distinct = conn.execute(select(func.count(func.distinct(_messages.c.channel)))).scalar() or 0
     return {"messages": total, "channels": distinct}
 
 

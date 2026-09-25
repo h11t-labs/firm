@@ -11,11 +11,12 @@ already-encoded pieces) are wrapped in ``Markup`` so they pass through unescaped
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 from jinjax import Catalog
@@ -432,6 +433,70 @@ def _when(value: datetime | None) -> Markup:
     return Markup(_CATALOG.render("When", value=value))
 
 
+# -- post-action notices -----------------------------------------------------------------------
+# A write action redirects back with ``?notice=<token>`` (plus ``&n=<count>`` for the bulk
+# actions), so the page it lands on can tell a refused or no-op action from a successful one — a
+# plain redirect made "retry refused" and "retried" look identical. The server always picks the
+# token from this fixed set and the count is an integer, so the rendered message never carries
+# request input. An unknown token renders nothing.
+
+
+def _plural(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+# token -> (tone, message). Tone "count" defers to the count: above 0 reads as success, 0 as
+# "nothing happened", so "cleared 0 entries" never passes for a green success.
+_NOTICES: dict[str, tuple[str, Callable[[int], str]]] = {
+    "paused": ("ok", lambda n: "Queue paused."),
+    "resumed": ("ok", lambda n: "Queue resumed."),
+    "retried": ("ok", lambda n: "Job re-enqueued for retry."),
+    "nothing-to-retry": ("warn", lambda n: "Nothing to retry — that job is no longer failed."),
+    "discarded": ("ok", lambda n: "Job discarded."),
+    "nothing-to-discard": (
+        "warn",
+        lambda n: "Nothing to discard — that job is running or already gone.",
+    ),
+    "retried-all": (
+        "count",
+        lambda n: f"Re-enqueued {_num(n)} failed {_plural(n, 'job', 'jobs')}.",
+    ),
+    "cache-cleared": (
+        "count",
+        lambda n: f"Cleared {_num(n)} cache {_plural(n, 'entry', 'entries')}.",
+    ),
+    "channel-trimmed": (
+        "count",
+        lambda n: f"Trimmed {_num(n)} {_plural(n, 'message', 'messages')}.",
+    ),
+}
+
+
+def _strip_notice(request_path: str) -> str:
+    """``request_path`` without its ``notice``/``n`` params: where the dismiss link, the
+    auto-refresh, and the chrome's settings forms point while a notice shows, so it clears
+    instead of coming back on every reload. The path — mount prefix included — is kept as is."""
+    parts = urlsplit(request_path)
+    kept = [
+        (k, v)
+        for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k not in ("notice", "n")
+    ]
+    query = urlencode(kept, quote_via=quote)
+    return f"{parts.path}?{query}" if query else (parts.path or "/")
+
+
+def _notice_view(notice: str | None, count: int | None, request_path: str) -> dict[str, Any] | None:
+    spec = _NOTICES.get(notice or "")
+    if spec is None:
+        return None
+    tone, message = spec
+    n = max(count or 0, 0)
+    if tone == "count":
+        tone = "ok" if n > 0 else "warn"
+    return {"tone": tone, "message": message(n), "dismiss": _strip_notice(request_path)}
+
+
 # Context defaults for the layout chrome -- always present so `layout.html` never has to guard
 # against an undefined variable; a page-specific kwarg of the same name overrides it.
 _LAYOUT_DEFAULTS: dict[str, Any] = {
@@ -442,6 +507,8 @@ _LAYOUT_DEFAULTS: dict[str, Any] = {
     "request_path": None,
     "theme": "system",
     "urls": ROOT_URLS,
+    "notice": None,
+    "notice_count": None,
 }
 
 
@@ -451,6 +518,11 @@ def _render(template_name: str, **context: Any) -> str:
     # every page, so its components receive ready-made data instead of computing it in-template.
     urls: Urls = ctx["urls"]
     ctx["request_path"] = ctx["request_path"] or urls.path("/")
+    ctx["notice_view"] = _notice_view(ctx["notice"], ctx["notice_count"], ctx["request_path"])
+    if ctx["notice_view"] is not None:
+        # The refresh/theme forms return to ``request_path``; send them back without the notice,
+        # or changing a setting would replay it.
+        ctx["request_path"] = ctx["notice_view"]["dismiss"]
     ctx["home"] = urls.path("/")
     ctx["refresh_action"] = urls.path("/settings/refresh")
     ctx["theme_action"] = urls.path("/settings/theme")
@@ -486,6 +558,8 @@ def overview_page(
     request_path: str = "/",
     theme: str = "system",
     urls: Urls = ROOT_URLS,
+    notice: str | None = None,
+    notice_count: int | None = None,
 ) -> str:
     cards = [
         _card(
@@ -513,6 +587,8 @@ def overview_page(
         request_path=request_path,
         theme=theme,
         urls=urls,
+        notice=notice,
+        notice_count=notice_count,
         integrity_view=_integrity_view(urls, integrity),
         cards=cards,
         counts=counts,
@@ -535,6 +611,8 @@ def jobs_page(
     request_path: str = "/jobs",
     theme: str = "system",
     urls: Urls = ROOT_URLS,
+    notice: str | None = None,
+    notice_count: int | None = None,
 ) -> str:
     total = counts.get(state, 0)
     return _render(
@@ -549,6 +627,8 @@ def jobs_page(
         request_path=request_path,
         theme=theme,
         urls=urls,
+        notice=notice,
+        notice_count=notice_count,
         state=state,
         jobs=jobs,
         counts=counts,
@@ -627,6 +707,8 @@ def cache_page(
     request_path: str = "/cache",
     theme: str = "system",
     urls: Urls = ROOT_URLS,
+    notice: str | None = None,
+    notice_count: int | None = None,
 ) -> str:
     cards = [
         _card("entries", _num(stats["entries"])),
@@ -648,6 +730,8 @@ def cache_page(
         request_path=request_path,
         theme=theme,
         urls=urls,
+        notice=notice,
+        notice_count=notice_count,
         cards=cards,
         entries=entries,
         per_page=per_page,
@@ -703,6 +787,8 @@ def channel_page(
     request_path: str = "/channels",
     theme: str = "system",
     urls: Urls = ROOT_URLS,
+    notice: str | None = None,
+    notice_count: int | None = None,
 ) -> str:
     cards = [
         _card("messages", _num(stats["messages"])),
@@ -721,6 +807,8 @@ def channel_page(
         request_path=request_path,
         theme=theme,
         urls=urls,
+        notice=notice,
+        notice_count=notice_count,
         cards=cards,
         top=top,
         messages=messages,
