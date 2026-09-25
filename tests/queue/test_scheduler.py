@@ -151,6 +151,27 @@ def test_recurring_task_honors_concurrency(runtime: Runtime, count: Callable[...
     assert _SINK == [3, 3]
 
 
+@bq.job(concurrency={"to": 1, "duration": 300, "on_conflict": "discard"})
+def exclusive_recurring_job() -> None:
+    _SINK.append(4)
+
+
+def test_recurring_discard_skips_the_period(runtime: Runtime, count: Callable[..., int]) -> None:
+    # A recurring job that discards on a full concurrency key skips that period: it must not
+    # retry the period on every tick and then run late, once the slot frees mid-period.
+    task = RecurringTask(key="exclusive", schedule="*/5 * * * *", job=exclusive_recurring_job)
+    scheduler = Scheduler(runtime, [task])
+    scheduler.sync_tasks()
+
+    assert scheduler.tick(at=datetime(2026, 6, 28, 12, 3, 0)) == 1  # the 12:00 run holds the slot
+    assert scheduler.tick(at=datetime(2026, 6, 28, 12, 6, 0)) == 0  # 12:05: key full -> discarded
+    assert run_ready(runtime) == 1  # the 12:00 run finishes and frees the slot
+
+    assert scheduler.tick(at=datetime(2026, 6, 28, 12, 9, 0)) == 0  # still 12:05: skipped
+    assert count(schema.jobs) == 1
+    assert scheduler.tick(at=datetime(2026, 6, 28, 12, 11, 0)) == 1  # 12:10 fires as usual
+
+
 def test_sync_updates_changed_task(runtime: Runtime, count: Callable[..., int]) -> None:
     # sync_tasks upserts: a changed schedule for an existing key updates the stored row (a
     # documented read surface for the dashboard/CLI), rather than leaving it stale.

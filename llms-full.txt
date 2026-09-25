@@ -1664,8 +1664,8 @@ tasks = [
 | `args` | `()` | Positional arguments passed to the job. |
 | `kwargs` | `{}` | Keyword arguments passed to the job. |
 
-> **Note:** schedule syntax is standard cron (`"*/5 * * * *"`, `"0 3 * * *"`, …). Natural-language
-> forms (`"every 5 minutes"`, Fugit-style) are not supported.
+> **Note:** schedule syntax is standard cron (`"*/5 * * * *"`, `"0 3 * * *"`, …), evaluated in
+> **UTC**. Natural-language forms (`"every 5 minutes"`, Fugit-style) are not supported.
 
 ## Running the scheduler
 
@@ -1706,6 +1706,15 @@ period across the whole fleet.
 assert Scheduler(rt, tasks).tick(at=noon) == 1   # this one enqueued it
 assert Scheduler(rt, tasks).tick(at=noon) == 0   # deduped
 ```
+
+## Concurrency controls
+
+A recurring job honors its [concurrency controls](concurrency.md) like any other enqueue. With
+`on_conflict="block"` (the default), a fire that finds the key full waits in `blocked_executions`
+and runs once the slot frees. With `on_conflict="discard"`, that period is skipped and the next one
+fires as usual, which keeps a slow recurring job from overlapping itself. Each scheduler tries a
+period once, so with several schedulers a slot that frees between their attempts can still let the
+period run.
 
 
 

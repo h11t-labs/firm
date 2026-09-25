@@ -59,6 +59,10 @@ class Scheduler:
     def __init__(self, runtime: Runtime, tasks: Sequence[RecurringTask]) -> None:
         self.runtime = runtime
         self.tasks = list(tasks)
+        # The period each task last skipped because its concurrency key was full and the job
+        # discards on conflict. A discarded run records nothing in recurring_executions, so
+        # without this every tick would retry that period and enqueue it late once the key frees.
+        self._skipped: dict[str, datetime] = {}
 
     def sync_tasks(self) -> None:
         """Persist configured tasks to ``recurring_tasks``; drop any no longer configured.
@@ -111,6 +115,8 @@ class Scheduler:
         return enqueued
 
     def _record_and_enqueue(self, task: RecurringTask, run_at: datetime) -> bool:
+        if self._skipped.get(task.key) == run_at:
+            return False
         rt = self.runtime
         with rt.engine.connect() as conn:
             recorded = conn.execute(select(_tasks.c.id).where(_tasks.c.key == task.key)).first()
@@ -155,18 +161,19 @@ class Scheduler:
                 return True
 
             # Concurrency-limited recurring job: acquire the semaphore and route to ready or
-            # blocked exactly like a normal enqueue (matching solid_queue, where recurring tasks
-            # honor concurrency controls). The serialized begin_claim_tx is required by the
-            # semaphore ops; the recurring_executions unique index still dedupes concurrent
-            # schedulers via the IntegrityError below.
+            # blocked exactly like a normal enqueue, so a recurring job honors its concurrency
+            # controls too. The serialized begin_claim_tx is required by the semaphore ops; the
+            # recurring_executions unique index still dedupes concurrent schedulers via the
+            # IntegrityError below.
             key = spec.key_for(task.args, task.kwargs)
             with rt.dialect.begin_claim_tx(rt.engine) as conn:
                 job_id = enqueue.route_concurrent(
                     conn, task.job, args_blob, run_at, spec, key, now_utc()
                 )
                 if job_id is None:
-                    # Key was full and the job opted out (on_conflict="discard"): nothing to
-                    # record for this period.
+                    # Key was full and the job opted out (on_conflict="discard"): skip this
+                    # period; the next one fires as usual.
+                    self._skipped[task.key] = run_at
                     return False
                 conn.execute(insert(_rec).values(job_id=job_id, task_key=task.key, run_at=run_at))
             return True
