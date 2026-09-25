@@ -85,6 +85,11 @@ reading it runs no code of ours. Grep for it rather than relying on warnings.
   their claims at startup and periodically (a new `ReaperLoop`); `firm-queue drain` prunes and
   recovers at startup; both supervisors also reap at startup so a restart after a crash
   recovers immediately instead of waiting out `alive_threshold`.
+- A `ThreadSupervisor` whose own registry row is pruned while it is still alive (its heartbeats
+  stalled past `alive_threshold`, e.g. through a long database outage) now restarts its
+  components under a fresh registration and reports the eviction through `on_thread_error`. It
+  used to keep claiming jobs under the pruned row, so any other process's startup recovery sweep
+  re-readied them while they were still running.
 
 ## [1.0.0] - 2026-07-23
 

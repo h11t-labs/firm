@@ -8,11 +8,13 @@ from collections.abc import Callable
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, delete, func, select
 
 import firm.queue as bq
 from firm._core.config import Runtime
+from firm._core.process import ProcessExitError
 from firm.queue import schema
+from firm.queue.hooks import HOOKS
 from firm.queue.supervisor import (
     DispatcherConfig,
     SchedulerConfig,
@@ -142,6 +144,66 @@ def test_thread_supervisor_recovers_predecessor_stale_claims(
 
     assert _SINK == [42]
     assert count(schema.claimed_executions) == 0
+    assert count(schema.processes) == 0
+
+
+def test_evicted_thread_supervisor_restarts_under_a_new_registration(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """A live supervisor whose row is pruned (heartbeats stalled past alive_threshold, so a
+    reaper re-readied its claims) must not keep claiming under the dead id: every other
+    process's absent-row sweep would re-ready those claims mid-run. It restarts its components
+    under a fresh row — the thread-mode counterpart of fork mode's child restart."""
+    errors: list[BaseException] = []
+    HOOKS.register_error(errors.append)
+    _CLAIM_GATE.clear()
+    _CLAIM_STARTED.clear()
+    config = SupervisorConfig(
+        workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[], heartbeat_interval=0.05
+    )
+    try:
+        with ThreadSupervisor(runtime, config) as supervisor:
+            with engine.begin() as conn:
+                conn.execute(
+                    delete(schema.processes).where(schema.processes.c.id == supervisor.process_id)
+                )
+            # Wait on the restart itself: SQLite may hand the fresh row the same rowid.
+            assert _wait_until(lambda: any(isinstance(e, ProcessExitError) for e in errors))
+            assert _wait_until(
+                lambda: supervisor.process_id is not None and count(schema.processes) == 1
+            )
+
+            gated_job.enqueue()
+            assert _CLAIM_STARTED.wait(10)
+            with engine.connect() as conn:
+                claimed_by = conn.execute(
+                    select(schema.claimed_executions.c.process_id)
+                ).scalar_one()
+                registered = set(conn.execute(select(schema.processes.c.id)).scalars())
+            assert claimed_by == supervisor.process_id
+            assert claimed_by in registered
+            _CLAIM_GATE.set()
+            assert _wait_until(lambda: _finished_jobs(engine) == 1)
+    finally:
+        _CLAIM_GATE.set()
+        HOOKS.clear()
+
+    assert count(schema.claimed_executions) == 0
+    assert count(schema.processes) == 0
+
+
+def test_thread_supervisor_does_not_restart_after_stop(
+    runtime: Runtime, count: Callable[..., int]
+) -> None:
+    """An eviction noticed just as stop() runs must not bring the supervisor back up."""
+    config = SupervisorConfig(workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[])
+    supervisor = ThreadSupervisor(runtime, config)
+    supervisor.start()
+    supervisor.stop()
+
+    supervisor._restart()
+
+    assert supervisor.process_id is None
     assert count(schema.processes) == 0
 
 
