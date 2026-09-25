@@ -47,13 +47,16 @@ def run_migrations(*, metadata: MetaData, env_var: str, version_table: str) -> N
             context.run_migrations()
     else:
         engine = create_engine_for(_resolve_url())
-        with engine.connect() as connection:
-            context.configure(
-                connection=connection,
-                target_metadata=metadata,
-                render_as_batch=True,
-                version_table=version_table,
-            )
-            with context.begin_transaction():
-                context.run_migrations()
-        engine.dispose()
+        try:
+            with engine.connect() as connection:
+                context.configure(
+                    connection=connection,
+                    target_metadata=metadata,
+                    render_as_batch=True,
+                    version_table=version_table,
+                )
+                with context.begin_transaction():
+                    context.run_migrations()
+        finally:
+            # Dispose even if run_migrations() raises, so a failed migration never leaks the pool.
+            engine.dispose()
