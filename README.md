@@ -91,7 +91,7 @@ uv sync
 uv run pre-commit install     # ruff + ty + llms-full regeneration run on every commit
 uv run pytest                 # tests (SQLite; set FIRM_TEST_PG_URL / _MYSQL_URL for live PG/MySQL)
 uv run ruff check
-uv run ty check packages
+uv run ty check packages scripts examples
 uv run pre-commit run --all-files   # run every hook manually
 ```
 
