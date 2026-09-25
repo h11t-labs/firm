@@ -105,8 +105,10 @@ class Channel:
             if ch not in self._subscribers:
                 self._subscribers[ch] = []
                 # A fresh channel only sees messages from now on, not the existing backlog.
-                # Anchor at the current max id — a broadcast whose insert raced this subscribe
-                # counts as "before subscribe" and is not delivered.
+                # Anchor at the current max id: broadcasts committed by subscribe time are
+                # excluded, but ``current_max_id`` sees only committed ids, so a broadcast whose
+                # insert is still in flight (commits after this) has a higher id and will be
+                # delivered.
                 with transaction(self.engine) as conn:
                     self._channel_anchor[ch] = messages.current_max_id(conn)
             self._subscribers[ch].append(callback)
