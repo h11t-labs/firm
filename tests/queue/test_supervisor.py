@@ -11,8 +11,9 @@ import pytest
 from sqlalchemy import Engine, delete, func, select
 
 import firm.queue as bq
+from firm._core import process as process_registry
 from firm._core.config import Runtime
-from firm._core.process import ProcessExitError
+from firm._core.process import ProcessExitError, ProcessInfo
 from firm.queue import schema
 from firm.queue.hooks import HOOKS
 from firm.queue.supervisor import (
@@ -147,31 +148,42 @@ def test_thread_supervisor_recovers_predecessor_stale_claims(
     assert count(schema.processes) == 0
 
 
+def _prune(engine: Engine, process_id: int | None) -> int:
+    """Delete a process row as a reaper would, next to a live peer's row (whose id it returns).
+    The peer registers first, so SQLite cannot hand the pruned rowid straight back out and the
+    evicted supervisor's fresh registration is told apart from the pruned one."""
+    peer = process_registry.register(engine, ProcessInfo(kind="Worker", name="peer", pid=0))
+    with engine.begin() as conn:
+        conn.execute(delete(schema.processes).where(schema.processes.c.id == process_id))
+    return peer
+
+
+def _evictable_config() -> SupervisorConfig:
+    return SupervisorConfig(
+        workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[], heartbeat_interval=0.05
+    )
+
+
 def test_evicted_thread_supervisor_restarts_under_a_new_registration(
     runtime: Runtime, engine: Engine, count: Callable[..., int]
 ) -> None:
     """A live supervisor whose row is pruned (heartbeats stalled past alive_threshold, so a
     reaper re-readied its claims) must not keep claiming under the dead id: every other
-    process's absent-row sweep would re-ready those claims mid-run. It restarts its components
-    under a fresh row — the thread-mode counterpart of fork mode's child restart."""
+    process's absent-row sweep would re-ready those claims mid-run. It stops its components
+    and restarts them under a fresh row — the thread-mode counterpart of fork mode's child
+    restart — leaving the pruned id alone."""
     errors: list[BaseException] = []
     HOOKS.register_error(errors.append)
     _CLAIM_GATE.clear()
     _CLAIM_STARTED.clear()
-    config = SupervisorConfig(
-        workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[], heartbeat_interval=0.05
-    )
     try:
-        with ThreadSupervisor(runtime, config) as supervisor:
-            with engine.begin() as conn:
-                conn.execute(
-                    delete(schema.processes).where(schema.processes.c.id == supervisor.process_id)
-                )
-            # Wait on the restart itself: SQLite may hand the fresh row the same rowid.
-            assert _wait_until(lambda: any(isinstance(e, ProcessExitError) for e in errors))
-            assert _wait_until(
-                lambda: supervisor.process_id is not None and count(schema.processes) == 1
-            )
+        with ThreadSupervisor(runtime, _evictable_config()) as supervisor:
+            pruned = supervisor.process_id
+            old_loops = list(supervisor._loops)
+            peer = _prune(engine, pruned)
+            assert _wait_until(lambda: supervisor.process_id not in (None, pruned, peer))
+            assert any(isinstance(error, ProcessExitError) for error in errors)
+            assert all(loop.stopping for loop in old_loops)
 
             gated_job.enqueue()
             assert _CLAIM_STARTED.wait(10)
@@ -181,7 +193,7 @@ def test_evicted_thread_supervisor_restarts_under_a_new_registration(
                 ).scalar_one()
                 registered = set(conn.execute(select(schema.processes.c.id)).scalars())
             assert claimed_by == supervisor.process_id
-            assert claimed_by in registered
+            assert registered == {peer, supervisor.process_id}
             _CLAIM_GATE.set()
             assert _wait_until(lambda: _finished_jobs(engine) == 1)
     finally:
@@ -189,22 +201,90 @@ def test_evicted_thread_supervisor_restarts_under_a_new_registration(
         HOOKS.clear()
 
     assert count(schema.claimed_executions) == 0
-    assert count(schema.processes) == 0
+    assert count(schema.processes) == 1  # the peer's row
 
 
-def test_thread_supervisor_does_not_restart_after_stop(
+def test_evicted_thread_supervisor_retries_until_it_can_register(
+    runtime: Runtime, engine: Engine, count: Callable[..., int], monkeypatch
+) -> None:
+    """If the database is still unavailable when an evicted supervisor tries to come back, it
+    reports the error and retries after a heartbeat interval: it never stays down silently."""
+    errors: list[BaseException] = []
+    HOOKS.register_error(errors.append)
+    register = process_registry.register
+    failures = [RuntimeError("database unavailable")]
+
+    def flaky_register(engine_: Engine, info: ProcessInfo) -> int:
+        if info.kind == "Supervisor" and failures:
+            raise failures.pop()
+        return register(engine_, info)
+
+    try:
+        with ThreadSupervisor(runtime, _evictable_config()) as supervisor:
+            pruned = supervisor.process_id
+            monkeypatch.setattr(process_registry, "register", flaky_register)
+            peer = _prune(engine, pruned)
+            assert _wait_until(lambda: supervisor.process_id not in (None, pruned, peer))
+            assert any(str(error) == "database unavailable" for error in errors)
+    finally:
+        HOOKS.clear()
+
+    assert count(schema.processes) == 1  # the peer's row
+
+
+def test_error_hook_may_stop_an_evicted_supervisor(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """The eviction is reported from the restart thread, not the heartbeat's, so an error hook
+    that reacts by stopping the supervisor works: everything stops and nothing restarts."""
+    supervisor = ThreadSupervisor(runtime, _evictable_config())
+    stopped = threading.Event()
+
+    def stop_on_eviction(error: BaseException) -> None:
+        if isinstance(error, ProcessExitError):
+            supervisor.stop()
+            stopped.set()
+
+    HOOKS.register_error(stop_on_eviction)
+    try:
+        supervisor.start()
+        loops = list(supervisor._loops)
+        _prune(engine, supervisor.process_id)
+        assert stopped.wait(10)
+        time.sleep(0.2)  # room for a wrong restart to show up
+        assert supervisor.process_id is None
+        assert supervisor._loops == []
+        assert all(loop.stopping for loop in loops)
+    finally:
+        HOOKS.clear()
+        supervisor.stop()
+
+    assert count(schema.processes) == 1  # the peer's row
+
+
+def test_stale_restart_leaves_a_stopped_or_later_run_alone(
     runtime: Runtime, count: Callable[..., int]
 ) -> None:
-    """An eviction noticed just as stop() runs must not bring the supervisor back up."""
+    """A restart scheduled under an earlier run (an eviction noticed just as stop() began, or a
+    retry still pending) must neither revive a stopped supervisor nor tear down a later run."""
     config = SupervisorConfig(workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[])
     supervisor = ThreadSupervisor(runtime, config)
     supervisor.start()
+    stale = supervisor._generation
     supervisor.stop()
 
-    supervisor._restart()
-
+    supervisor._restart(stale)
     assert supervisor.process_id is None
     assert count(schema.processes) == 0
+
+    supervisor.start()
+    try:
+        running, loops = supervisor.process_id, list(supervisor._loops)
+        supervisor._restart(stale)
+        assert supervisor.process_id == running
+        assert supervisor._loops == loops
+    finally:
+        supervisor.stop()
 
 
 def test_fork_shutdown_recovers_sigkilled_children_claims(

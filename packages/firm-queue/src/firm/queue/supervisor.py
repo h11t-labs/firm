@@ -145,12 +145,15 @@ class ThreadSupervisor:
         self._loops: list[InterruptiblePoller] = []
         self.process_id: int | None = None
         # Serializes start/stop against the post-eviction restart, which runs on its own thread.
-        self._lock = threading.Lock()
-        self._running = False
+        # Reentrant, so a lifecycle hook that calls stop() cannot deadlock the thread firing it.
+        self._lock = threading.RLock()
+        # Bumped by every start() and stop(): a restart scheduled under an earlier run (an eviction
+        # noticed just as stop() began, or a pending retry) must never touch a later one.
+        self._generation = 0
 
     def start(self) -> None:
         with self._lock:
-            self._running = True
+            self._generation += 1
             process_id = self._register()
             HOOKS.fire("supervisor_start")
             self._start_loops(process_id)
@@ -211,33 +214,45 @@ class ThreadSupervisor:
 
     def stop(self) -> None:
         with self._lock:
-            self._running = False
+            self._generation += 1
             self._stop_loops()
         HOOKS.fire("supervisor_stop")
 
     def _on_evicted(self) -> None:
-        # Runs on the heartbeat thread, which cannot stop (join) itself: restart from another.
+        # Runs on the heartbeat thread, which cannot stop (join) itself: hand off to another. The
+        # pruned row is already gone, and SQLite can hand its id to the next process to register,
+        # so forget it here rather than ever deregistering it.
+        pruned, self.process_id = self.process_id, None
+        threading.Thread(
+            target=self._restart_after_eviction,
+            args=(self._generation, pruned),
+            name="supervisor-restart",
+            daemon=True,
+        ).start()
+
+    def _restart_after_eviction(self, generation: int, pruned: int | None) -> None:
+        # Reported from this thread rather than the heartbeat's, so an error hook may stop() us.
         HOOKS.fire_error(
             ProcessExitError(
-                f"supervisor process {self.process_id} was pruned as dead while still running;"
+                f"supervisor process {pruned} was pruned as dead while still running;"
                 " restarting its components under a new registration"
             )
         )
-        threading.Thread(target=self._restart, name="supervisor-restart", daemon=True).start()
+        self._restart(generation)
 
-    def _restart(self) -> None:
+    def _restart(self, generation: int) -> None:
         with self._lock:
-            if not self._running:
-                return  # stop() got here first
-            self._stop_loops()
+            if generation != self._generation:
+                return  # stop() or a fresh start() came in since this restart was scheduled
             try:
+                self._stop_loops()
                 self._start_loops(self._register())
                 return
             except Exception as exc:
                 HOOKS.fire_error(exc)
         # Could not come back up (database still unreachable?): never stay down silently, retry
         # after a heartbeat interval. The next attempt first tears down anything half-started.
-        retry = threading.Timer(self.config.heartbeat_interval, self._restart)
+        retry = threading.Timer(self.config.heartbeat_interval, self._restart, args=(generation,))
         retry.daemon = True
         retry.start()
 
