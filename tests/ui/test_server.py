@@ -256,7 +256,8 @@ def test_pause_action_takes_effect(base_url, seed) -> None:
     seed.ready(queue="default")
     status, body = _post(base_url + "/queue/default/pause")  # 303 -> overview
     assert status == 200
-    assert "paused" in body
+    # the row state, not the notice text (which says "paused" whether or not the pause landed)
+    assert 'action="/queue/default/resume"' in body
 
 
 def test_cache_page_and_clear(base_url, seed) -> None:
