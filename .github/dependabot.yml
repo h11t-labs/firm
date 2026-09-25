@@ -12,6 +12,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Django 6 needs Python >=3.12 while the workspace supports 3.11, so uv.lock forks it (5.2.x
+    # below 3.12, 6.x from 3.12). Dependabot can't update a forked package: it tries one version
+    # for all of >=3.11, fails with dependency_file_not_resolvable, and that sinks the whole
+    # `python` group. Django is dev-only, so skip it here (this also skips its security-update
+    # PRs) and bump it by hand with `uv lock --upgrade-package django`, which respects the fork.
+    ignore:
+      - dependency-name: django
     groups:
       python:
         patterns: ["*"]
