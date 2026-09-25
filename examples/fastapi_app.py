@@ -13,8 +13,8 @@ from fastapi import FastAPI
 import firm.queue as bq
 from firm._core.database import create_engine_for
 from firm.cache import Cache
-from firm.contrib.fastapi import lifespan
 from firm.queue import schema as queue_schema
+from firm.queue.contrib.fastapi import lifespan
 
 DB = "sqlite:///firm-fastapi.db"
 

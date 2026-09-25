@@ -12,12 +12,17 @@ behind your own authentication::
 
     dashboard = build_dashboard(database_url="sqlite:///app.db")
     serve(dashboard, authenticator=BasicAuth("admin", password="secret"))
+
+The dashboard itself is transport-free (:class:`DashboardApp`, request in / response out), so it
+can also be mounted inside an application that already serves HTTP — see
+:mod:`firm.ui.contrib` for the Django, Flask, and FastAPI adapters.
 """
 
 from __future__ import annotations
 
 __version__ = "1.0.0"
 
+from .app import DashboardApp, Headers, UIRequest, UIResponse, static_dir
 from .auth import (
     Allow,
     Authenticator,
@@ -37,13 +42,18 @@ __all__ = [
     "AuthRequest",
     "Authenticator",
     "BasicAuth",
+    "DashboardApp",
     "Deny",
+    "Headers",
     "ProxyHeaderAuth",
+    "UIRequest",
+    "UIResponse",
     "__version__",
     "build_dashboard",
     "create_server",
     "hash_password",
     "load_authenticator",
     "serve",
+    "static_dir",
     "verify_password",
 ]

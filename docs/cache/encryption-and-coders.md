@@ -1,28 +1,90 @@
 # Encryption & coders
 
-## Coders
+## Which coder?
 
-A *coder* turns a value into bytes and back. The default is **JSON** (dict/list/str/num/bool/
-None) — safe to decode no matter who wrote the row. `PickleCoder` handles arbitrary Python
-objects and is available as an explicit opt-in, and you can supply your own coder.
+A *coder* turns a value into bytes and back. The default covers the common case; reach for another
+when one of these lines describes you:
+
+| You want to… | Coder | What it costs |
+|---|---|---|
+| cache dicts, lists, strings, numbers | `JSONCoder` — the default | nothing: readable rows, portable to any language |
+| cache **`bytes`** (thumbnails, protobuf, compressed blobs), or fit **more entries** under the same `max_size` | `MsgpackCoder` | `pip install "firm-cache[msgpack]"`; rows are no longer human-readable |
+| cache arbitrary Python objects (tuples, dataclasses, sets) | `PickleCoder` | executes code on load — only when every writer to the table is trusted |
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 Cache(database_url=...)                        # JSON by default
+Cache(database_url=..., coder=MsgpackCoder())  # compact binary; bytes stay bytes
 Cache(database_url=..., coder=PickleCoder())   # arbitrary objects — read the warning below
 ```
 
-A custom coder is anything with `dumps(value) -> bytes` and `loads(bytes) -> value`:
+**Switching coders on an existing cache is safe but not free.** Rows written by the old coder can't
+be decoded by the new one, so they read as misses until they age out — plan for a cold cache, not a
+migration. This is also why the default stays JSON across releases.
+
+### More on `MsgpackCoder`
+
+Same value shapes as JSON in a compact binary form, and just as safe to decode (no code execution on
+load). Typical payloads land around a third smaller, which matters because `byte_size` drives
+[eviction](eviction.md): smaller values mean more entries survive under `max_size`.
+
+Two differences from JSON: `bytes` values round-trip as `bytes` instead of needing an encoding, and
+dict keys must be `str`/`bytes` — msgpack's unpacker rejects other key types by default as a
+hash-flooding guard, so a dict keyed by ints writes fine but reads back as a miss. Constructing the
+coder without the extra installed raises `ImportError` naming it.
+
+Rows carry a one-byte tag (`0xc1`) in front of the msgpack payload, which is what makes the
+switch-to-a-cold-cache promise above hold. Untagged, a JSON row holding the int `1` is the single
+byte `b"1"` — and `0x31` is a valid msgpack fixint, so it would decode as `49` rather than miss, and
+`increment` would persist the corruption. Small ints are exactly what counters hold, so this is the
+common case, not a corner one. The cost is a byte per entry.
+
+`0xc1` is the one byte the msgpack spec marks *never used*, and no UTF-8 text can start with it, so
+the tag can't collide with a bare msgpack payload or with a JSON row. There is no option to turn it
+off: the only thing that switch would do is re-open the misread above.
+
+### What ends up in the `value` column
+
+| Coder | Bytes written |
+|---|---|
+| `JSONCoder` | UTF-8 JSON |
+| `MsgpackCoder` | the `0xc1` tag, then the msgpack body |
+| `PickleCoder` | a pickle stream |
+
+With `encrypt_key` set, that payload is wrapped in a Fernet token instead — so an encrypted row is
+opaque to any reader without the key, whichever coder produced it.
+
+Reading a msgpack row from outside firm therefore means stripping one byte:
 
 ```python
-import msgpack   # pip install "firm-cache[msgpack]"
+import msgpack
 
-class MsgpackCoder:
-    def dumps(self, value): return msgpack.packb(value, use_bin_type=True)
-    def loads(self, data):  return msgpack.unpackb(data, raw=False)
+def decode_firm_msgpack(value: bytes):
+    if value[:1] != b"\xc1":
+        raise ValueError("not a firm msgpack payload")
+    return msgpack.unpackb(value[1:])
+```
 
-Cache(database_url=..., coder=MsgpackCoder())
+(Finding the row is the harder half: lookups go through `key_hash`, a signed 64-bit hash of the
+normalized key — see [Internals](internals.md).)
+
+### Your own coder
+
+Anything with `dumps(value) -> bytes` and `loads(bytes) -> value` works — a coder may return any
+bytes it likes, so binary formats and compression are fair game:
+
+```python
+import zlib
+
+from firm.cache import Cache, JSONCoder
+
+class GzipJSONCoder:
+    def __init__(self): self._inner = JSONCoder()
+    def dumps(self, value): return zlib.compress(self._inner.dumps(value))
+    def loads(self, data):  return self._inner.loads(zlib.decompress(data))
+
+Cache(database_url=..., coder=GzipJSONCoder())
 ```
 
 > **Security:** `PickleCoder` deserializes with `pickle`, which executes code on load — anyone
