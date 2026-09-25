@@ -13,7 +13,7 @@ from sqlalchemy import Engine, delete, func, select
 import firm.queue as bq
 from firm._core import process as process_registry
 from firm._core.config import Runtime
-from firm._core.process import ProcessExitError, ProcessInfo
+from firm._core.process import HeartbeatPoller, ProcessExitError, ProcessInfo
 from firm.queue import schema
 from firm.queue.hooks import HOOKS
 from firm.queue.supervisor import (
@@ -262,11 +262,51 @@ def test_error_hook_may_stop_an_evicted_supervisor(
     assert count(schema.processes) == 1  # the peer's row
 
 
-def test_stale_restart_leaves_a_stopped_or_later_run_alone(
+def test_eviction_noticed_during_stop_does_not_revive_the_supervisor(
+    runtime: Runtime, engine: Engine, count: Callable[..., int], monkeypatch
+) -> None:
+    """The first heartbeat through after an outage can find the row pruned while stop() is
+    still tearing down: the restart that eviction asks for must not run once stop() began."""
+    supervisor = ThreadSupervisor(runtime, _evictable_config())
+    supervisor.start()
+    heartbeat = next(loop for loop in supervisor._loops if isinstance(loop, HeartbeatPoller))
+    reaper = supervisor._loops[-1]  # the first loop stop() tears down
+    stop_reaper = reaper.stop
+
+    def pruned_while_stopping(timeout: float | None = 5.0) -> None:
+        _prune(engine, supervisor.process_id)
+        assert _wait_until(lambda: heartbeat.stopping)  # the heartbeat noticed the eviction
+        stop_reaper(timeout)
+
+    monkeypatch.setattr(reaper, "stop", pruned_while_stopping)
+    supervisor.stop()
+    time.sleep(0.3)  # room for a wrong restart to show up
+
+    assert supervisor.process_id is None
+    assert supervisor._loops == []
+    assert count(schema.processes) == 1  # the peer's row
+
+
+def test_start_hook_that_stops_the_supervisor_leaves_nothing_running(
     runtime: Runtime, count: Callable[..., int]
 ) -> None:
-    """A restart scheduled under an earlier run (an eviction noticed just as stop() began, or a
-    retry still pending) must neither revive a stopped supervisor nor tear down a later run."""
+    supervisor = ThreadSupervisor(runtime, _evictable_config())
+    HOOKS.register("worker_start", supervisor.stop)
+    try:
+        supervisor.start()
+        time.sleep(0.2)  # room for a heartbeat or reaper that should not exist
+        assert supervisor.process_id is None
+        assert supervisor._loops == []
+        assert count(schema.processes) == 0
+    finally:
+        HOOKS.clear()
+        supervisor.stop()
+
+
+def test_stale_restart_requests_do_nothing(runtime: Runtime, count: Callable[..., int]) -> None:
+    """A restart requested for an earlier set of loops (an eviction noticed as stop() began, a
+    retry still pending, a second request for loops already replaced) must neither revive a
+    stopped supervisor nor tear down the loops running now."""
     config = SupervisorConfig(workers=[WorkerConfig(poll_interval=0.02)], dispatchers=[])
     supervisor = ThreadSupervisor(runtime, config)
     supervisor.start()
@@ -281,8 +321,13 @@ def test_stale_restart_leaves_a_stopped_or_later_run_alone(
     try:
         running, loops = supervisor.process_id, list(supervisor._loops)
         supervisor._restart(stale)
-        assert supervisor.process_id == running
-        assert supervisor._loops == loops
+        assert (supervisor.process_id, supervisor._loops) == (running, loops)
+
+        current = supervisor._generation
+        supervisor._restart(current)  # goes through, replacing the loops
+        running, loops = supervisor.process_id, list(supervisor._loops)
+        supervisor._restart(current)  # a second request for the replaced loops
+        assert (supervisor.process_id, supervisor._loops) == (running, loops)
     finally:
         supervisor.stop()
 

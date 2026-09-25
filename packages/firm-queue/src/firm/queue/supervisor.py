@@ -20,6 +20,7 @@ first so it never reuses a SQLite handle inherited from the parent.
 from __future__ import annotations
 
 import contextlib
+import functools
 import os
 import signal
 import threading
@@ -147,16 +148,21 @@ class ThreadSupervisor:
         # Serializes start/stop against the post-eviction restart, which runs on its own thread.
         # Reentrant, so a lifecycle hook that calls stop() cannot deadlock the thread firing it.
         self._lock = threading.RLock()
-        # Bumped by every start() and stop(): a restart scheduled under an earlier run (an eviction
-        # noticed just as stop() began, or a pending retry) must never touch a later one.
+        self._running = False
+        # Identifies the current set of loops. Bumped by start(), stop() and every restart, and
+        # carried by each heartbeat's eviction callback and each retry: a restart requested for an
+        # earlier set (a stale heartbeat, a pending retry, a second request) does nothing.
         self._generation = 0
 
     def start(self) -> None:
         with self._lock:
+            self._running = True
             self._generation += 1
+            generation = self._generation
             process_id = self._register()
             HOOKS.fire("supervisor_start")
-            self._start_loops(process_id)
+            if generation == self._generation:  # unless the hook stopped us
+                self._start_loops(process_id, generation)
 
     def _register(self) -> int:
         # Reap before the absent-row sweep: a hard-killed predecessor leaves a stale-heartbeat
@@ -174,7 +180,7 @@ class ThreadSupervisor:
         self.process_id = process_id
         return process_id
 
-    def _start_loops(self, process_id: int) -> None:
+    def _start_loops(self, process_id: int, generation: int) -> None:
         for child in self.config.child_configs():
             # Claims carry the supervisor's own (heartbeated) process row: if this process
             # dies, the row goes stale, gets pruned, and the claims are recovered. A NULL
@@ -184,12 +190,14 @@ class ThreadSupervisor:
                 loop.start()
                 self._loops.append(loop)
             HOOKS.fire(f"{_kind_of(child)}_start")
+            if generation != self._generation:
+                return  # the hook stopped us: start nothing more
         heartbeat = HeartbeatPoller(
             self.runtime.engine,
             process_id,
             self.config.heartbeat_interval,
             on_error=HOOKS.fire_error,
-            on_evicted=self._on_evicted,
+            on_evicted=functools.partial(self._on_evicted, generation, process_id),
         )
         heartbeat.start()
         self._loops.append(heartbeat)
@@ -214,23 +222,28 @@ class ThreadSupervisor:
 
     def stop(self) -> None:
         with self._lock:
+            self._running = False
             self._generation += 1
             self._stop_loops()
         HOOKS.fire("supervisor_stop")
 
-    def _on_evicted(self) -> None:
+    def _on_evicted(self, generation: int, pruned: int) -> None:
         # Runs on the heartbeat thread, which cannot stop (join) itself: hand off to another. The
         # pruned row is already gone, and SQLite can hand its id to the next process to register,
-        # so forget it here rather than ever deregistering it.
-        pruned, self.process_id = self.process_id, None
+        # so forget it rather than ever deregistering it — if it is still ours (stop() and a
+        # restart only read process_id after joining this thread).
+        if self.process_id == pruned:
+            self.process_id = None
         threading.Thread(
             target=self._restart_after_eviction,
-            args=(self._generation, pruned),
+            args=(generation, pruned),
             name="supervisor-restart",
             daemon=True,
         ).start()
 
-    def _restart_after_eviction(self, generation: int, pruned: int | None) -> None:
+    def _restart_after_eviction(self, generation: int, pruned: int) -> None:
+        if not self._running or generation != self._generation:
+            return  # stopping, or this heartbeat belonged to loops already replaced
         # Reported from this thread rather than the heartbeat's, so an error hook may stop() us.
         HOOKS.fire_error(
             ProcessExitError(
@@ -242,11 +255,13 @@ class ThreadSupervisor:
 
     def _restart(self, generation: int) -> None:
         with self._lock:
-            if generation != self._generation:
-                return  # stop() or a fresh start() came in since this restart was scheduled
+            if not self._running or generation != self._generation:
+                return  # stopped, or restarted or started afresh since this was requested
+            self._generation += 1
+            generation = self._generation
             try:
                 self._stop_loops()
-                self._start_loops(self._register())
+                self._start_loops(self._register(), generation)
                 return
             except Exception as exc:
                 HOOKS.fire_error(exc)
