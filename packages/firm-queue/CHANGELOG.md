@@ -44,6 +44,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   Apps setting *neither* key anywhere used to raise `RuntimeError` at startup and now start if
   `FIRM_DATABASE_URL` is in the environment — the shared setting `firm-ui` already reads.
 
+- Documented that recurring cron schedules are evaluated in UTC, not in the application's
+  local time zone.
+
 ### Deprecated
 
 Everything below shipped in 1.0.0, keeps working, warns, and is removed in 2.0. All of it is the
@@ -90,6 +93,22 @@ reading it runs no code of ours. Grep for it rather than relying on warnings.
   components under a fresh registration and reports the eviction through `on_thread_error`. It
   used to keep claiming jobs under the pruned row, so any other process's startup recovery sweep
   re-readied them while they were still running.
+- Recurring tasks now honor their job's concurrency controls. A scheduled job with
+  `@job(concurrency={...})` is routed through the same semaphore acquire/block logic as a normal
+  enqueue, stamping `jobs.concurrency_key` and landing in `blocked_executions` when the key is
+  full — previously it was pushed straight to `ready_executions` and ran unbounded. With
+  `on_conflict="discard"`, a period whose key is full is skipped and the next one fires as usual.
+- `discard_job` no longer leaks a concurrency slot when a dispatcher promotes the same scheduled
+  job concurrently. The job row is now locked `FOR UPDATE` before reading its state, so discard
+  serializes against the promotion and forfeits the slot deterministically (on SQLite,
+  `BEGIN IMMEDIATE` already serializes writers). A discard that meets a worker mid-claim still
+  refuses (returns `False`) without waiting on it.
+- `Scheduler.sync_tasks` now upserts: a changed `schedule`/`class_name`/`queue_name`/`priority`
+  for an existing task key updates the stored `recurring_tasks` row instead of leaving it stale.
+- `retry_all_failed` now processes failed jobs in batches (one transaction per chunk) instead of
+  one transaction per job, so "Retry all" over a large backlog no longer fans out into thousands
+  of serial commits. A call still retries each job at most once, even one that fails again
+  while the call is running.
 
 ## [1.0.0] - 2026-07-23
 
