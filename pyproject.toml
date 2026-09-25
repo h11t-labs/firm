@@ -47,7 +47,10 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["**/migrations/*"]
+# Since 0.16, ruff also formats ```python blocks inside Markdown. The doc examples are deliberately
+# compact (tests/test_docs.py parses and import-checks the docs/ ones), so keep ruff on source
+# files; this also makes a bare `ruff format --check` match CI's scoped run.
+extend-exclude = ["**/migrations/*", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF", "S"]
