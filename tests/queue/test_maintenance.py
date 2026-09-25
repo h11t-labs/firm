@@ -328,7 +328,7 @@ def test_discard_refuses_job_being_claimed_concurrently(
 
 
 def test_discard_does_not_deadlock_with_a_claim_in_progress(
-    runtime: Runtime, engine, add_ready, count: Callable[..., int]
+    runtime: Runtime, engine, add_ready, count: Callable[..., int], is_sqlite: bool
 ) -> None:
     """A claim in progress holds the ready row, then takes a key-share lock on the jobs row
     through the claimed_executions foreign key. discard_job locks the jobs row first, so it must
@@ -362,7 +362,13 @@ def test_discard_does_not_deadlock_with_a_claim_in_progress(
             )
         ).one()
         discarder.start()
-        _time.sleep(0.3)  # the discard takes the jobs row lock meanwhile
+        if is_sqlite:
+            _time.sleep(0.3)  # BEGIN IMMEDIATE holds the discard back until we commit
+        else:
+            # The discard takes the jobs row lock, meets the ready row we hold, and backs off
+            # instead of waiting on it — so it is done before the claim goes on.
+            discarder.join(5)
+            assert not discarder.is_alive(), "discard waited on a ready row a claim holds"
         conn.execute(
             sa_insert(schema.claimed_executions).values(job_id=job_id, created_at=now_utc())
         )

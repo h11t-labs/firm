@@ -88,7 +88,9 @@ def discard_job(runtime: Runtime, job_id: int) -> bool:
         # job. Take it without waiting, though: a claim in progress already holds it and next
         # needs a key-share lock on the jobs row we hold (the claimed_executions foreign key), so
         # waiting would deadlock. A ready row we can't lock is being claimed right now — the job
-        # is about to run, so refuse, as for a claimed one.
+        # is about to run, so refuse, as for a claimed one. Keep the plain existence check below
+        # the first non-locking read in this transaction: MySQL's REPEATABLE READ snapshot starts
+        # at the first such read, and an earlier one could hide a ready row committed since.
         ready = select(_ready.c.id).where(_ready.c.job_id == job_id)
         ready_ids = [ready_row.id for ready_row in conn.execute(dialect.with_skip_locked(ready))]
         if not ready_ids and conn.execute(ready).first() is not None:

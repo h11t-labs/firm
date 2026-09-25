@@ -1713,8 +1713,8 @@ A recurring job honors its [concurrency controls](concurrency.md) like any other
 `on_conflict="block"` (the default), a fire that finds the key full waits in `blocked_executions`
 and runs once the slot frees. With `on_conflict="discard"`, that period is skipped and the next one
 fires as usual, which keeps a slow recurring job from overlapping itself. Each scheduler tries a
-period once, so with several schedulers a slot that frees between their attempts can still let the
-period run.
+period once, and a restarted scheduler counts as a new one: with several schedulers, or a restart
+mid-period, a slot that frees between attempts can still let that period run late.
 
 
 
