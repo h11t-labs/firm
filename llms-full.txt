@@ -1927,12 +1927,19 @@ killed.
 ## Heartbeats & crash recovery {#crash-recovery}
 
 Every running process registers a row in `firm_queue_processes` and refreshes `last_heartbeat_at`
-on a timer. The supervisor:
+on a timer. Both supervisors (and a standalone `firm-queue work`), at startup and then every
+`heartbeat_interval`:
 
-- **Prunes** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and
-- **Recovers** their in-flight work: any claim held by a dead process is moved back to
-  `ready_executions` so another worker finishes it (`recovery.recover_orphaned_claims`). This also
-  runs on supervisor startup, to clean up after an earlier crash.
+- **Prune** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and
+- **Recover** their in-flight work: any claim held by a dead process is moved back to
+  `ready_executions` so another worker finishes it (`recovery.recover_orphaned_claims`). Startup
+  also sweeps up claims whose process row is already gone, to clean up after an earlier crash.
+
+A process that is still alive but finds its own row pruned (its heartbeats stalled past
+`alive_threshold`, say through a long database outage) has already had its claims recovered
+elsewhere, so it stops claiming under that row: a forked child exits and is replaced,
+`firm-queue work` exits, and a `ThreadSupervisor` restarts its components under a fresh
+registration, reporting the eviction through `on_thread_error`.
 
 This gives at-least-once delivery — see the idempotency note in
 [Retries & failures](retries-and-failures.md).
