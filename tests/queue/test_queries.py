@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import event
 
 from firm._core.clock import now_utc
 from firm.queue import queries, queues
@@ -128,6 +129,23 @@ def test_single_queue_reads_match_queue_rows(engine, runtime, seed) -> None:
             assert queries.queue_latency(conn, name, now) == row["latency"]
         assert queries.queue_size(conn, "absent") == 0
         assert queries.queue_latency(conn, "absent", now) == 0.0
+
+
+def test_queue_rows_query_count_does_not_grow_with_the_queues(engine, seed) -> None:
+    # The dashboard overview auto-refreshes on this, so it stays one grouped scan plus the pauses
+    # lookup — never a pair of queries per queue.
+    def statement_count() -> int:
+        statements: list[str] = []
+        with engine.connect() as conn:
+            event.listen(conn, "before_cursor_execute", lambda *args: statements.append(args[2]))
+            queries.queue_rows(conn, now_utc())
+        return len(statements)
+
+    seed.ready(queue="q0")
+    one_queue = statement_count()
+    for i in range(1, 6):
+        seed.ready(queue=f"q{i}")
+    assert statement_count() == one_queue
 
 
 def test_processes_alive_vs_stale(engine, seed) -> None:

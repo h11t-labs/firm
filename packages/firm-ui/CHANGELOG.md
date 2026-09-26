@@ -21,6 +21,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `firm.ui.UIResponse`, and `firm.ui.Headers`, that is all a mount for another framework needs.
 - `static_url=` points the stylesheet link at your own static pipeline, and `firm.ui.static_dir()`
   says where the file lives so you can publish it there.
+- Dashboard actions now say what they did. Pause/resume, retry, discard, retry-all, clear cache,
+  and trim land back on their page with a notice, so a refused or no-op action no longer looks
+  like a success: a refused retry reads "Nothing to retry", the bulk actions report their count,
+  and a count of 0 shows as a warning. The notice rides on the redirect
+  (`?notice=<token>[&count=<n>]`) and works on every transport and under a mount prefix. The page
+  renders only a fixed message and, for the bulk actions, an integer count, so no text from the
+  URL reaches it.
 
 ### Changed
 
@@ -45,6 +52,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `DashboardConnectionError` (a clean CLI error, password masked) instead of silently starting
   the dashboard without that part's tab — a bad password or unreachable host no longer reads as
   "not configured". A reachable database without firm tables still just disables the part.
+
+### Fixed
+
+- A route id past Python's int-string limit (more than 4300 digits) — on the job and audit pages
+  or the retry/discard actions — answered `500`; it is a `404` now, like any other id no row can
+  have.
+- The Channels tab's busiest-channels pager counted distinct channel hashes while the table lists
+  distinct channel names; it counts names now, so the pager total always matches the table.
 
 ## [1.0.1] - 2026-07-28
 

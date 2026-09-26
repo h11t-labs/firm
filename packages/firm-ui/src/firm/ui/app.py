@@ -4,8 +4,9 @@
 server in :mod:`firm.ui.server` and the framework mounts in :mod:`firm.ui.contrib` both build a
 request, call :meth:`DashboardApp.handle`, and write the response.
 
-Routes are matched by hand; GETs render pages, POSTs run an action and redirect back. Each route
-is guarded by whether that part (queue / cache / channel / audit) is enabled on the dashboard.
+Routes are matched by hand; GETs render pages, POSTs run an action and redirect back with a notice
+of what it did. Each route is guarded by whether that part (queue / cache / channel / audit) is
+enabled on the dashboard.
 """
 
 from __future__ import annotations
@@ -295,6 +296,27 @@ class _Handler:
             return morsel.value
         return "system"
 
+    def _notice(self) -> tuple[str | None, int | None]:
+        """The post-action notice a page load carries (``?notice=<token>[&count=<n>]``), if any.
+        The token passes through raw — the render layer only knows a fixed set and renders
+        nothing for anything else. The count must be plain ASCII digits of a size a row count can
+        have, or it is dropped: ``int()`` alone would take ``1_000``, non-ASCII digits, and a
+        4300-digit number that no layout survives."""
+        params = self.request.params
+        notice = params.get("notice", [None])[0]
+        if notice is None:
+            return None, None
+        raw = params.get("count", [""])[0]
+        return notice, (int(raw) if re.fullmatch(r"[0-9]{1,18}", raw) else None)
+
+    def _notice_redirect(self, path: str, notice: str, count: int | None = None) -> UIResponse:
+        """Redirect after an action to ``path`` (a fixed route, never from the request), carrying
+        ``notice`` — a token from the render layer's fixed set — and the action's integer
+        ``count``, so the page can say what happened without reflecting any request input."""
+        query = f"notice={notice}" + (f"&count={count}" if count is not None else "")
+        sep = "&" if "?" in path else "?"
+        return _redirect(self.urls.path(f"{path}{sep}{query}"))
+
     @staticmethod
     def _per_page(raw: str | None, default: int) -> int:
         """Validate a ``per_page`` query param against the shared table-size allowlist, falling
@@ -434,31 +456,35 @@ class _Handler:
                 return self._set_theme(parse_qs(body.decode("utf-8")))
             if (m := re.fullmatch(r"/queue/(.+)/pause", path)) and dash.queue is not None:
                 actions.pause(dash.queue, m.group(1))
-                return _redirect(self.urls.path("/"))
+                return self._notice_redirect("/", "paused")
             if (m := re.fullmatch(r"/queue/(.+)/resume", path)) and dash.queue is not None:
                 actions.resume(dash.queue, m.group(1))
-                return _redirect(self.urls.path("/"))
+                return self._notice_redirect("/", "resumed")
             if (m := re.fullmatch(r"/job/(\d+)/retry", path)) and dash.queue is not None:
                 job_id = _parse_id(m.group(1))
                 if job_id is None:
                     return self._not_found()
-                actions.retry(dash.queue, job_id)
-                return _redirect(self.urls.path("/jobs?state=failed"))
+                ok = actions.retry(dash.queue, job_id)
+                return self._notice_redirect(
+                    "/jobs?state=failed", "retried" if ok else "nothing-to-retry"
+                )
             if (m := re.fullmatch(r"/job/(\d+)/discard", path)) and dash.queue is not None:
                 job_id = _parse_id(m.group(1))
                 if job_id is None:
                     return self._not_found()
-                actions.discard(dash.queue, job_id)
-                return _redirect(self.urls.path("/jobs?state=failed"))
+                ok = actions.discard(dash.queue, job_id)
+                return self._notice_redirect(
+                    "/jobs?state=failed", "discarded" if ok else "nothing-to-discard"
+                )
             if path == "/failed/retry-all" and dash.queue is not None:
-                actions.retry_all(dash.queue)
-                return _redirect(self.urls.path("/jobs?state=failed"))
+                n = actions.retry_all(dash.queue)
+                return self._notice_redirect("/jobs?state=failed", "retried-all", n)
             if path == "/cache/clear" and dash.cache is not None:
-                actions.clear_cache(dash.cache)
-                return _redirect(self.urls.path("/cache"))
+                n = actions.clear_cache(dash.cache)
+                return self._notice_redirect("/cache", "cache-cleared", n)
             if path == "/channels/trim" and dash.channel is not None:
-                actions.trim_channel(dash.channel, retention=self.app.channel_trim_retention)
-                return _redirect(self.urls.path("/channels"))
+                n = actions.trim_channel(dash.channel, retention=self.app.channel_trim_retention)
+                return self._notice_redirect("/channels", "channel-trimmed", n)
             return self._not_found()
         except Exception as exc:
             return self._server_error(exc)
@@ -496,6 +522,7 @@ class _Handler:
         if dash.audit is not None:
             with dash.audit.connect() as audit_conn:
                 integrity = self._integrity(audit_conn)
+        notice, notice_count = self._notice()
         with dash.queue.engine.connect() as conn:
             body = render.overview_page(
                 dash.parts,
@@ -508,6 +535,8 @@ class _Handler:
                 request_path=self.request.full_path,
                 theme=self._theme(),
                 urls=self.urls,
+                notice=notice,
+                notice_count=notice_count,
             )
         return _html(body)
 
@@ -524,6 +553,7 @@ class _Handler:
             jobs = queue_queries.jobs_by_state(
                 conn, state, limit=per_page_n, offset=offset, queue=queue
             )
+        notice, notice_count = self._notice()
         return _html(
             render.jobs_page(
                 dash.parts,
@@ -537,6 +567,8 @@ class _Handler:
                 request_path=self.request.full_path,
                 theme=self._theme(),
                 urls=self.urls,
+                notice=notice,
+                notice_count=notice_count,
             )
         )
 
@@ -562,6 +594,7 @@ class _Handler:
         dash = self.dash
         assert dash.cache is not None
         per_page_n = self._per_page(per_page, render.CACHE_DEFAULT_PER_PAGE)
+        notice, notice_count = self._notice()
         with dash.cache.connect() as conn:
             stats = cache_queries.cache_stats(conn)
             page = _clamp_page(page, stats["entries"], per_page_n)
@@ -578,6 +611,8 @@ class _Handler:
                 request_path=self.request.full_path,
                 theme=self._theme(),
                 urls=self.urls,
+                notice=notice,
+                notice_count=notice_count,
             )
         return _html(body)
 
@@ -588,6 +623,7 @@ class _Handler:
         assert dash.channel is not None
         top_per_page_n = self._per_page(top_per_page, render.CHANNEL_TOP_DEFAULT_PER_PAGE)
         per_page_n = self._per_page(per_page, render.CHANNEL_MSG_DEFAULT_PER_PAGE)
+        notice, notice_count = self._notice()
         with dash.channel.connect() as conn:
             stats = channel_queries.channel_stats(conn)
             top_page = _clamp_page(top_page, stats["channels"], top_per_page_n)
@@ -614,6 +650,8 @@ class _Handler:
                 request_path=self.request.full_path,
                 theme=self._theme(),
                 urls=self.urls,
+                notice=notice,
+                notice_count=notice_count,
             )
         return _html(body)
 
@@ -713,8 +751,12 @@ _MAX_ID = 2**63 - 1  # BIGINT PKs; a longer digit run can't be a row id
 
 def _parse_id(raw: str) -> int | None:
     """Parse a route id; None for values no BIGINT column can hold (-> 404, not a DBAPI
-    error surfacing as a 500)."""
-    value = int(raw)
+    error surfacing as a 500). A digit run past CPython's int-string limit (4300 digits) makes
+    ``int()`` itself raise ``ValueError`` — that is no row id either, not a 500."""
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
     return value if value <= _MAX_ID else None
 
 

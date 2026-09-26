@@ -12,7 +12,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   supported surface for your own dashboards, exporters, and health checks — `channel_stats`,
   `channel_top`, and `channel_recent`, `Connection` in / dicts out. Channel names and payloads come
   back as raw `bytes`, so decoding for display is the caller's decision. A negative `limit`/`offset`
-  raises `ValueError`.
+  raises `ValueError`. `channel_stats()["channels"]` counts distinct channel names — the rows
+  `channel_top` groups by — so it can serve as that table's pager total.
 - `firm-channel stats` now also reports an estimated total payload size (`SUM(length(payload))`),
   matching `firm-cache stats`'s count-plus-size output.
 
