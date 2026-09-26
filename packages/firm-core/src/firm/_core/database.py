@@ -15,14 +15,28 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, make_url
 from sqlalchemy.engine import Connection
+from sqlalchemy.pool import StaticPool
 
 _IMMEDIATE_KEY = "firm_begin_immediate"
 
 
 def is_sqlite_url(url: str) -> bool:
     return url.startswith("sqlite")
+
+
+def is_memory_sqlite_url(url: str) -> bool:
+    """True for SQLite URLs whose database lives entirely in RAM — ``sqlite://`` and
+    ``sqlite:///:memory:`` plus the ``mode=memory`` URI forms. These default to SQLAlchemy's
+    ``SingletonThreadPool``, which both rejects ``pool_size``/``max_overflow`` and gives each
+    thread its *own* empty database, so ``create_engine_for`` handles them specially."""
+    if not is_sqlite_url(url):
+        return False
+    sa_url = make_url(url)
+    if not sa_url.database or sa_url.database == ":memory:":
+        return True
+    return sa_url.query.get("mode") == "memory"
 
 
 def normalize_url(url: str) -> str:
@@ -61,21 +75,32 @@ def create_engine_for(
     """Create an :class:`~sqlalchemy.Engine` configured for firm's access patterns."""
     url = normalize_url(url)
     _require_driver(url)
+    sqlite = is_sqlite_url(url)
     connect_args: dict[str, object] = {}
-    # Plenty of headroom for many worker threads + dispatcher/scheduler/heartbeat loops.
-    kwargs: dict[str, object] = {"pool_size": pool_size, "max_overflow": max_overflow}
-    if is_sqlite_url(url):
-        # Connections are checked out of the pool by whichever worker thread needs them;
-        # SQLAlchemy's pool still hands a connection to one thread at a time.
+    kwargs: dict[str, object] = {}
+    if is_memory_sqlite_url(url):
+        # In-memory SQLite would otherwise get a SingletonThreadPool, which (a) rejects
+        # pool_size/max_overflow — the TypeError this branch avoids — and (b) hands each thread
+        # its own empty :memory: database. StaticPool sidesteps both: no pool-sizing kwargs, and
+        # a single shared connection so every thread sees the same data.
+        kwargs["poolclass"] = StaticPool
         connect_args["check_same_thread"] = False
     else:
-        # Recover transparently from server-dropped / idle-timed-out connections (PG/MySQL).
-        kwargs["pool_pre_ping"] = True
-        kwargs["pool_recycle"] = 3600
+        # Plenty of headroom for many worker threads + dispatcher/scheduler/heartbeat loops.
+        kwargs["pool_size"] = pool_size
+        kwargs["max_overflow"] = max_overflow
+        if sqlite:
+            # Connections are checked out of the pool by whichever worker thread needs them;
+            # SQLAlchemy's pool still hands a connection to one thread at a time.
+            connect_args["check_same_thread"] = False
+        else:
+            # Recover transparently from server-dropped / idle-timed-out connections (PG/MySQL).
+            kwargs["pool_pre_ping"] = True
+            kwargs["pool_recycle"] = 3600
 
     engine = create_engine(url, echo=echo, connect_args=connect_args, **kwargs)
 
-    if is_sqlite_url(url):
+    if sqlite:
         _install_sqlite_pragmas(engine, busy_timeout_ms)
     return engine
 

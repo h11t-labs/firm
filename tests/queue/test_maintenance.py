@@ -70,6 +70,152 @@ def test_retry_all_failed(runtime: Runtime, count: Callable[..., int]) -> None:
     assert count(schema.ready_executions) == 2
 
 
+def test_retry_all_failed_batches(runtime: Runtime, count: Callable[..., int]) -> None:
+    # retry_all_failed processes in chunks: with batch_size=2 over 3 failed jobs it takes two
+    # passes, and every job is re-enqueued to ready with its failed row cleared.
+    for _ in range(3):
+        boom_job.enqueue()
+    run_ready(runtime)
+    assert count(schema.failed_executions) == 3
+
+    assert maintenance.retry_all_failed(runtime, batch_size=2) == 3
+    assert count(schema.failed_executions) == 0
+    assert count(schema.ready_executions) == 3
+
+
+def test_retry_all_failed_retries_each_job_once(
+    runtime: Runtime, count: Callable[..., int]
+) -> None:
+    """A job that fails again while retry_all_failed is still working through the backlog is
+    not retried a second time by the same call: the chunks walk job ids up to the highest one
+    failed at the start, instead of looping until no failed rows are left."""
+    from collections.abc import Iterator
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from sqlalchemy import Connection
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import insert as sa_insert
+
+    boom_job.enqueue()
+    boom_job.enqueue()
+    run_ready(runtime)
+    assert count(schema.failed_executions) == 2
+
+    real = runtime.engine
+    chunks = 0
+
+    @contextmanager
+    def begin() -> Iterator[Connection]:
+        # Fast workers: by the time the next chunk starts, whatever the previous one re-readied
+        # has been claimed and has failed again (for two rounds, so a regression still ends).
+        nonlocal chunks
+        chunks += 1
+        with real.begin() as conn:
+            if 1 < chunks <= 3:
+                ready = schema.ready_executions
+                for job_id in conn.execute(select(ready.c.job_id)).scalars().all():
+                    conn.execute(sa_delete(ready).where(ready.c.job_id == job_id))
+                    conn.execute(
+                        sa_insert(schema.failed_executions).values(job_id=job_id, error="again")
+                    )
+            yield conn
+
+    racing = SimpleNamespace(engine=SimpleNamespace(begin=begin, connect=real.connect))
+    assert maintenance.retry_all_failed(racing, batch_size=1) == 2
+
+
+def test_retry_all_failed_resets_attempts(runtime: Runtime, engine: Engine) -> None:
+    # The batched path mirrors retry_failed's per-job state reset (attempts -> 0, finished_at
+    # cleared) so a retried job gets a fresh run.
+    boom_job.enqueue()
+    run_ready(runtime)
+    assert maintenance.retry_all_failed(runtime) == 1
+    with engine.connect() as conn:
+        row = conn.execute(select(schema.jobs.c.attempts, schema.jobs.c.finished_at)).one()
+    assert row.attempts == 0
+    assert row.finished_at is None
+
+
+def test_discard_forfeits_slot_promoted_concurrently(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    """A discard must not leak a concurrency slot when a dispatcher promotes the same scheduled
+    job concurrently. discard_job now locks the jobs row up front, so it serializes against the
+    promotion (FOR UPDATE on Postgres/MySQL; BEGIN IMMEDIATE on SQLite) and forfeits the slot the
+    promotion acquired. On SQLite the race can't actually occur — BEGIN IMMEDIATE already
+    serializes writers — so here the locking path is exercised functionally; on Postgres/MySQL
+    (when configured via the backend fixture) the same test genuinely covers the row lock."""
+    import threading
+    import time as _time
+    from datetime import timedelta as _td
+
+    from sqlalchemy import insert as sa_insert
+    from sqlalchemy import select as sa_select
+
+    key = "promote-race"
+    with engine.begin() as conn:
+        job_a = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="J", priority=0, concurrency_key=key
+            )
+        ).inserted_primary_key[0]
+        job_b = conn.execute(
+            sa_insert(schema.jobs).values(
+                queue_name="default", class_name="J", priority=0, concurrency_key=key
+            )
+        ).inserted_primary_key[0]
+        # A holds the only slot (value 0); B waits blocked behind it.
+        conn.execute(
+            sa_insert(schema.semaphores).values(
+                key=key, value=0, expires_at=now_utc() + _td(seconds=60)
+            )
+        )
+        conn.execute(
+            sa_insert(schema.blocked_executions).values(
+                job_id=job_b,
+                queue_name="default",
+                priority=0,
+                concurrency_key=key,
+                expires_at=now_utc() + _td(seconds=60),
+            )
+        )
+
+    outcome: dict[str, bool] = {}
+    done = threading.Event()
+
+    def _discarder() -> None:
+        outcome["discarded"] = maintenance.discard_job(runtime, job_a)
+        done.set()
+
+    discarder = threading.Thread(target=_discarder)
+    # A dispatcher mid-promotion of A: hold A's jobs row FOR UPDATE (as dispatch_once does via
+    # its scheduled⋈jobs join) and insert its ready row — uncommitted.
+    with runtime.dialect.begin_claim_tx(engine) as conn:
+        conn.execute(
+            runtime.dialect.with_row_lock(
+                sa_select(schema.jobs.c.id).where(schema.jobs.c.id == job_a)
+            )
+        )
+        conn.execute(
+            sa_insert(schema.ready_executions).values(
+                job_id=job_a, queue_name="default", priority=0
+            )
+        )
+        discarder.start()
+        _time.sleep(0.3)
+        assert not done.is_set(), "discard slipped past a concurrent promotion"
+    discarder.join(10)
+
+    assert outcome["discarded"] is True
+    assert count(schema.blocked_executions) == 0  # B was promoted
+    assert count(schema.ready_executions) == 1  # A's ready cascaded away; B is now ready
+    # The slot moved to B rather than leaking: capacity stays exhausted.
+    with engine.connect() as conn:
+        value = conn.execute(sa_select(schema.semaphores.c.value)).scalar()
+    assert value == 0
+
+
 def test_discard_job_deletes_job_and_executions(
     runtime: Runtime, count: Callable[..., int]
 ) -> None:
@@ -177,6 +323,61 @@ def test_discard_refuses_job_being_claimed_concurrently(
     discarder.join(10)
 
     assert outcome["discarded"] is False
+    assert count(schema.jobs) == 1
+    assert count(schema.claimed_executions) == 1
+
+
+def test_discard_does_not_deadlock_with_a_claim_in_progress(
+    runtime: Runtime, engine, add_ready, count: Callable[..., int], is_sqlite: bool
+) -> None:
+    """A claim in progress holds the ready row, then takes a key-share lock on the jobs row
+    through the claimed_executions foreign key. discard_job locks the jobs row first, so it must
+    not then wait on that ready row: on Postgres/MySQL the two would deadlock and one of them be
+    aborted. The discard backs off instead (the job is being claimed) and the claim goes through.
+    On SQLite BEGIN IMMEDIATE serializes the two, with the same outcome."""
+    import threading
+    import time as _time
+
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import insert as sa_insert
+    from sqlalchemy import select as sa_select
+
+    job_id = add_ready()
+    outcome: dict[str, object] = {}
+
+    def _discarder() -> None:
+        try:
+            outcome["discarded"] = maintenance.discard_job(runtime, job_id)
+        except Exception as exc:  # a deadlock victim surfaces here
+            outcome["error"] = exc
+
+    discarder = threading.Thread(target=_discarder)
+    with runtime.dialect.begin_claim_tx(engine) as conn:
+        # The claim has picked (locked) the ready row, but not yet inserted its claim.
+        picked = conn.execute(
+            runtime.dialect.with_skip_locked(
+                sa_select(schema.ready_executions.c.id).where(
+                    schema.ready_executions.c.job_id == job_id
+                )
+            )
+        ).one()
+        discarder.start()
+        if is_sqlite:
+            _time.sleep(0.3)  # BEGIN IMMEDIATE holds the discard back until we commit
+        else:
+            # The discard takes the jobs row lock, meets the ready row we hold, and backs off
+            # instead of waiting on it — so it is done before the claim goes on.
+            discarder.join(5)
+            assert not discarder.is_alive(), "discard waited on a ready row a claim holds"
+        conn.execute(
+            sa_insert(schema.claimed_executions).values(job_id=job_id, created_at=now_utc())
+        )
+        conn.execute(
+            sa_delete(schema.ready_executions).where(schema.ready_executions.c.id == picked.id)
+        )
+    discarder.join(10)
+
+    assert outcome == {"discarded": False}
     assert count(schema.jobs) == 1
     assert count(schema.claimed_executions) == 1
 

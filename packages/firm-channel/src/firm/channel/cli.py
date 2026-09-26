@@ -22,13 +22,14 @@ def main() -> None:
     pass
 
 
-@main.command(help="Show the number of buffered messages.")
+@main.command(help="Show the number of buffered messages and their estimated payload size.")
 @_db_option
 def stats(database_url: str | None) -> None:
     engine = create_engine_for(_url(database_url))
     try:
         with transaction(engine) as conn:
             click.echo(f"messages: {messages.message_count(conn)}")
+            click.echo(f"payload_size: {messages.payload_bytes(conn)} bytes")
     finally:
         dispose_engine(engine)
 
@@ -45,6 +46,7 @@ def trim(database_url: str | None, retention: float, batch_size: int) -> None:
         with Channel(
             engine=engine,
             create_schema=False,
+            auto_trim=False,
             message_retention=retention,
             trim_batch_size=batch_size,
         ) as channel:

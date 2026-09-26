@@ -18,7 +18,7 @@ uv sync                                      # installs all workspace packages (
 uv run python -m pytest                       # full suite (must pass)
 uv run ruff check packages tests scripts examples # lint
 uv run ruff format                           # format
-uv run ty check packages                     # type check (must pass)
+uv run ty check packages scripts examples    # type check (must pass)
 uv run pre-commit run --all-files            # ruff + ty + llms-full + hygiene
 ```
 
@@ -77,8 +77,8 @@ module carries its own.
   write; audit prunes only on explicit opt-in (never delete audit data silently). Concurrent
   delete sweeps select victims with the skip-locked seam (see `channel/trim.py`,
   `audit/retention.py`).
-- **Style:** ruff (`E,F,I,UP,B,SIM,C4,RUF`, line-length 100) + ruff format; full type hints; a
-  module docstring per file. `migrations/*` are ruff-excluded.
+- **Style:** ruff (`E,F,I,UP,B,SIM,C4,RUF,S` with `S101`/`S311` ignored, line-length 100) +
+  ruff format; full type hints; a module docstring per file. `migrations/*` are ruff-excluded.
 - **New sibling module:** create `packages/firm-<m>/` mirroring `firm-cache` (its `pyproject.toml`
   with the namespaced `[tool.uv.build-backend]` block, `src/firm/<m>/` + `py.typed`), add it to the
   root `[tool.uv.sources]`, then wire into `zensical.toml` nav, a new `alembic.<m>.ini` (its

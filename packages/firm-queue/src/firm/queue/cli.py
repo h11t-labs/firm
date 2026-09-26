@@ -19,6 +19,7 @@ from . import __version__
 from .config import configure
 from .dispatcher import dispatch_once, run_maintenance
 from .hooks import HOOKS
+from .recovery import ReaperLoop, reap_dead_processes, recover_orphaned_claims
 from .supervisor import (
     DispatcherConfig,
     ForkSupervisor,
@@ -30,9 +31,19 @@ from .worker import Worker, run_ready
 
 click = require_click("queue")
 
-# Matches SupervisorConfig.heartbeat_interval; the standalone commands have no supervisor
-# config to read it from.
+# Match SupervisorConfig.heartbeat_interval/alive_threshold; the standalone commands have no
+# supervisor config to read them from.
 _HEARTBEAT_INTERVAL = 60.0
+_ALIVE_THRESHOLD = 300.0
+
+
+def _recover_at_startup(runtime: Runtime) -> None:
+    """Prune stale-heartbeat processes and recover orphaned claims before starting work.
+
+    Without a supervisor around, nothing else reaps: a predecessor that was hard-killed left a
+    stale process row that shields its claims from the absent-row sweep forever."""
+    reap_dead_processes(runtime, _ALIVE_THRESHOLD)
+    recover_orphaned_claims(runtime)
 
 
 def _register_worker_process(runtime: Runtime, kind_name: str) -> int:
@@ -111,6 +122,7 @@ def start(
 @click.option("--threads", default=3, type=int, show_default=True)
 def work(database_url: str | None, imports: tuple[str, ...], queues: str, threads: int) -> None:
     runtime = _configure(database_url, imports)
+    _recover_at_startup(runtime)
     process_id = _register_worker_process(runtime, "worker")
     worker = Worker(
         runtime, queues=tuple(queues.split(",")), threads=threads, process_id=process_id
@@ -124,8 +136,11 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
         on_error=HOOKS.fire_error,
         on_evicted=evicted.set,
     )
+    # No supervisor around to reap for us: recover hard-killed peers' claims ourselves.
+    reaper = ReaperLoop(runtime, _HEARTBEAT_INTERVAL, _ALIVE_THRESHOLD, on_error=HOOKS.fire_error)
     worker.start()
     heartbeat.start()
+    reaper.start()
     try:
         while not evicted.is_set():
             time.sleep(1)
@@ -134,6 +149,7 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
     finally:
         worker.stop()
         heartbeat.stop()
+        reaper.stop()
         process_registry.deregister(runtime.engine, process_id)
 
 
@@ -144,6 +160,7 @@ def work(database_url: str | None, imports: tuple[str, ...], queues: str, thread
 @click.option("--limit", default=100, type=int, show_default=True)
 def drain(database_url: str | None, imports: tuple[str, ...], queues: str, limit: int) -> None:
     runtime = _configure(database_url, imports)
+    _recover_at_startup(runtime)  # re-readied orphans are drained like any other ready job
     process_id = _register_worker_process(runtime, "drain")
     try:
         processed = run_ready(
