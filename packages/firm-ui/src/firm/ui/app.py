@@ -297,7 +297,7 @@ class _Handler:
         return "system"
 
     def _notice(self) -> tuple[str | None, int | None]:
-        """The post-action notice a page load carries (``?notice=<token>[&n=<count>]``), if any.
+        """The post-action notice a page load carries (``?notice=<token>[&count=<n>]``), if any.
         The token passes through raw — the render layer only knows a fixed set and renders
         nothing for anything else. The count must be plain ASCII digits of a size a row count can
         have, or it is dropped: ``int()`` alone would take ``1_000``, non-ASCII digits, and a
@@ -306,14 +306,14 @@ class _Handler:
         notice = params.get("notice", [None])[0]
         if notice is None:
             return None, None
-        raw = params.get("n", [""])[0]
+        raw = params.get("count", [""])[0]
         return notice, (int(raw) if re.fullmatch(r"[0-9]{1,18}", raw) else None)
 
     def _notice_redirect(self, path: str, notice: str, count: int | None = None) -> UIResponse:
         """Redirect after an action to ``path`` (a fixed route, never from the request), carrying
         ``notice`` — a token from the render layer's fixed set — and the action's integer
         ``count``, so the page can say what happened without reflecting any request input."""
-        query = f"notice={notice}" + (f"&n={count}" if count is not None else "")
+        query = f"notice={notice}" + (f"&count={count}" if count is not None else "")
         sep = "&" if "?" in path else "?"
         return _redirect(self.urls.path(f"{path}{sep}{query}"))
 

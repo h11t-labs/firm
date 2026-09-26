@@ -302,8 +302,11 @@ def test_retry_shows_a_retried_notice(base_url, seed) -> None:
     assert 'class="notice ok"' in body
 
 
-def test_refused_discard_shows_a_nothing_to_discard_notice(base_url, seed) -> None:
-    status, body = _post(base_url + "/job/999999/discard")
+@pytest.mark.parametrize("running", [False, True])
+def test_refused_discard_shows_a_nothing_to_discard_notice(base_url, seed, running) -> None:
+    # refused both for a job that is gone and for one a worker is running
+    job_id = seed.claimed() if running else 999999
+    status, body = _post(f"{base_url}/job/{job_id}/discard")
     assert status == 200
     assert "Nothing to discard" in body
     assert 'class="notice warn"' in body
@@ -368,7 +371,7 @@ def test_notice_dismiss_link_drops_the_notice(base_url, seed) -> None:
 def test_unknown_notice_token_renders_no_bar(base_url, seed) -> None:
     """Only the server's own tokens render, so a crafted ``?notice=`` shows nothing — no request
     text is reflected into the page."""
-    status, body = _get(base_url + "/cache?notice=<script>alert(1)</script>&n=9")
+    status, body = _get(base_url + "/cache?notice=<script>alert(1)</script>&count=9")
     assert status == 200
     assert 'class="notice' not in body
     assert "<script>alert(1)</script>" not in body

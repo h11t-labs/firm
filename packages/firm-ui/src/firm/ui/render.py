@@ -434,7 +434,7 @@ def _when(value: datetime | None) -> Markup:
 
 
 # -- post-action notices -----------------------------------------------------------------------
-# A write action redirects back with ``?notice=<token>`` (plus ``&n=<count>`` for the bulk
+# A write action redirects back with ``?notice=<token>`` (plus ``&count=<n>`` for the bulk
 # actions), so the page it lands on can tell a refused or no-op action from a successful one — a
 # plain redirect made "retry refused" and "retried" look identical. The server always picks the
 # token from this fixed set and the count is an integer, so no request text reaches the page. An
@@ -451,7 +451,10 @@ _NOTICES: dict[str, tuple[str, Callable[[int], str]]] = {
     "paused": ("ok", lambda n: "Queue paused."),
     "resumed": ("ok", lambda n: "Queue resumed."),
     "retried": ("ok", lambda n: "Job re-enqueued for retry."),
-    "nothing-to-retry": ("warn", lambda n: "Nothing to retry — that job is no longer failed."),
+    "nothing-to-retry": (
+        "warn",
+        lambda n: "Nothing to retry — that job is no longer failed, or is gone.",
+    ),
     "discarded": ("ok", lambda n: "Job discarded."),
     "nothing-to-discard": (
         "warn",
@@ -473,14 +476,14 @@ _NOTICES: dict[str, tuple[str, Callable[[int], str]]] = {
 
 
 def _strip_notice(request_path: str) -> str:
-    """``request_path`` without its ``notice``/``n`` params: where the dismiss link, the
+    """``request_path`` without its ``notice``/``count`` params: where the dismiss link, the
     auto-refresh, and the chrome's settings forms point while a notice shows, so it clears
     instead of coming back on every reload. The path — mount prefix included — is kept as is."""
     parts = urlsplit(request_path)
     kept = [
         (k, v)
         for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if k not in ("notice", "n")
+        if k not in ("notice", "count")
     ]
     query = urlencode(kept, quote_via=quote)
     return f"{parts.path}?{query}" if query else (parts.path or "/")

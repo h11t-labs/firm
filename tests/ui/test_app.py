@@ -132,6 +132,10 @@ def test_mounted_action_redirects_within_the_mount(app: DashboardApp, seed) -> N
     response = _post(app, f"/job/{job_id}/retry", prefix="/firm")
     assert response.status == 303
     assert ("Location", "/firm/jobs?state=failed&notice=retried") in response.headers
+    seed.cache_entry(key=b"a")
+    seed.cache_entry(key=b"b")
+    response = _post(app, "/cache/clear", prefix="/firm")
+    assert ("Location", "/firm/cache?notice=cache-cleared&count=2") in response.headers
 
 
 def test_mounted_notice_links_stay_within_the_mount(app: DashboardApp, seed) -> None:
@@ -160,12 +164,22 @@ def test_dismissing_a_notice_keeps_the_page_filter(app: DashboardApp, seed) -> N
     assert 'class="notice-x" href="/jobs?state=failed&amp;queue=a%26b%20%C3%A9"' in body
 
 
-@pytest.mark.parametrize("n", ["", "abc", "-1", "1_000", "%D9%A3", "9" * 19])
-def test_count_notice_without_a_plain_count_renders_nothing(app: DashboardApp, n: str) -> None:
+def test_notice_with_auto_refresh_off_still_shows(app: DashboardApp) -> None:
+    # With refresh off there is no <meta refresh> to point at the notice-free URL; the notice
+    # still shows and stays until dismissed.
+    body = _get(
+        app, "/cache", query="notice=cache-cleared&count=2", cookie="firm_refresh_cache=0"
+    ).body.decode()
+    assert "Cleared 2 cache entries." in body
+    assert 'http-equiv="refresh"' not in body
+
+
+@pytest.mark.parametrize("raw", ["", "abc", "-1", "1_000", "%D9%A3", "9" * 19])
+def test_count_notice_without_a_plain_count_renders_nothing(app: DashboardApp, raw: str) -> None:
     """A count notice renders only with a count the server could have sent: plain ASCII digits of
     a row count's size. What ``int()`` alone would also take — ``1_000``, non-ASCII digits, a
     number no layout survives — renders no bar, like an unknown token."""
-    query = "notice=cache-cleared" + (f"&n={n}" if n else "")
+    query = "notice=cache-cleared" + (f"&count={raw}" if raw else "")
     body = _get(app, "/cache", query=query).body.decode()
     assert 'class="notice' not in body
 
