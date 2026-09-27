@@ -143,8 +143,11 @@ its own pool. Multiply by replicas and you can exhaust PostgreSQL's `max_connect
   by passing `pool_size`/`max_overflow` to [`configure()`](queue/configuration.md) in your worker
   entrypoint, **or** front the database with **PgBouncer** (transaction pooling) and keep app pools
   small.
-- `pool_pre_ping` is on for PostgreSQL/MySQL, so dropped connections (failovers, PgBouncer
-  restarts) heal automatically.
+- `pool_pre_ping` is on for PostgreSQL/MySQL, so a connection dropped while idle in the pool
+  (failovers, PgBouncer restarts) is replaced at checkout. A connection that dies *mid-statement*
+  still raises; the one write that must not be lost — recording a finished job's outcome — is
+  retried with a short backoff and, past that, kept by the worker and re-tried before it claims
+  new work, reported through `on_thread_error` each time the budget runs out.
 
 ### Health & liveness
 
