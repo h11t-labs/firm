@@ -109,6 +109,17 @@ reading it runs no code of ours. Grep for it rather than relying on warnings.
   one transaction per job, so "Retry all" over a large backlog no longer fans out into thousands
   of serial commits. A call still retries each job at most once, even one that fails again
   while the call is running.
+- `ForkSupervisor` (the default `firm-queue start` mode) no longer dies on a transient database
+  error during its periodic reap — a failover or connection reset on PostgreSQL/MySQL, or on
+  SQLite a peer committing mid-sweep. The error escaped `start()` with a traceback and the
+  shutdown never ran: the forked children kept running unsupervised, a child that later died was
+  not replaced, nothing in that deployment pruned stale process rows any more (so a hard-killed
+  child's claims stayed orphaned indefinitely), and the supervisor's own row lingered. The reap
+  error is now reported through `on_thread_error` and supervision continues, as thread mode's
+  `ReaperLoop` already did; and whatever ends the supervise loop, the children are always
+  signalled and reaped and the registry cleaned up on the way out. A database that is still
+  unreachable during that final registry cleanup is reported through `on_thread_error` too,
+  rather than raised.
 
 ## [1.0.0] - 2026-07-23
 

@@ -376,8 +376,14 @@ class ForkSupervisor:
             on_error=HOOKS.fire_error,
         )
         self._heartbeat.start()
-        self._supervise()
-        self._shutdown()
+        try:
+            self._supervise()
+        finally:
+            # Whatever ends supervision — a signal, or an exception such as os.fork failing while
+            # replacing a dead child — the children must be signalled and reaped and the registry
+            # cleaned up; otherwise they run on unsupervised with nothing left to restart them
+            # or to recover their claims.
+            self._shutdown()
 
     def _spawn(self, child: ChildConfig) -> None:
         assert self.process_id is not None
@@ -396,7 +402,14 @@ class ForkSupervisor:
             self._reap_and_restart()
             now = time.monotonic()
             if now - last_prune >= self.config.heartbeat_interval:
-                reap_dead_processes(self.runtime, self.config.alive_threshold)
+                # A transient database error here (a failover, a lock) is reported, not fatal:
+                # the same error boundary thread mode's ReaperLoop gives this sweep. Advance
+                # last_prune either way, so an unreachable database is reported once per
+                # interval rather than every iteration.
+                try:
+                    reap_dead_processes(self.runtime, self.config.alive_threshold)
+                except Exception as exc:
+                    HOOKS.fire_error(exc)
                 last_prune = now
             self._stop.wait(0.2)
 
@@ -447,15 +460,23 @@ class ForkSupervisor:
         # leftover rows would hide their in-flight claims from the absent-row sweep below
         # for up to alive_threshold (~6 minutes of job limbo after every hard shutdown).
         # The parent knows exactly whom it spawned — clean up and recover explicitly.
-        if self.process_id is not None:
-            killed = process_registry.deregister_children(self.runtime.engine, self.process_id)
-            if killed:
-                recover_orphaned_claims(self.runtime, killed)
+        #
+        # The children are already signalled and reaped by now, so a database that is still
+        # unreachable here is a partial failure to report, not a reason to raise — which would
+        # only bury whatever ended supervision in the first place. The rows this leaves behind
+        # go stale and are pruned by the next reaper to come along.
+        try:
+            if self.process_id is not None:
+                killed = process_registry.deregister_children(self.runtime.engine, self.process_id)
+                if killed:
+                    recover_orphaned_claims(self.runtime, killed)
 
-        recover_orphaned_claims(self.runtime)
-        if self.process_id is not None:
-            process_registry.deregister(self.runtime.engine, self.process_id)
-            self.process_id = None
+            recover_orphaned_claims(self.runtime)
+            if self.process_id is not None:
+                process_registry.deregister(self.runtime.engine, self.process_id)
+                self.process_id = None
+        except Exception as exc:
+            HOOKS.fire_error(exc)
 
     def _reap_nohang(self) -> None:
         while self._children:

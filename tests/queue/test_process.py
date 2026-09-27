@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import Engine, insert, select, update
+from sqlalchemy import Engine, event, insert, select, update
+from sqlalchemy.exc import OperationalError
 
 from firm._core import process as pr
 from firm._core.clock import now_utc
 from firm._core.config import Runtime
+from firm._core.database import create_engine_for
 from firm.queue import schema
 from firm.queue.recovery import ReaperLoop, reap_dead_processes, recover_orphaned_claims
 
@@ -100,6 +103,63 @@ def test_prune_dead_returns_stale_processes(engine: Engine, count: Callable[...,
         )
     assert pr.prune_dead(engine, alive_threshold_s=60) == [pid]
     assert count(schema.processes) == 0
+
+
+@pytest.mark.parametrize("sweep", ["prune_dead", "deregister_children"])
+def test_registry_sweeps_survive_a_commit_between_their_select_and_delete(
+    db_url: str, engine: Engine, is_sqlite: bool, sweep: str
+) -> None:
+    """``prune_dead`` and ``deregister_children`` SELECT their victims, then DELETE them. Under a
+    deferred ``BEGIN`` on SQLite, a commit by another connection between the two statements
+    upgrades the read snapshot and the DELETE fails at once with SQLITE_BUSY_SNAPSHOT — which
+    ``busy_timeout`` never waits on. Taking the write lock up front makes the peer wait instead."""
+    if not is_sqlite:
+        pytest.skip("SQLite snapshot-upgrade semantics only")
+    supervisor_id = pr.register(engine, pr.ProcessInfo(kind="Supervisor", name="sup", pid=1))
+    victim = pr.register(
+        engine, pr.ProcessInfo(kind="Worker", name="stale", pid=2, supervisor_id=supervisor_id)
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            update(schema.processes)
+            .where(schema.processes.c.id == victim)
+            .values(last_heartbeat_at=now_utc() - timedelta(seconds=1000))
+        )
+    peer_engine = create_engine_for(db_url, busy_timeout_ms=50)
+    interleaved: list[str] = []
+
+    def peer_commits_before_the_delete(
+        conn, cursor, statement: str, parameters, context, executemany
+    ) -> None:
+        if interleaved or not statement.lstrip().upper().startswith("DELETE"):
+            return
+        interleaved.append(statement)
+        # A peer registers itself while the sweep sits between its SELECT and its DELETE. Held
+        # off by the sweep's write lock, the peer times out (suppressed); without that lock it
+        # commits and the sweep's DELETE is the one that fails.
+        with contextlib.suppress(OperationalError), peer_engine.begin() as peer:
+            peer.execute(
+                insert(schema.processes).values(
+                    kind="Worker", name="peer", pid=3, hostname="h", last_heartbeat_at=now_utc()
+                )
+            )
+
+    event.listen(engine, "before_cursor_execute", peer_commits_before_the_delete)
+    try:
+        if sweep == "prune_dead":
+            deleted = pr.prune_dead(engine, alive_threshold_s=300)
+        else:
+            deleted = pr.deregister_children(engine, supervisor_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", peer_commits_before_the_delete)
+        peer_engine.dispose()
+
+    assert interleaved, "the peer never got between SELECT and DELETE; the test is inert"
+    assert deleted == [victim]
+    with engine.connect() as conn:
+        remaining = set(conn.execute(select(schema.processes.c.id)).scalars())
+    assert victim not in remaining
+    assert supervisor_id in remaining
 
 
 def test_recover_orphaned_claims_of_missing_process(

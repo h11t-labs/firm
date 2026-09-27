@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 import threading
 import time
 from collections.abc import Callable
@@ -9,15 +10,18 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import Engine, delete, func, select
+from sqlalchemy.exc import OperationalError
 
 import firm.queue as bq
 from firm._core import process as process_registry
 from firm._core.config import Runtime
 from firm._core.process import HeartbeatPoller, ProcessExitError, ProcessInfo
 from firm.queue import schema
+from firm.queue import supervisor as sup_mod
 from firm.queue.hooks import HOOKS
 from firm.queue.supervisor import (
     DispatcherConfig,
+    ForkSupervisor,
     SchedulerConfig,
     SupervisorConfig,
     ThreadSupervisor,
@@ -392,6 +396,135 @@ def test_fork_supervisor_heartbeats_its_own_row(runtime: Runtime, monkeypatch) -
     heartbeat = created[0]
     assert heartbeat.started and heartbeat.stopped
     assert isinstance(heartbeat.process_id, int)
+
+
+_FAKE_PIDS = (900001, 900002)
+
+
+class _StubHeartbeat:
+    """Stands in for the fork supervisor's own HeartbeatPoller: no thread, no database."""
+
+    def __init__(self, engine: Engine, process_id: int, interval: float, on_error=None) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def stop(self, timeout: float | None = None) -> None:
+        pass
+
+
+@pytest.fixture
+def fork_stubs(monkeypatch) -> list[tuple[int, int]]:
+    """Run ForkSupervisor's supervise/shutdown control flow in-process and deterministically: no
+    fork (children are fake pids), no signal handlers, no heartbeat thread. Returns the
+    ``(pid, signal)`` pairs the supervisor sends to its children."""
+    signalled: list[tuple[int, int]] = []
+    pids = iter(_FAKE_PIDS)
+
+    def fake_spawn(self: ForkSupervisor, child: sup_mod.ChildConfig) -> None:
+        self._children[next(pids)] = child
+
+    monkeypatch.setattr(sup_mod, "HeartbeatPoller", _StubHeartbeat)
+    monkeypatch.setattr(sup_mod, "_signal_pid", lambda pid, sig: signalled.append((pid, sig)))
+    monkeypatch.setattr(ForkSupervisor, "_spawn", fake_spawn)
+    monkeypatch.setattr(ForkSupervisor, "_install_signals", lambda self: None)
+    return signalled
+
+
+def _terminated(signalled: list[tuple[int, int]]) -> list[int]:
+    """The pids asked to drain (fake pids are never reaped, so each is later SIGKILLed too)."""
+    return sorted(pid for pid, sig in signalled if sig == signal.SIGTERM)
+
+
+def _fork_config() -> SupervisorConfig:
+    return SupervisorConfig(
+        workers=[WorkerConfig(), WorkerConfig()],
+        dispatchers=[],
+        heartbeat_interval=0.0,  # the periodic reap runs on every supervise iteration
+        shutdown_timeout=0.05,  # fake pids are never reaped: don't wait 5 s for them
+    )
+
+
+def test_fork_supervisor_survives_a_transient_reap_error(
+    runtime: Runtime, count: Callable[..., int], fork_stubs: list[tuple[int, int]], monkeypatch
+) -> None:
+    """A database hiccup during the periodic reap (a failover, a lock) used to escape start():
+    the supervisor died with a traceback, its children ran on unsupervised and were never
+    restarted, and nothing pruned stale rows for that deployment any more. The error is reported
+    through ``on_thread_error`` — as thread mode's ReaperLoop already does — and supervision goes
+    on; a later normal shutdown still signals the children and deregisters the supervisor."""
+    boom = OperationalError("DELETE FROM firm_queue_processes", None, Exception("db is locked"))
+    supervisor = ForkSupervisor(runtime, _fork_config())
+    reaps = 0
+
+    def flaky_reap(rt: Runtime, threshold: float) -> int:
+        nonlocal reaps
+        reaps += 1
+        if reaps == 1:
+            return 0  # the startup reap
+        if reaps == 2:
+            raise boom  # the first periodic tick fails
+        supervisor._stop.set()  # a later tick succeeds; then ask for a normal shutdown
+        return 0
+
+    monkeypatch.setattr(sup_mod, "reap_dead_processes", flaky_reap)
+    errors: list[BaseException] = []
+    HOOKS.register_error(errors.append)
+    try:
+        supervisor.start()
+    finally:
+        HOOKS.clear()
+
+    assert boom in errors
+    assert reaps >= 3, "supervision stopped after the transient error"
+    assert _terminated(fork_stubs) == sorted(_FAKE_PIDS)
+    assert count(schema.processes) == 0
+
+
+def test_fork_supervisor_shuts_down_when_supervise_raises(
+    runtime: Runtime, count: Callable[..., int], fork_stubs: list[tuple[int, int]], monkeypatch
+) -> None:
+    """Whatever escapes the supervise loop (say ``os.fork`` failing while replacing a dead
+    child), the children are signalled and the registry cleaned up before it propagates."""
+    monkeypatch.setattr(sup_mod, "reap_dead_processes", lambda rt, threshold: 0)
+
+    def exploding_supervise(self: ForkSupervisor) -> None:
+        raise RuntimeError("unexpected failure in the supervise loop")
+
+    monkeypatch.setattr(ForkSupervisor, "_supervise", exploding_supervise)
+    supervisor = ForkSupervisor(runtime, _fork_config())
+    with pytest.raises(RuntimeError, match="unexpected failure"):
+        supervisor.start()
+
+    assert _terminated(fork_stubs) == sorted(_FAKE_PIDS)
+    assert count(schema.processes) == 0
+
+
+def test_fork_shutdown_reports_a_database_error_instead_of_raising(
+    runtime: Runtime, engine: Engine, fork_stubs: list[tuple[int, int]], monkeypatch
+) -> None:
+    """By the time _shutdown reaches the registry, the children are already signalled and reaped;
+    a database that is still down there is a partial failure to report, not a reason to raise
+    (which would only bury whatever ended supervision in the first place)."""
+    supervisor = ForkSupervisor(runtime, _fork_config())
+    supervisor.process_id = process_registry.register(
+        engine, ProcessInfo(kind="Supervisor", name="sup-under-test", pid=1)
+    )
+    boom = OperationalError("DELETE FROM firm_queue_processes", None, Exception("connection lost"))
+
+    def failing_deregister(engine_: Engine, process_id: int) -> None:
+        raise boom
+
+    monkeypatch.setattr(process_registry, "deregister", failing_deregister)
+    errors: list[BaseException] = []
+    HOOKS.register_error(errors.append)
+    try:
+        supervisor._shutdown()
+    finally:
+        HOOKS.clear()
+
+    assert errors == [boom]
 
 
 def test_scheduler_config_is_reachable_through_supervisor_config() -> None:
