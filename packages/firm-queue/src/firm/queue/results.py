@@ -5,15 +5,26 @@
   write a ``failed_executions`` row; release the semaphore either way.
 
 Releasing the semaphore also promotes the next blocked job for that key to ready.
+
+Recording the outcome is the one write that must not be lost once the body has run: the claim
+row stays owned by this live process until it lands, and no recovery sweep touches a live
+process's claims. A transient database error there (a failover at COMMIT, a lock-wait or
+deadlock abort, SQLite ``database is locked``) is therefore retried in-thread with a short
+backoff, and past that budget handed back to the caller as :class:`FinalizeError` — the worker
+keeps re-trying it before claiming new work.
 """
 
 from __future__ import annotations
 
+import time
 import traceback
+from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, TypeVar
 
 from sqlalchemy import delete, insert, select, update
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from .._core.clock import now_utc
 from .._core.config import Runtime
@@ -33,9 +44,67 @@ _claimed = schema.claimed_executions
 _failed = schema.failed_executions
 _scheduled = schema.scheduled_executions
 
+_T = TypeVar("_T")
+
+# Backoff between in-thread attempts to record an outcome. Kept short on purpose: a pool thread
+# sleeping here holds up ``Worker.poll`` (which waits on every future of its batch) and eats
+# into the 5s join budget of ``stop()``; longer outages are the worker's pending list's job.
+_FINALIZE_BACKOFF_S: tuple[float, ...] = (0.1, 0.5, 2.0)
+
+
+class FinalizeError(RuntimeError):
+    """A job's body has run, but recording its outcome kept failing with transient database
+    errors past the in-thread retry budget.
+
+    The claim row is still owned by this process — correctly so: the job must not run anywhere
+    else — so the caller has to keep re-trying until the outcome lands.
+    :class:`~firm.queue.worker.Worker` does that at the top of every poll and reports each
+    exhausted budget through the ``thread_error`` hook. ``finalize`` is idempotent: if an earlier
+    commit did land but its acknowledgement was lost, ``_delete_own_claim`` finds nothing and it
+    exits early.
+    """
+
+    def __init__(self, job_id: int, cause: DBAPIError, finalize: Callable[[], object]) -> None:
+        super().__init__(
+            f"could not record the outcome of job {job_id}; its claim is still held by this "
+            f"process and will be retried: {cause.orig!r}"
+        )
+        self.job_id = job_id
+        self.finalize = finalize
+
+    def retry(self) -> None:
+        """Re-run the finalize with a fresh backoff budget; raises :class:`FinalizeError` again
+        (a new instance, same ``finalize``) if the database is still unavailable."""
+        _run_finalize(self.job_id, self.finalize)
+
+
+def _is_transient(exc: DBAPIError) -> bool:
+    """Connection drops (``connection_invalidated``), failovers, lock-wait timeouts, deadlocks and
+    serialization aborts all surface as ``OperationalError`` in psycopg, pymysql and sqlite3.
+    ``IntegrityError``/``ProgrammingError`` are bugs and must not be retried."""
+    return exc.connection_invalidated or isinstance(exc, OperationalError)
+
+
+def _run_finalize(job_id: int, finalize: Callable[[], _T]) -> _T:
+    """Run ``finalize`` (a single, idempotent outcome transaction) with a bounded retry on
+    transient errors; hand it to the caller as :class:`FinalizeError` once the budget is spent."""
+    for delay in (*_FINALIZE_BACKOFF_S, None):
+        try:
+            return finalize()
+        except DBAPIError as exc:
+            if not _is_transient(exc):
+                raise
+            if delay is None:
+                raise FinalizeError(job_id, exc, finalize) from exc
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
 
 def execute_claimed(runtime: Runtime, job_id: int, process_id: int | None = None) -> bool:
     """Run a claimed job; record success/failure (with retry). Return ``True`` on success.
+
+    Raises :class:`FinalizeError` when the outcome could not be recorded because of transient
+    database errors that outlasted the in-thread retry budget (the claim is then still ours).
 
     ``process_id`` scopes the finalize to the claim this worker owns. After a
     prune -> recover -> reclaim cycle, a zombie worker (stale heartbeat, still alive)
@@ -55,16 +124,26 @@ def execute_claimed(runtime: Runtime, job_id: int, process_id: int | None = None
     if row is None:
         # The job row vanished between claim and execution (a concurrent discard/clear).
         # Drop our claim and move on instead of raising NoResultFound into the worker.
-        with immediate_transaction(runtime.engine) as conn:
-            _delete_own_claim(conn, job_id, process_id)
+        _run_finalize(job_id, partial(_drop_own_claim, runtime, job_id, process_id))
         return False
 
     concurrency_key = row.concurrency_key
     try:
         job = REGISTRY.lookup(row.class_name)
     except UnknownJob as exc:
-        _finalize_failure(
-            runtime, job_id, exc, row.attempts, RetryPolicy(), concurrency_key, None, process_id
+        _run_finalize(
+            job_id,
+            partial(
+                _finalize_failure,
+                runtime,
+                job_id,
+                exc,
+                row.attempts,
+                RetryPolicy(),
+                concurrency_key,
+                None,
+                process_id,
+            ),
         )
         return False
 
@@ -77,19 +156,28 @@ def execute_claimed(runtime: Runtime, job_id: int, process_id: int | None = None
         # thread while its heartbeat keeps the process row fresh — the claim would then be
         # neither finalized nor ever recovered (the process still looks alive), and the
         # worker would silently stop processing inside an apparently healthy process.
-        _finalize_failure(
-            runtime,
+        _run_finalize(
             job_id,
-            exc,
-            row.attempts,
-            job.retry_policy,
-            concurrency_key,
-            job.concurrency,
-            process_id,
+            partial(
+                _finalize_failure,
+                runtime,
+                job_id,
+                exc,
+                row.attempts,
+                job.retry_policy,
+                concurrency_key,
+                job.concurrency,
+                process_id,
+            ),
         )
         return False
     else:
-        return _finalize_success(runtime, job_id, concurrency_key, job.concurrency, process_id)
+        return _run_finalize(
+            job_id,
+            partial(
+                _finalize_success, runtime, job_id, concurrency_key, job.concurrency, process_id
+            ),
+        )
 
 
 def _release(
@@ -122,6 +210,11 @@ def _delete_own_claim(conn, job_id: int, process_id: int | None) -> bool:
     )
     stmt = delete(_claimed).where(_claimed.c.job_id == job_id, owner)
     return bool(conn.execute(stmt).rowcount)
+
+
+def _drop_own_claim(runtime: Runtime, job_id: int, process_id: int | None) -> None:
+    with immediate_transaction(runtime.engine) as conn:
+        _delete_own_claim(conn, job_id, process_id)
 
 
 def _finalize_success(

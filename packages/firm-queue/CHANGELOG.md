@@ -109,6 +109,19 @@ reading it runs no code of ours. Grep for it rather than relying on warnings.
   one transaction per job, so "Retry all" over a large backlog no longer fans out into thousands
   of serial commits. A call still retries each job at most once, even one that fails again
   while the call is running.
+- A transient database error while recording a job's outcome no longer strands the job. After
+  the body ran, the finalize transaction (drop the claim, stamp `finished_at` or schedule the
+  retry / write `failed_executions`, release the concurrency slot) was attempted exactly once; a
+  failover at COMMIT, a lock-wait or deadlock abort, or SQLite `database is locked` left the
+  claim owned by this live, heartbeating process — which no recovery sweep touches — so the job
+  showed as running until the process restarted (and then ran again), a retryable failure was
+  never rescheduled and a terminal one never recorded. The finalize is now retried in-thread
+  with a short backoff (~2.6s) and, past that, handed back to the `Worker`, which reports it
+  through `on_thread_error` (naming the job) and re-tries it at the top of every poll before
+  claiming new work, with one last attempt at shutdown. The finalize is idempotent, so a commit
+  that landed but whose acknowledgement was lost is not applied twice. `run_ready` (and
+  `firm-queue drain`) raise the new `firm.queue.results.FinalizeError` in that case, as they
+  raised the bare `OperationalError` before.
 
 ## [1.0.0] - 2026-07-23
 
