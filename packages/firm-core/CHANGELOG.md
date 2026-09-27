@@ -15,6 +15,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   database instead of its own empty one.
 - The shared Alembic online-migration runner now disposes its engine in a `finally`, so a
   failing `run_migrations()` no longer leaks the connection pool.
+- The process registry's `prune_dead` and `deregister_children` sweeps now take SQLite's write
+  lock up front (`BEGIN IMMEDIATE`) for their SELECT-then-DELETE. Under a plain `BEGIN`, a
+  commit by any other connection between the two statements — a peer heartbeating or
+  registering — made the DELETE fail at once with "database is locked" (SQLite's snapshot
+  upgrade, which `busy_timeout` never waits on); the peer now waits instead. No change on
+  PostgreSQL/MySQL, where this is an ordinary transaction.
 
 ## [1.0.0] - 2026-07-23
 

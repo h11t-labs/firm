@@ -16,6 +16,7 @@ from datetime import timedelta
 from sqlalchemy import Engine, delete, insert, select, update
 
 from .clock import now_utc
+from .database import immediate_transaction
 from .poller import InterruptiblePoller
 from .schema import processes as _processes
 
@@ -89,7 +90,8 @@ def deregister_children(engine: Engine, supervisor_id: int) -> list[int]:
     Used by the supervisor's shutdown: a child escalated to SIGKILL never deregisters
     itself, and its leftover row would hide its claims from the absent-row recovery sweep.
     """
-    with engine.begin() as conn:
+    # SELECT-then-DELETE holds SQLite's write lock from the start (see prune_dead).
+    with immediate_transaction(engine) as conn:
         children = [
             row[0]
             for row in conn.execute(
@@ -104,7 +106,11 @@ def deregister_children(engine: Engine, supervisor_id: int) -> list[int]:
 def prune_dead(engine: Engine, alive_threshold_s: float) -> list[int]:
     """Delete processes whose heartbeat is older than the threshold; return their ids."""
     cutoff = now_utc() - timedelta(seconds=alive_threshold_s)
-    with engine.begin() as conn:
+    # SELECT-then-DELETE under a deferred BEGIN would, on SQLite, fail at once with
+    # SQLITE_BUSY_SNAPSHOT (which busy_timeout never waits on) whenever another connection
+    # commits between the two statements — a peer heartbeating or registering is enough. Taking
+    # the write lock up front makes that peer wait instead. A plain transaction elsewhere.
+    with immediate_transaction(engine) as conn:
         dead = [
             row[0]
             for row in conn.execute(
