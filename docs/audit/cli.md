@@ -52,3 +52,10 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000   # 90 days
 ```
 
 > **Tip:** set `FIRM_AUDIT_DATABASE_URL` in your environment to omit `--database-url`.
+
+
+## Optional S3 storage
+
+The existing SQL backend remains the default. `firm-audit[s3]` adds a database-free S3 backend
+and optional archives for SQL/S3 sources. See [S3 & archives](s3-and-archives.md) for configuration,
+retry guarantees, CLI commands, and retention requirements.

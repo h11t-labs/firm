@@ -9,6 +9,7 @@ from .._core.database import create_engine_for, dispose_engine, transaction
 from . import __version__, schema
 from .events import history as query_history
 from .log import AuditLog
+from .storage_cli import archive, s3
 
 click = require_click("audit")
 
@@ -103,6 +104,11 @@ def prune(database_url: str | None, max_age: float | None) -> None:
             click.echo(f"pruned {audit.retention.run_once()} events")
     finally:
         dispose_engine(engine)
+
+
+# Importing these command definitions never imports boto3 or contacts a bucket.
+main.add_command(s3)
+main.add_command(archive)
 
 
 if __name__ == "__main__":  # pragma: no cover

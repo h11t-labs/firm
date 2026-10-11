@@ -25,7 +25,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, Engine
 
 from .._core.clock import now_utc
-from .._core.schema import dt_type, pk_bigint
+from .._core.dialects import get_dialect
+from .._core.schema import dt_type, long_text, pk_bigint
 from .._core.schema_setup import create_all_and_stamp, drop_all_and_unstamp
 
 metadata = MetaData()
@@ -58,12 +59,59 @@ audits = Table(
 )
 
 
+# Archival state is independent of the supported audit event Table read surface.
+archive_policy = Table(
+    "firm_audit_archive_policy",
+    metadata,
+    Column("id", String(1), primary_key=True),
+    Column("stream", String(36)),
+    Column("destination", Text),
+)
+
+archive_batches = Table(
+    "firm_audit_archive_batches",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("body", long_text()),
+    Column("receipt", Text),
+)
+
+archive_members = Table(
+    "firm_audit_archive_members",
+    metadata,
+    Column("fingerprint", String(64), primary_key=True),
+    Column("event_id", pk_bigint(), nullable=False, unique=True),
+    Column("batch_id", String(36), nullable=False, index=True),
+)
+
+
+archive_imports = Table(
+    "firm_audit_archive_imports",
+    metadata,
+    Column("event_id", pk_bigint(), primary_key=True, autoincrement=False),
+    Column("provenance", Text, nullable=False),
+)
+
+
 def create_all(bind: Engine | Connection) -> None:
     """Create the firm-audit table and stamp the Alembic baseline, so an auto-created schema
     stays ``alembic upgrade``-able later."""
     create_all_and_stamp(
         bind, metadata, migrations_package="firm.audit.migrations", version_table=VERSION_TABLE
     )
+    if isinstance(bind, Engine):
+        with bind.begin() as conn:
+            conn.execute(
+                get_dialect(conn.engine).insert_ignore(
+                    archive_policy, {"id": "1"}, index_elements=("id",)
+                )
+            )
+    else:
+        bind.execute(
+            get_dialect(bind.engine).insert_ignore(
+                archive_policy, {"id": "1"}, index_elements=("id",)
+            )
+        )
 
 
 def drop_all(bind: Engine | Connection) -> None:

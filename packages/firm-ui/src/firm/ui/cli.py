@@ -38,7 +38,13 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     if not (
-        args.database_url or args.queue_url or args.cache_url or args.channel_url or args.audit_url
+        args.database_url
+        or args.queue_url
+        or args.cache_url
+        or args.channel_url
+        or args.audit_url
+        or args.audit_s3_bucket
+        or args.audit_archive_bucket
     ):
         parser.error(
             "No database URL: pass --database-url (or a per-part --queue-url/--cache-url/"
@@ -46,12 +52,40 @@ def main(argv: list[str] | None = None) -> None:
             "FIRM_<MODULE>_DATABASE_URL variables)."
         )
 
+    audit_s3 = None
+    if args.audit_s3_bucket:
+        if not args.audit_s3_stream:
+            parser.error("--audit-s3-stream is required for S3 audit")
+        from firm.audit.s3 import S3AuditLog
+
+        audit_s3 = S3AuditLog(
+            args.audit_s3_bucket,
+            stream=args.audit_s3_stream,
+            prefix=args.audit_s3_prefix,
+            region=args.audit_s3_region,
+            endpoint_url=args.audit_s3_endpoint,
+        )
+    audit_archive = None
+    if args.audit_archive_bucket:
+        from firm.audit.archive import Archive
+        from firm.audit.object_store import ObjectStore
+
+        audit_archive = Archive(
+            ObjectStore(
+                args.audit_archive_bucket,
+                prefix=args.audit_archive_prefix,
+                region=args.audit_s3_region,
+                endpoint_url=args.audit_s3_endpoint,
+            )
+        )
     dashboard = build_dashboard(
         database_url=args.database_url,
         queue_url=args.queue_url,
         cache_url=args.cache_url,
         channel_url=args.channel_url,
         audit_url=args.audit_url,
+        audit_s3=audit_s3,
+        audit_archive=audit_archive,
     )
     if not dashboard.parts:
         parser.error("No firm tables found at the given URL(s); nothing to show.")
@@ -114,6 +148,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("FIRM_AUDIT_DATABASE_URL"),
         help="Override the URL for the audit tab (or set FIRM_AUDIT_DATABASE_URL).",
     )
+    parser.add_argument("--audit-archive-bucket", default=os.getenv("FIRM_AUDIT_ARCHIVE_BUCKET"))
+    parser.add_argument("--audit-archive-prefix", default="firm-audit-archive")
+    parser.add_argument("--audit-s3-bucket", default=os.getenv("FIRM_AUDIT_S3_BUCKET"))
+    parser.add_argument("--audit-s3-stream", default=os.getenv("FIRM_AUDIT_S3_STREAM"))
+    parser.add_argument(
+        "--audit-s3-prefix", default=os.getenv("FIRM_AUDIT_S3_PREFIX", "firm-audit")
+    )
+    parser.add_argument("--audit-s3-region", default=os.getenv("AWS_REGION"))
+    parser.add_argument("--audit-s3-endpoint", default=os.getenv("FIRM_AUDIT_S3_ENDPOINT"))
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")
     parser.add_argument("--port", type=int, default=8787, help="Bind port (default 8787).")
 

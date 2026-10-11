@@ -48,16 +48,41 @@ class Retention:
         engine = self.audit.engine
         dialect = get_dialect(engine)
         total = 0
+        offset = 0
         while True:
             with dialect.begin_claim_tx(engine) as conn:
+                from .sql_archive import eligible, lock_policy
+
+                policy = lock_policy(conn)
                 stmt = dialect.with_skip_locked(
-                    select(_audits.c.id).where(_audits.c.created_at < cutoff).limit(_BATCH_SIZE)
+                    select(_audits)
+                    .where(_audits.c.created_at < cutoff)
+                    .order_by(_audits.c.id)
+                    .offset(offset)
+                    .limit(_BATCH_SIZE)
                 )
-                ids = [row.id for row in conn.execute(stmt)]
+                rows = conn.execute(stmt).all()
+                ids = [
+                    row.id
+                    for row in rows
+                    if not policy or not policy.stream or eligible(conn, row, policy.stream)
+                ]
+                offset += len(rows) - len(ids)
                 if ids:
                     conn.execute(delete(_audits).where(_audits.c.id.in_(ids)))
+                    if policy is not None:
+                        conn.execute(
+                            delete(schema.archive_imports).where(
+                                schema.archive_imports.c.event_id.in_(ids)
+                            )
+                        )
+                        conn.execute(
+                            delete(schema.archive_members).where(
+                                schema.archive_members.c.event_id.in_(ids)
+                            )
+                        )
             total += len(ids)
-            if len(ids) < _BATCH_SIZE:
+            if len(rows) < _BATCH_SIZE:
                 return total
 
 

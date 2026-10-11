@@ -63,6 +63,8 @@ audit.record("invoice.paid", subject=invoice, actor=user, data={"amount": 4200})
 
 SQLite (default), **PostgreSQL**, and **MySQL/MariaDB** are all supported and tested live. See
 [Database backends](database-backends.md) for drivers, locking semantics, and when to use which.
+Audit additionally supports [optional S3 primary storage and archival](audit/s3-and-archives.md),
+including deployments without an audit database or persistent volume.
 
 ## Where to next
 

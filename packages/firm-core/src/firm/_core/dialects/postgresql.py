@@ -17,6 +17,16 @@ from .base import Dialect
 class PostgresDialect(Dialect):
     name = "postgresql"
 
+    def reset_identity(self, conn: Connection, table: Table) -> None:
+        from sqlalchemy import func, select, text
+
+        maximum = conn.execute(select(func.max(table.c.id))).scalar_one()
+        if maximum is not None:
+            conn.execute(
+                text("SELECT setval(pg_get_serial_sequence(:name, 'id'), :value, true)"),
+                {"name": table.name, "value": maximum},
+            )
+
     def begin_claim_tx(self, engine: Engine) -> AbstractContextManager[Connection]:
         return transaction(engine)
 

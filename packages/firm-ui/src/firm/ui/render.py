@@ -11,7 +11,7 @@ already-encoded pieces) are wrapped in ``Markup`` so they pass through unescaped
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -371,6 +371,8 @@ def _dash() -> Markup:
 
 
 def _when(value: datetime | None) -> Markup:
+    if value is not None and value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
     return Markup(_CATALOG.render("When", value=value))
 
 
@@ -741,6 +743,7 @@ def audit_page(
     dir: str = AUDIT_DEFAULT_DIR,
     refresh: int = 10,
     request_path: str = "/audit",
+    has_archive: bool = False,
 ) -> str:
     cards = [
         _card("events", _num(stats["events"])),
@@ -754,6 +757,7 @@ def audit_page(
         r["actor_filter"] = _ref_filter(r["actor_type"], r["actor_id"])
     return _render(
         "audit.html",
+        has_archive=has_archive,
         title="Audit",
         parts=parts,
         active_part="audit",
@@ -795,6 +799,63 @@ def audit_detail_page(parts: list[str], event: dict[str, Any]) -> str:
         active_part="audit",
         event=event,
         cells=cells,
+    )
+
+
+def s3_audit_page(
+    parts: list[str],
+    page: Any,
+    start: Any,
+    end: Any,
+    filters: dict[str, Any],
+    *,
+    has_archive: bool = False,
+) -> str:
+    params = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        **{k: v for k, v in filters.items() if v is not None},
+    }
+    next_url = (
+        "/audit?" + urlencode({**params, "continuation": page.continuation})
+        if page.continuation
+        else None
+    )
+    rows = [
+        {**row, "href": "/audit/object?" + urlencode({"key": row["key"]})} for row in page.items
+    ]
+    return _render(
+        "audit_s3.html",
+        title="Audit",
+        parts=parts,
+        active_part="audit",
+        rows=rows,
+        page=page,
+        start=start,
+        end=end,
+        filters=filters,
+        next_url=next_url,
+        has_archive=has_archive,
+    )
+
+
+def archive_page(parts: list[str], entries: list[dict[str, Any]], key: str) -> str:
+    from firm.audit.event_format import read_event
+
+    seen: set[tuple[str, str, str]] = set()
+    rows = []
+    for entry in entries:
+        identity = entry["source"], entry["stream"], entry["identity"]
+        if identity not in seen:
+            seen.add(identity)
+            rows.append({**read_event(entry["event"]), "identity": entry["identity"]})
+    return _render(
+        "audit_archive.html",
+        title="Audit archive",
+        parts=parts,
+        active_part="audit",
+        rows=rows,
+        key=key,
     )
 
 

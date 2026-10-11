@@ -23,7 +23,8 @@ pip install "firm[audit]"      # just the audit log
 | `queue` | `firm-queue` (croniter, click) | the background-job queue (scheduler + the `firm-queue` CLI) |
 | `cache` | `firm-cache` (click) | the cache store + the `firm-cache` CLI |
 | `channel` | `firm-channel` (click) | pub/sub + the `firm-channel` CLI |
-| `audit` | `firm-audit` (click) | the audit log + the `firm-audit` CLI |
+| `audit` | `firm-audit` (click) | the SQL audit log + the `firm-audit` CLI |
+| `audit-s3` | `firm-audit[s3]` (boto3) | [database-free audit and S3 archives](audit/s3-and-archives.md) |
 | `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
 | `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
 | `postgres` | `psycopg` | running on PostgreSQL |

@@ -70,3 +70,10 @@ log.history(action="user.login")
 ```
 
 Read on: **[Getting started](getting-started.md)**.
+
+
+## Optional S3 storage
+
+The existing SQL backend remains the default. `firm-audit[s3]` adds a database-free S3 backend
+and optional archives for SQL/S3 sources. See [S3 & archives](s3-and-archives.md) for configuration,
+retry guarantees, CLI commands, and retention requirements.

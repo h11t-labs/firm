@@ -1,0 +1,23 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="pagehead"><h1>Audit</h1></div>
+<p>S3 history · {{ start }} to {{ end }} (exclusive) · ascending object order</p>
+{% if has_archive %}<p><a href="/audit/archive">Read an archive</a></p>{% endif %}
+<form class="filters" method="get" action="/audit">
+<label>From <input type="date" name="start" value="{{ start }}" required></label>
+<label>Until <input type="date" name="end" value="{{ end }}" required></label>
+{% for name in ("action", "subject_type", "subject_id", "actor_type", "actor_id", "correlation_id") %}
+<label>{{ name | replace("_", " ") }} <input name="{{ name }}" value="{{ filters[name] or '' }}"></label>
+{% endfor %}
+<button class="primary" type="submit">Search</button>
+</form>
+<p>{{ rows | length }} matching events · {{ page.scanned }} objects scanned · {{ page.requests }} requests.
+{% if page.exhausted %}End of selected range.{% else %}More objects remain in the selected range.{% endif %}</p>
+<table><thead><tr><th>Event</th><th>Recorded</th><th>Action</th><th>Subject</th><th>Actor</th></tr></thead>
+<tbody>{% for row in rows %}<tr>
+<td><a href="{{ row.href }}">{{ row.id }}</a></td><td>{{ row.created_at }}</td><td>{{ row.action }}</td>
+<td>{{ row.subject_type or '' }}{% if row.subject_id %}:{{ row.subject_id }}{% endif %}</td>
+<td>{{ row.actor_type or '' }}{% if row.actor_id %}:{{ row.actor_id }}{% endif %}</td>
+</tr>{% else %}<tr><td colspan="5">No matching events in this scan.</td></tr>{% endfor %}</tbody></table>
+{% if next_url %}<p><a href="{{ next_url }}">Continue scan</a></p>{% endif %}
+{% endblock %}

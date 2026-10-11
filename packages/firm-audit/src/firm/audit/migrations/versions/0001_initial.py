@@ -18,8 +18,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    schema.metadata.create_all(op.get_bind())
+    schema.audits.create(op.get_bind(), checkfirst=True)
 
 
 def downgrade() -> None:
-    schema.metadata.drop_all(op.get_bind())
+    schema.audits.drop(op.get_bind(), checkfirst=True)

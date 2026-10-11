@@ -1,0 +1,15 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="pagehead"><h1>Audit archive</h1></div>
+<form class="filters" method="get" action="/audit/archive">
+<label>Manifest key <input name="key" value="{{ key }}" required></label>
+<button class="primary" type="submit">Verify and read</button>
+</form>
+{% if key %}<p>{{ rows | length }} verified events in this batch.</p>{% endif %}
+{% for row in rows %}
+<details><summary>{{ row.created_at }} · {{ row.action }} · {{ row.identity }}</summary>
+{% for label, value in (("Data", row.data), ("Changes", row.changes), ("Context", row.context)) %}
+{% if value %}<p>{{ label }}</p><pre>{{ value | json_pretty }}</pre>{% endif %}
+{% endfor %}</details>
+{% endfor %}
+{% endblock %}

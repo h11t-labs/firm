@@ -24,6 +24,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+audit-s3 = ["firm-audit[s3]~=0.1.0"]
 queue = ["firm-queue~=0.1.0"]              # background jobs
 cache = ["firm-cache~=0.1.0"]              # cache store
 channel = ["firm-channel~=0.1.0"]          # pub/sub
@@ -36,6 +37,7 @@ mysql = ["firm-core[mysql]~=0.1.0"]       # MySQL / MariaDB driver
 encryption = ["firm-cache[encryption]~=0.1.0"]  # cache at-rest encryption
 msgpack = ["firm-cache[msgpack]~=0.1.0"]  # cache msgpack coder
 all = [
+    "firm-audit[s3]~=0.1.0",
     "firm-ui~=0.1.0",
     "firm-queue[flask,fastapi]~=0.1.0",
     "firm-core[postgres,mysql]~=0.1.0",

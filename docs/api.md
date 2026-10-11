@@ -207,3 +207,25 @@ firm-ui --database-url ... [--queue-url ... --cache-url ... --channel-url ... --
 
 Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. Bare
 `postgresql://` / `mysql://` URLs auto-normalize to the shipped drivers (`[postgres]` / `[mysql]`).
+
+
+## Optional S3 audit and archival APIs
+
+Install `firm-audit[s3]`. These APIs live in optional submodules and leave SQL `AuditLog` unchanged:
+
+- `firm.audit.s3.S3AuditLog(bucket, *, stream, prefix="firm-audit", region=None, endpoint_url=None, client=None)`
+- `S3AuditLog.prepare(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, event_id=None, created_at=None, provenance=None) -> PreparedEvent`
+- `S3AuditLog.write(prepared) -> Receipt`; `record(action, **event_fields) -> Receipt` rejects SQL `conn=`.
+- `S3AuditLog.get(receipt_or_key) -> dict`; `scan(*, start, end, limit=100, max_objects=1000, max_requests=1100, continuation=None, action=None, subject_type=None, subject_id=None, actor_type=None, actor_id=None, correlation_id=None) -> ScanPage`
+- `PreparedEvent(key, body)`; `UnknownEventOutcome.prepared` contains the retryable envelope.
+- `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
+- `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`.
+- `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
+- `Archive.export_s3(source, *, start, end, batch_id, continuation=None, max_objects=100) -> Receipt`.
+- `Archive.restore_s3(receipt_or_key, target) -> list[Receipt]`.
+- `firm.audit.sql_archive.SQLArchiver(audit, archive, *, stream)`; `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict`.
+- `firm.audit.sql_archive.restore_sql(archive, receipts, target) -> int` requires an isolated empty SQL target.
+
+See [S3 & archives](audit/s3-and-archives.md) for guarantees, supported restore paths, and limits.
+
+Imported SQL event provenance is available through `firm.audit.sql_archive.import_provenance(conn, event_id)`. Cross-backend restores retain source identities separately from destination IDs.

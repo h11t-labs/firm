@@ -47,6 +47,7 @@ nav = [
     { "Getting started" = "audit/getting-started.md" },
     { "Retention & querying" = "audit/retention-and-querying.md" },
     { "Configuration" = "audit/configuration.md" },
+    { "S3 & archives" = "audit/s3-and-archives.md" },
     { "CLI" = "audit/cli.md" },
     { "Internals" = "audit/internals.md" },
   ] },

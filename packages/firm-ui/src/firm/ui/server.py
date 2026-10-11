@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import sys
 import traceback
+from datetime import date, timedelta
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -214,6 +215,19 @@ class Handler(BaseHTTPRequestHandler):
                     max(1, _to_int(params.get("page", ["1"])[0], 1)),
                     params.get("per_page", [None])[0],
                 )
+            elif parsed.path == "/audit/archive" and dash.audit_archive is not None:
+                self._archive_view(params)
+            elif parsed.path == "/audit/object" and dash.audit_s3 is not None:
+                try:
+                    event = dash.audit_s3.get(params.get("key", [""])[0])
+                except FileNotFoundError:
+                    self._not_found()
+                except ValueError as exc:
+                    self._html(render.error_page(dash.parts, str(exc)), 400)
+                else:
+                    self._html(render.audit_detail_page(dash.parts, event))
+            elif parsed.path == "/audit" and dash.audit_s3 is not None:
+                self._s3_audit(params)
             elif parsed.path == "/audit" and dash.audit is not None:
                 self._audit(
                     params.get("action", [None])[0],
@@ -225,6 +239,8 @@ class Handler(BaseHTTPRequestHandler):
                     max(1, _to_int(params.get("page", ["1"])[0], 1)),
                     params.get("per_page", [None])[0],
                 )
+            elif parsed.path == "/audit" and dash.audit_archive is not None:
+                self._redirect("/audit/archive")
             elif (match := re.fullmatch(r"/audit/(\d+)", parsed.path)) and dash.audit is not None:
                 audit_id = _parse_id(match.group(1))
                 if audit_id is None:
@@ -302,8 +318,10 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/cache")
         elif dash.channel is not None:
             self._redirect("/channels")
-        elif dash.audit is not None:
+        elif dash.audit is not None or dash.audit_s3 is not None:
             self._redirect("/audit")
+        elif dash.audit_archive is not None:
+            self._redirect("/audit/archive")
         else:
             self._html(render.empty_page(dash.parts))
 
@@ -403,6 +421,60 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._html(body)
 
+    def _s3_audit(self, params: dict[str, list[str]]) -> None:
+        dash = self._dash
+        assert dash.audit_s3 is not None
+        today = now_utc().date()
+        try:
+            start = date.fromisoformat(params.get("start", [today.isoformat()])[0])
+            end = date.fromisoformat(
+                params.get("end", [(today + timedelta(days=1)).isoformat()])[0]
+            )
+            fields = {
+                name: params.get(name, [""])[0] or None
+                for name in (
+                    "action",
+                    "subject_type",
+                    "subject_id",
+                    "actor_type",
+                    "actor_id",
+                    "correlation_id",
+                )
+            }
+            page = dash.audit_s3.scan(
+                start=start,
+                end=end,
+                limit=25,
+                max_objects=100,
+                max_requests=150,
+                continuation=params.get("continuation", [None])[0],
+                **fields,
+            )
+        except ValueError as exc:
+            self._html(render.error_page(dash.parts, str(exc)), 400)
+            return
+        self._html(
+            render.s3_audit_page(
+                dash.parts, page, start, end, fields, has_archive=dash.audit_archive is not None
+            )
+        )
+
+    def _archive_view(self, params: dict[str, list[str]]) -> None:
+        dash = self._dash
+        assert dash.audit_archive is not None
+        key = params.get("key", [""])[0]
+        entries = []
+        try:
+            if key:
+                entries = dash.audit_archive.read(key)
+        except FileNotFoundError:
+            self._not_found()
+            return
+        except ValueError as exc:
+            self._html(render.error_page(dash.parts, str(exc)), 400)
+            return
+        self._html(render.archive_page(dash.parts, entries, key))
+
     def _audit(
         self,
         action: str | None,
@@ -456,6 +528,7 @@ class Handler(BaseHTTPRequestHandler):
                 dir=dir,
                 refresh=self._refresh_seconds("audit"),
                 request_path=self.path,
+                has_archive=dash.audit_archive is not None,
             )
         self._html(body)
 
