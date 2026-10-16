@@ -41,6 +41,7 @@ def provenance(entry: dict[str, Any]) -> dict[str, Any]:
         "stream": entry["stream"],
         "identity": entry["identity"],
         "original_id": entry.get("original_id"),
+        **({"sql_integrity": entry["integrity"]} if entry.get("integrity") else {}),
     }
 
 
@@ -86,6 +87,17 @@ class Archive:
             if not isinstance(key[2], str) or key in seen:
                 raise ValueError("duplicate or invalid archive identity")
             seen.add(key)
+            if entry.get("integrity") is not None:
+                integrity = entry["integrity"]
+                if (
+                    entry["source"] != "sql"
+                    or not isinstance(integrity, dict)
+                    or set(integrity) != {"entry_id", "row_mac", "key_id"}
+                    or not all(
+                        value is None or isinstance(value, str) for value in integrity.values()
+                    )
+                ):
+                    raise ValueError("invalid SQL integrity metadata")
             if entry["source"] == "sql":
                 expected = f"{entry['original_id']}:{digest(canonical(entry['event']))}"
                 if entry["identity"] != expected or not isinstance(entry["original_id"], int):
@@ -157,6 +169,7 @@ class Archive:
                     previous["event"] != entry["event"]
                     or previous.get("envelope") != entry.get("envelope")
                     or provenance(previous) != provenance(entry)
+                    or previous.get("integrity") != entry.get("integrity")
                 ):
                     raise ObjectConflict("conflicting archive source identity")
                 entries.setdefault(identity, entry)
@@ -231,15 +244,15 @@ class Archive:
                 raise ObjectConflict("batch belongs to another export query")
             return self.resume(batch_id)
         stmt = (
-            select(schema.audits)
-            .where(schema.audits.c.id > after)
-            .order_by(schema.audits.c.id)
+            select(schema.audit_events)
+            .where(schema.audit_events.c.id > after)
+            .order_by(schema.audit_events.c.id)
             .limit(limit + 1)
         )
         if since is not None:
-            stmt = stmt.where(schema.audits.c.created_at >= since)
+            stmt = stmt.where(schema.audit_events.c.created_at >= since)
         if until is not None:
-            stmt = stmt.where(schema.audits.c.created_at < until)
+            stmt = stmt.where(schema.audit_events.c.created_at < until)
         with transaction(source.engine) as conn:
             selected = list(conn.execute(stmt))
             has_imports = inspect(conn).has_table(schema.archive_imports.name)

@@ -12,6 +12,7 @@ from firm._core.clock import now_utc
 from firm._core.config import Runtime
 from firm.queue import schema
 from firm.queue.dispatcher import dispatch_once, run_maintenance
+from firm.queue.serialization import serialize
 
 
 @bq.job(concurrency={"key": lambda: "one", "to": 1})
@@ -100,6 +101,56 @@ def test_maintenance_promotes_expired_blocked(
     assert run_maintenance(runtime) == 1
     assert count(schema.blocked_executions) == 0
     assert count(schema.ready_executions) == 1
+
+
+def test_two_dispatch_passes_do_not_double_promote(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: dispatcher_test.rb "run more than one instance of the dispatcher". Two dispatch
+    # passes over the same due scheduled jobs promote each to ready exactly once.
+    for _ in range(4):
+        _add_scheduled(engine, now_utc() - timedelta(minutes=1))
+
+    first = dispatch_once(runtime)
+    second = dispatch_once(runtime)
+
+    assert first == 4
+    assert second == 0
+    assert count(schema.ready_executions) == 4
+    assert count(schema.scheduled_executions) == 0
+
+
+def test_dispatch_missing_class_with_concurrency_key_skips_controls(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: claimed_execution_test.rb "dispatch job with missing class and concurrency key
+    # skips concurrency controls". A scheduled job whose class_name is unregistered but which
+    # carries a concurrency_key must NOT acquire/leak a semaphore: promote it straight to ready.
+    due = now_utc() - timedelta(seconds=1)
+    with engine.begin() as conn:
+        job_id = conn.execute(
+            insert(schema.jobs).values(
+                queue_name="default",
+                class_name="nope.MissingWithKey",
+                arguments=serialize((), {}),
+                concurrency_key="MissingWithKey/abc",
+            )
+        ).inserted_primary_key[0]
+        conn.execute(
+            insert(schema.scheduled_executions).values(
+                job_id=job_id,
+                queue_name="default",
+                priority=0,
+                scheduled_at=due,
+            )
+        )
+
+    assert dispatch_once(runtime) == 1
+
+    # Promoted to ready, not parked as blocked, and no semaphore was created.
+    assert count(schema.ready_executions) == 1
+    assert count(schema.blocked_executions) == 0
+    assert count(schema.semaphores) == 0
 
 
 def test_maintenance_deletes_expired_semaphores(

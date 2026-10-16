@@ -1,18 +1,19 @@
 """Queue management API: pause/resume/size/clear/latency.
 
 A supported operational surface: the dashboard (firm-ui) and the CLI call these directly.
-Changing their signatures is a breaking change.
+Changing their signatures is a breaking change. The reads delegate to :mod:`.queries` (this
+module's ``Runtime``-taking flavor of the same queries), so the semantics have one home.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, insert, select
 
 from .._core.clock import now_utc
 from .._core.config import Runtime
-from . import schema
+from . import queries, schema
 
 _ready = schema.ready_executions
 _pauses = schema.pauses
@@ -22,19 +23,13 @@ _jobs = schema.jobs
 def all_queues(runtime: Runtime) -> list[str]:
     """Distinct queue names that currently have ready jobs."""
     with runtime.engine.connect() as conn:
-        rows = conn.execute(select(_ready.c.queue_name).distinct().order_by(_ready.c.queue_name))
-        return [row[0] for row in rows]
+        return queries.queue_names(conn)
 
 
 def size(runtime: Runtime, queue: str) -> int:
     """Number of ready jobs in ``queue``."""
     with runtime.engine.connect() as conn:
-        return (
-            conn.execute(
-                select(func.count()).select_from(_ready).where(_ready.c.queue_name == queue)
-            ).scalar()
-            or 0
-        )
+        return queries.queue_size(conn, queue)
 
 
 def pause(runtime: Runtime, queue: str) -> None:
@@ -79,11 +74,5 @@ def clear(runtime: Runtime, queue: str) -> int:
 
 def latency(runtime: Runtime, queue: str, now: datetime | None = None) -> float:
     """Seconds since the oldest ready job in ``queue`` was enqueued (0 if empty)."""
-    moment = now or now_utc()
     with runtime.engine.connect() as conn:
-        oldest = conn.execute(
-            select(func.min(_ready.c.created_at)).where(_ready.c.queue_name == queue)
-        ).scalar()
-    if oldest is None:
-        return 0.0
-    return max(0.0, (moment - oldest).total_seconds())
+        return queries.queue_latency(conn, queue, now or now_utc())

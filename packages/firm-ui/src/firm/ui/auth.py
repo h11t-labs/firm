@@ -23,11 +23,9 @@ import hashlib
 import hmac
 import importlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
-
-if TYPE_CHECKING:
-    from email.message import Message
+from typing import Protocol, runtime_checkable
 
 _PBKDF2_ALGO = "pbkdf2_sha256"
 _PBKDF2_ROUNDS = 200_000
@@ -38,8 +36,8 @@ class AuthRequest:
     """The parts of an incoming request an authenticator may inspect."""
 
     method: str
-    path: str
-    headers: Message[str, str]  # the server's parsed request headers (an http.client.HTTPMessage)
+    path: str  # the path the client asked for, mount prefix and query string included
+    headers: Mapping[str, str]  # case-insensitive (firm.ui.app.Headers)
     client_addr: str
 
     def header(self, name: str, default: str = "") -> str:

@@ -1,4 +1,4 @@
-"""Cache schema — the single ``firm_entries`` table.
+"""Cache schema — the single ``firm_cache_entries`` table.
 
 ``key_hash`` (a signed 64-bit hash of the key) is the unique lookup column, so reads/writes
 never need an index on the raw (up to 1 KiB) key. ``id`` gives FIFO ordering for eviction.
@@ -32,7 +32,7 @@ _VALUE_TYPE = long_blob()
 _DT = dt_type()
 
 entries = Table(
-    "firm_entries",
+    "firm_cache_entries",
     metadata,
     Column("id", pk_bigint(), primary_key=True),
     Column("key", LargeBinary(1024), nullable=False),
@@ -40,9 +40,9 @@ entries = Table(
     Column("key_hash", BigInteger, nullable=False),
     Column("byte_size", Integer, nullable=False),
     Column("created_at", _DT, nullable=False, default=now_utc),
-    Index("index_firm_entries_on_key_hash", "key_hash", unique=True),
-    Index("index_firm_entries_on_key_hash_and_byte_size", "key_hash", "byte_size"),
-    Index("index_firm_entries_on_byte_size", "byte_size"),
+    Index("index_firm_cache_entries_on_key_hash", "key_hash", unique=True),
+    Index("index_firm_cache_entries_on_key_hash_and_byte_size", "key_hash", "byte_size"),
+    Index("index_firm_cache_entries_on_byte_size", "byte_size"),
 )
 
 

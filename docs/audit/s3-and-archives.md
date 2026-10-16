@@ -5,7 +5,7 @@ runs in stateless Kubernetes replicas against an existing bucket, without a SQL 
 persistent volume, leader process, or exporter. Archival is a separate optional capability for
 both SQL and S3 sources.
 
-Install `pip install "firm-audit[s3]"` (or `"firm[audit-s3]"`). Default SQL imports do not load
+Install `pip install "firm-audit[s3]"` (or `"firm-stack[audit-s3]"`). Default SQL imports do not load
 boto3. The SDK uses its normal credential chain, including workload identity; do not embed
 credentials in application code. Configure the bucket yourself. Opening the log does not create
 buckets, configure Object Lock, change lifecycle, or delete events.
@@ -192,9 +192,9 @@ backups, and asynchronous archives do not protect unexported events lost with th
 
 ## Continuous SQL export with archive-before-prune
 
-Copy-only SQL export also supports the original `0001` schema. Upgrade to audit migration
-`0002` before using `SQLArchiver` or restoring into a SQL target. Auto-create also creates archival
-tables; Alembic upgrades existing `0001` installations without modifying audit event columns.
+Copy-only SQL export also supports the pre-archive `0002` schema. Upgrade to audit migration
+`0003` before using `SQLArchiver` or restoring into a SQL target. Auto-create also creates archival
+tables; Alembic upgrades existing `0002` installations without modifying audit event columns.
 **Upgrade every pruning process and pause pruning during policy activation/backfill.** Old
 library versions do not honor the new persisted guard.
 
@@ -295,3 +295,19 @@ the supplied **test** bucket. Mock failure tests exercise unknown outcomes and i
 publication; real-provider tests exercise conditional writes, pagination, versions, export,
 and restore. Actual workload latency/cost, Kubernetes rollout behavior, and production IAM/
 Object Lock policies need deployment-specific validation before rollout.
+
+### SQL integrity compatibility
+
+SQL archives preserve the stored JSON bytes and row signature columns (`entry_id`, `row_mac`,
+`key_id`). Native SQL restores retain those columns so row MACs remain verifiable with the
+original key. Cross-backend conversions retain original signature metadata in provenance;
+they do not create a new SQL signature. Seals, activation/floor records, verification status,
+and external anchors belong to the original database and are not included in event archives.
+An isolated restore therefore does not recreate the original sealed history or anchor chain.
+Use a separate database/anchor backup when that evidence must be recovered.
+
+With SQL sealing active, archive-before-prune applies to complete verified seal ranges,
+including any pre-activation rows covered by deletion. One unarchived row blocks retirement
+of its whole range. This keeps both the archive policy and signed-floor invariants intact.
+S3 primary storage does not implement SQL row signing, sealing, or external anchor verification.
+Its receipt digests detect corruption; they are not authentication signatures.

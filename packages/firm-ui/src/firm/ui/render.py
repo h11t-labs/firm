@@ -11,6 +11,7 @@ already-encoded pieces) are wrapped in ``Markup`` so they pass through unescaped
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,28 +20,42 @@ from urllib.parse import quote, urlencode
 from jinja2 import Environment, PackageLoader, select_autoescape
 from jinjax import Catalog
 from jinjax.jinjax import JinjaX
-from markupsafe import Markup
+from markupsafe import Markup, escape
 
 from firm._core.clock import now_utc
+from firm.audit.queries import DEFAULT_SORT, IntegrityState, row_status
+from firm.queue.queries import STATES
 
-from .queries import STATES
+
+@dataclass(frozen=True)
+class Urls:
+    """Where the dashboard's own links point — the one place that knows about the mount point.
+
+    ``prefix`` is empty when the dashboard owns the root (``firm-ui serve``) and holds the mount
+    path (``/firm``, no trailing slash) when it is mounted inside a host application; every link
+    and form action is ``prefix`` + the route's path. ``static_url`` overrides the stylesheet link
+    so a mounted deployment can serve it through the host's own static pipeline instead.
+    """
+
+    prefix: str = ""
+    static_url: str | None = None
+
+    def path(self, rest: str = "/") -> str:
+        """The dashboard-absolute URL for a route path (which always starts with ``/``)."""
+        return f"{self.prefix}{rest}"
+
+    @property
+    def static(self) -> str:
+        return self.static_url or f"{self.prefix}/static/style.css"
+
+
+ROOT_URLS = Urls()  # the dashboard at the root of its own origin — the stdlib server's case
 
 _PART_NAV = {
     "queue": ("Queue", "/"),
     "cache": ("Cache", "/cache"),
     "channel": ("Channels", "/channels"),
     "audit": ("Audit", "/audit"),
-}
-
-# A fixed hue per job state, reused across KPI dots, state badges and the sub-nav so a glance maps
-# colour to state. Saturated mid-tones that read on both light and dark surfaces.
-_STATE_VAR = {
-    "ready": "--st-ready",
-    "scheduled": "--st-scheduled",
-    "blocked": "--st-blocked",
-    "claimed": "--st-claimed",
-    "failed": "--st-failed",
-    "finished": "--st-finished",
 }
 
 # Inline SVG icons (stroke = currentColor, so they inherit the surrounding text colour).
@@ -56,11 +71,31 @@ _ICONS = {
     "chevron": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
     "check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
     "filter": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16l-6 7.5V19l-4 2v-8.5L4 5z"/></svg>',
+    "sun": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+    "moon": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+    "monitor": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    # Shield state marks for the tamper-evidence panel (stroke = currentColor, tinted per state
+    # by the .integrity-icon medallion). A crisp icon beats the emoji glyphs that render
+    # inconsistently across platforms; the verdict word travels alongside, so meaning never
+    # rides on the icon (or colour) alone.
+    "shield-check": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="m8.8 11.3 2.2 2.2 4.2-4.5"/></svg>',
+    "shield-alert": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="M12 7.7v3.6"/><path d="M12 14.4h.01"/></svg>',
+    "shield-x": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/><path d="m10 9.4 4 4.4M14 9.4l-4 4.4"/></svg>',
+    "shield": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v5c0 4.4 3.1 7.9 8 9 4.9-1.1 8-4.6 8-9V6l-8-3z"/></svg>',
 }
 
 # The auto-refresh interval choices, in display order; 0 means off. Shared by the header control
 # (render.py) and the cookie-value allowlist the server checks against (server.py).
 REFRESH_OPTIONS = [(0, "off"), (5, "5s"), (10, "10s"), (30, "30s"), (60, "1m"), (300, "5m")]
+
+# The colour-theme choices (value, label, icon), in display order. ``system`` follows the OS via
+# ``prefers-color-scheme``; ``light``/``dark`` force it. Shared by the header control (render.py)
+# and the cookie-value allowlist the server checks against (server.py).
+THEME_OPTIONS = [
+    ("system", "System", "monitor"),
+    ("light", "Light", "sun"),
+    ("dark", "Dark", "moon"),
+]
 
 # A tiny self-contained firm favicon (data URI) so the page makes no external request — the same
 # rock mark used in the header brand.
@@ -181,9 +216,14 @@ def _bytes(n: int | float) -> str:
     return f"{size:.1f} GiB"
 
 
-def _state_color(state: str | None) -> str:
-    var = _STATE_VAR.get(state or "")
-    return f"var({var})" if var else "var(--text-3)"
+def decode_bytes(raw: Any) -> str:
+    """Render a binary column (a cache key, a channel name or payload) as text. Those columns are
+    arbitrary bytes and the query layer hands them over as ``bytes``, so anything that isn't UTF-8
+    falls back to a ``repr`` rather than raising mid-page."""
+    try:
+        return bytes(raw).decode("utf-8")
+    except (UnicodeDecodeError, TypeError):
+        return repr(bytes(raw))
 
 
 def _json_preview(value: dict[str, Any] | None) -> str:
@@ -198,16 +238,21 @@ def _json_pretty(value: dict[str, Any] | None) -> str:
     return json.dumps(value, default=str, ensure_ascii=False, indent=2)
 
 
-def _jobs_href(state: str, queue: str | None = None) -> str:
+def _jobs_href(urls: Urls, state: str, queue: str | None = None) -> str:
     q = f"&queue={quote(queue, safe='')}" if queue else ""
-    return f"/jobs?state={state}{q}"
+    return urls.path(f"/jobs?state={state}{q}")
 
 
 JOBS_DEFAULT_PER_PAGE = 50
 
 
 def _jobs_list_href(
-    state: str, queue: str | None, *, page: int = 1, per_page: int = JOBS_DEFAULT_PER_PAGE
+    urls: Urls,
+    state: str,
+    queue: str | None,
+    *,
+    page: int = 1,
+    per_page: int = JOBS_DEFAULT_PER_PAGE,
 ) -> str:
     """Like :func:`_jobs_href`, but also carries this list's own page/page-size — kept separate
     since switching state or queue is meant to land back on page 1 at the default size."""
@@ -218,7 +263,7 @@ def _jobs_list_href(
         params["page"] = str(page)
     if per_page != JOBS_DEFAULT_PER_PAGE:
         params["per_page"] = str(per_page)
-    return f"/jobs?{urlencode(params, quote_via=quote)}"
+    return urls.path(f"/jobs?{urlencode(params, quote_via=quote)}")
 
 
 # Shared "how many rows" choices for every paginated table (jobs list, audit list).
@@ -256,14 +301,12 @@ _GLOBALS: dict[str, Any] = {
     "icons": {name: Markup(svg) for name, svg in _ICONS.items()},
     "favicon": _FAVICON,
     "confirm": lambda message: Markup(_confirm(message)),
-    "state_color": _state_color,
-    "jobs_href": _markup_fn(_jobs_href),
 }
 _ENV.globals.update(_GLOBALS)
 
 # The presentation layer is a set of real components under ``templates/components/*.jinja``
 # (``<Card/>``, ``<Pagination/>``, ...), rendered by JinjaX. The catalog copies this module's
-# Jinja globals/filters at construction, so components can use ``state_color``, ``num``, ``dt``,
+# Jinja globals/filters at construction, so components can use ``num``, ``dt``,
 # ``icons`` etc.; adding the ``JinjaX`` extension to ``_ENV`` lets the page templates invoke
 # components with the ``<Component/>`` tag syntax. Components decide *markup only* -- every value
 # and URL they render is computed here in Python and passed in (see the helpers below).
@@ -327,12 +370,12 @@ def _pagesize_options(current: int, href_for: Any) -> list[dict[str, Any]]:
 
 
 def _statenav_items(
-    active_state: str, counts: dict[str, int] | None, queue: str | None
+    urls: Urls, active_state: str, counts: dict[str, int] | None, queue: str | None
 ) -> list[dict[str, Any]]:
     return [
         {
             "state": state,
-            "url": Markup(_jobs_href(state, queue)),
+            "url": Markup(_jobs_href(urls, state, queue)),
             "count": _num(counts[state]) if counts is not None else None,
             "active": state == active_state,
         }
@@ -340,9 +383,13 @@ def _statenav_items(
     ]
 
 
-def _header_tabs(parts: list[str], active_part: str) -> list[dict[str, Any]]:
+def _header_tabs(urls: Urls, parts: list[str], active_part: str) -> list[dict[str, Any]]:
     return [
-        {"label": _PART_NAV[part][0], "href": _PART_NAV[part][1], "active": part == active_part}
+        {
+            "label": _PART_NAV[part][0],
+            "href": urls.path(_PART_NAV[part][1]),
+            "active": part == active_part,
+        }
         for part in parts
     ]
 
@@ -356,6 +403,17 @@ def _refresh_choices(refresh: int) -> list[dict[str, Any]]:
         {"seconds": secs, "label": label, "active": secs == refresh}
         for secs, label in REFRESH_OPTIONS
     ]
+
+
+def _theme_toggle(theme: str) -> dict[str, str]:
+    """The single cycling toggle's data: the current mode's icon/label, plus the next mode in the
+    system -> light -> dark -> system cycle that one click advances to. Falls back to system when
+    the cookie-provided value is unrecognised."""
+    values = [value for value, _, _ in THEME_OPTIONS]
+    idx = values.index(theme) if theme in values else 0
+    _, label, icon = THEME_OPTIONS[idx]
+    next_value, next_label, _ = THEME_OPTIONS[(idx + 1) % len(THEME_OPTIONS)]
+    return {"icon": icon, "label": label, "next_value": next_value, "next_label": next_label}
 
 
 # Detail-page key/value cells hold small pre-rendered fragments; rendering the relevant component
@@ -378,12 +436,14 @@ def _when(value: datetime | None) -> Markup:
 
 # Context defaults for the layout chrome -- always present so `layout.html` never has to guard
 # against an undefined variable; a page-specific kwarg of the same name overrides it.
-_LAYOUT_DEFAULTS = {
+_LAYOUT_DEFAULTS: dict[str, Any] = {
     "substate": None,
     "substate_counts": None,
     "queue": None,
     "refresh": None,
     "request_path": None,
+    "theme": "system",
+    "urls": ROOT_URLS,
 }
 
 
@@ -391,13 +451,22 @@ def _render(template_name: str, **context: Any) -> str:
     ctx = {**_LAYOUT_DEFAULTS, **context}
     # Build the chrome (header tabs, refresh control, state sub-nav) that layout.html renders on
     # every page, so its components receive ready-made data instead of computing it in-template.
-    ctx["request_path"] = ctx["request_path"] or "/"
-    ctx["header_tabs"] = _header_tabs(ctx["parts"], ctx["active_part"])
+    urls: Urls = ctx["urls"]
+    ctx["request_path"] = ctx["request_path"] or urls.path("/")
+    ctx["home"] = urls.path("/")
+    ctx["refresh_action"] = urls.path("/settings/refresh")
+    ctx["theme_action"] = urls.path("/settings/theme")
+    # The two URL builders templates call directly are bound to this render's mount point here;
+    # as context values they shadow nothing else, and no template can build an unprefixed URL.
+    ctx["jobs_href"] = _markup_fn(lambda *a, **kw: _jobs_href(urls, *a, **kw))
+    ctx["audit_href"] = _markup_fn(lambda *a, **kw: _audit_href(urls, *a, **kw))
+    ctx["header_tabs"] = _header_tabs(urls, ctx["parts"], ctx["active_part"])
     refresh = ctx["refresh"]
     ctx["refresh_label"] = _refresh_label(refresh) if refresh is not None else ""
     ctx["refresh_choices"] = _refresh_choices(refresh) if refresh is not None else []
+    ctx["theme_toggle"] = _theme_toggle(ctx["theme"])
     ctx["statenav_items"] = (
-        _statenav_items(ctx["substate"], ctx["substate_counts"], ctx["queue"])
+        _statenav_items(urls, ctx["substate"], ctx["substate_counts"], ctx["queue"])
         if ctx["substate"] is not None
         else None
     )
@@ -414,15 +483,18 @@ def overview_page(
     processes: list[dict[str, Any]],
     recurring: list[dict[str, Any]],
     *,
+    integrity: IntegrityState | None = None,
     refresh: int = 5,
     request_path: str = "/",
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
 ) -> str:
     cards = [
         _card(
             state,
             _num(counts.get(state, 0)),
             state=state,
-            href=f"/jobs?state={state}",
+            href=urls.path(f"/jobs?state={state}"),
             failed=(state == "failed" and counts.get(state, 0) > 0),
         )
         for state in STATES
@@ -441,6 +513,9 @@ def overview_page(
         active_part="queue",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
+        urls=urls,
+        integrity_view=_integrity_view(urls, integrity),
         cards=cards,
         counts=counts,
         queue_rows=queue_rows,
@@ -460,6 +535,8 @@ def jobs_page(
     queue: str | None = None,
     refresh: int = 5,
     request_path: str = "/jobs",
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
 ) -> str:
     total = counts.get(state, 0)
     return _render(
@@ -472,6 +549,8 @@ def jobs_page(
         queue=queue,
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
+        urls=urls,
         state=state,
         jobs=jobs,
         counts=counts,
@@ -480,13 +559,23 @@ def jobs_page(
             page,
             per_page,
             total,
-            lambda n: _jobs_list_href(state, queue, page=n, per_page=per_page),
+            lambda n: _jobs_list_href(urls, state, queue, page=n, per_page=per_page),
         ),
-        pagesize=_pagesize_options(per_page, lambda n: _jobs_list_href(state, queue, per_page=n)),
+        pagesize=_pagesize_options(
+            per_page, lambda n: _jobs_list_href(urls, state, queue, per_page=n)
+        ),
     )
 
 
-def job_page(parts: list[str], job: dict[str, Any], *, queue: str | None = None) -> str:
+def job_page(
+    parts: list[str],
+    job: dict[str, Any],
+    *,
+    queue: str | None = None,
+    theme: str = "system",
+    request_path: str = "",
+    urls: Urls = ROOT_URLS,
+) -> str:
     cells = [
         ("class", _mono(job["class_name"])),
         ("queue", job["queue_name"]),
@@ -507,6 +596,9 @@ def job_page(parts: list[str], job: dict[str, Any], *, queue: str | None = None)
         queue=queue,
         job=job,
         cells=cells,
+        theme=theme,
+        request_path=request_path,
+        urls=urls,
     )
 
 
@@ -516,13 +608,14 @@ def job_page(parts: list[str], job: dict[str, Any], *, queue: str | None = None)
 CACHE_DEFAULT_PER_PAGE = 50
 
 
-def _cache_href(*, page: int = 1, per_page: int = CACHE_DEFAULT_PER_PAGE) -> str:
+def _cache_href(urls: Urls, *, page: int = 1, per_page: int = CACHE_DEFAULT_PER_PAGE) -> str:
     params = {}
     if page > 1:
         params["page"] = str(page)
     if per_page != CACHE_DEFAULT_PER_PAGE:
         params["per_page"] = str(per_page)
-    return f"/cache?{urlencode(params, quote_via=quote)}" if params else "/cache"
+    query = f"?{urlencode(params, quote_via=quote)}" if params else ""
+    return urls.path(f"/cache{query}")
 
 
 def cache_page(
@@ -534,6 +627,8 @@ def cache_page(
     per_page: int = CACHE_DEFAULT_PER_PAGE,
     refresh: int = 10,
     request_path: str = "/cache",
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
 ) -> str:
     cards = [
         _card("entries", _num(stats["entries"])),
@@ -553,13 +648,15 @@ def cache_page(
         active_part="cache",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
+        urls=urls,
         cards=cards,
         entries=entries,
         per_page=per_page,
         pagination=_pagination(
-            page, per_page, stats["entries"], lambda p: _cache_href(page=p, per_page=per_page)
+            page, per_page, stats["entries"], lambda p: _cache_href(urls, page=p, per_page=per_page)
         ),
-        pagesize=_pagesize_options(per_page, lambda p: _cache_href(per_page=p)),
+        pagesize=_pagesize_options(per_page, lambda p: _cache_href(urls, per_page=p)),
     )
 
 
@@ -571,6 +668,7 @@ CHANNEL_MSG_DEFAULT_PER_PAGE = 50
 
 
 def _channels_href(
+    urls: Urls,
     *,
     top_page: int = 1,
     top_per_page: int = CHANNEL_TOP_DEFAULT_PER_PAGE,
@@ -589,7 +687,8 @@ def _channels_href(
         params["page"] = str(page)
     if per_page != CHANNEL_MSG_DEFAULT_PER_PAGE:
         params["per_page"] = str(per_page)
-    return f"/channels?{urlencode(params, quote_via=quote)}" if params else "/channels"
+    query = f"?{urlencode(params, quote_via=quote)}" if params else ""
+    return urls.path(f"/channels{query}")
 
 
 def channel_page(
@@ -604,6 +703,8 @@ def channel_page(
     per_page: int = CHANNEL_MSG_DEFAULT_PER_PAGE,
     refresh: int = 10,
     request_path: str = "/channels",
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
 ) -> str:
     cards = [
         _card("messages", _num(stats["messages"])),
@@ -620,6 +721,8 @@ def channel_page(
         active_part="channel",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
+        urls=urls,
         cards=cards,
         top=top,
         messages=messages,
@@ -630,24 +733,26 @@ def channel_page(
             top_per_page,
             stats["channels"],
             lambda p: _channels_href(
-                top_page=p, top_per_page=top_per_page, page=page, per_page=per_page
+                urls, top_page=p, top_per_page=top_per_page, page=page, per_page=per_page
             ),
         ),
         top_pagesize=_pagesize_options(
             top_per_page,
-            lambda p: _channels_href(top_per_page=p, page=page, per_page=per_page),
+            lambda p: _channels_href(urls, top_per_page=p, page=page, per_page=per_page),
         ),
         msg_pagination=_pagination(
             page,
             per_page,
             stats["messages"],
             lambda p: _channels_href(
-                top_page=top_page, top_per_page=top_per_page, page=p, per_page=per_page
+                urls, top_page=top_page, top_per_page=top_per_page, page=p, per_page=per_page
             ),
         ),
         msg_pagesize=_pagesize_options(
             per_page,
-            lambda p: _channels_href(top_page=top_page, top_per_page=top_per_page, per_page=p),
+            lambda p: _channels_href(
+                urls, top_page=top_page, top_per_page=top_per_page, per_page=p
+            ),
         ),
     )
 
@@ -656,7 +761,7 @@ def channel_page(
 
 
 AUDIT_DEFAULT_PER_PAGE = 25
-AUDIT_DEFAULT_SORT = "created_at"
+AUDIT_DEFAULT_SORT = DEFAULT_SORT  # the library's default column, so the two can't drift apart
 AUDIT_DEFAULT_DIR = "desc"
 # label, sort key, default direction when clicked from an unsorted state
 _AUDIT_COLUMNS = [
@@ -670,6 +775,7 @@ _AUDIT_COLUMNS = [
 
 
 def _audit_href(
+    urls: Urls,
     filters: dict[str, str],
     *,
     sort: str = AUDIT_DEFAULT_SORT,
@@ -689,10 +795,8 @@ def _audit_href(
         params["page"] = str(page)
     if per_page != AUDIT_DEFAULT_PER_PAGE:
         params["per_page"] = str(per_page)
-    return f"/audit?{urlencode(params, quote_via=quote)}" if params else "/audit"
-
-
-_ENV.globals["audit_href"] = _markup_fn(_audit_href)
+    query = f"?{urlencode(params, quote_via=quote)}" if params else ""
+    return urls.path(f"/audit{query}")
 
 
 def _ref_display(type_: str | None, id_: str | None, label: str | None) -> str | None:
@@ -711,7 +815,7 @@ def _ref_filter(type_: str, id_: str | None) -> str:
 
 
 def _sort_columns(
-    filters: dict[str, str], sort: str, dir_: str, per_page: int
+    urls: Urls, filters: dict[str, str], sort: str, dir_: str, per_page: int
 ) -> list[dict[str, Any]]:
     """One entry per column header: its toggled sort URL, whether it is the active sort, and the
     arrow (``↑``/``↓``) to show when active. Clicking the active column flips its direction."""
@@ -722,12 +826,262 @@ def _sort_columns(
         columns.append(
             {
                 "label": label,
-                "url": Markup(_audit_href(filters, sort=key, dir=next_dir, per_page=per_page)),
+                "url": Markup(
+                    _audit_href(urls, filters, sort=key, dir=next_dir, per_page=per_page)
+                ),
                 "active": active,
                 "arrow": ("↑" if dir_ == "asc" else "↓") if active else "",
             }
         )
     return columns
+
+
+# -- integrity (tamper-evidence) panel ---------------------------------------------------------
+# :func:`firm.audit.queries.integrity_state` decides *which* of the six states applies; this section
+# turns that state into the ready-made strings/markup the <Integrity/> component renders (design
+# review D22-D25). Every state carries a shield icon + a word, never colour alone, so the verdict
+# still reads with images off (the word) and without colour vision (icon shape + word).
+_INTEGRITY_ICON = {
+    "ok": "shield-check",
+    "warning": "shield-alert",
+    "error": "shield-alert",
+    "tampered": "shield-x",
+    "never_ran": "shield-alert",
+    "not_configured": "shield",  # plain outline — neutral, no alarm
+}
+# The status word paired with the "Integrity" label, e.g. "Integrity  OK". TAMPERED stays
+# upper-case: it is the one alarm state, rendered as a banner where the shout is the point.
+_INTEGRITY_WORD = {
+    "ok": "OK",
+    "warning": "Warning",
+    "error": "Error",
+    "tampered": "TAMPERED",
+    "never_ran": "Never verified",
+    "not_configured": "Not configured",
+}
+# The panel's tone class drives both the background tint and the medallion colour; the neutral
+# case (legacy / not-configured) is named explicitly so it reads as "no alarm", not "unstyled".
+_INTEGRITY_STRIP = {"ok": "ok", "warn": "warn", "danger": "danger", "neutral": "neutral"}
+
+# The tamper-evidence docs (design/threat model + the "what to do when it's red" runbook).
+_TAMPER_DOCS_URL = "https://github.com/h11t-labs/firm/blob/main/docs/audit/tamper-evidence.md"
+
+#: Hard cap on the ``affected_identifiers`` JSON this page will parse (mirrors
+#: :data:`firm.audit.queries._MAX_AFFECTED_JSON`). The verifier bounds the column to a handful of
+#: small findings, so a larger blob is corrupt or hostile — rejected before ``json.loads`` and paired
+#: with a ``RecursionError`` guard so a deeply-nested payload cannot 500 every render (Bug #3).
+_MAX_AFFECTED_JSON = 64 * 1024
+
+
+def _cause_text(
+    cause: str, status: dict[str, Any], verify_max_age: float, anchor_max_age: float
+) -> str:
+    """The itemized WARNING/ERROR line for one machine cause token — distinct prose per cause so
+    the amber strip never reads as one undifferentiated colour (design D22)."""
+    if cause == "stale":
+        return (
+            f"verify last ran {_reltime(status['ran_at'])} "
+            f"(expected within {_humanize(verify_max_age)})"
+        )
+    if cause == "sealer_stalled":
+        return (
+            f"sealer stalled — oldest unsealed row {_reltime(status['unsealed_tail_oldest_at'])} "
+            f"({_num(status['unsealed_tail_count'])} rows)"
+        )
+    if cause == "anchor_stale":
+        return (
+            f"anchor stale — newest anchor {_reltime(status['newest_anchor_at'])} "
+            f"(expected within {_humanize(anchor_max_age)})"
+        )
+    if cause == "verify_warnings":
+        n = status["warning_count"]
+        count = f"{_num(n)} warning{'' if n == 1 else 's'}"
+        return f"verify reported {count} — check sealer and anchor liveness"
+    return cause
+
+
+def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
+    """Parse the verifier's ``affected_identifiers`` — a JSON list of
+    ``{"kind", "label", "id"?, "message"?, "verdict"?}`` — into render-ready rows. Each row carries a
+    ``chip`` (a link into ``/audit/<id>`` when the finding names a specific row id, else the plain
+    label) and the finding's human ``message`` (the "what/why" the banner surfaces). Malformed or
+    absent data degrades to a single plain chip rather than hiding the finding; oversized or
+    deeply-nested data (a DB-write attacker's DoS attempt — this render runs on every request)
+    degrades to one neutral chip without echoing the blob or raising (Bug #3)."""
+    if not raw:
+        return []
+    if len(raw) > _MAX_AFFECTED_JSON:
+        return [{"kind": "affected", "chip": "integrity findings unavailable", "message": ""}]
+    try:
+        items = json.loads(raw)
+    except RecursionError:
+        return [{"kind": "affected", "chip": "integrity findings unavailable", "message": ""}]
+    except (ValueError, TypeError):
+        return [{"kind": "affected", "chip": raw, "message": ""}]
+    if not isinstance(items, list):
+        items = [items]
+    cells: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            kind = str(item.get("kind", "affected"))
+            label = str(item.get("label", ""))
+            message = str(item["message"]) if item.get("message") else ""
+            id_ = item.get("id")
+            chip: Any = (
+                Markup(f'<a href="{escape(urls.path(f"/audit/{id_}"))}">{escape(label)}</a>')
+                if isinstance(id_, int)
+                else label
+            )
+            cells.append({"kind": kind, "chip": chip, "message": message})
+        else:
+            cells.append({"kind": "affected", "chip": str(item), "message": ""})
+    return cells
+
+
+def _integrity_view(urls: Urls, state: IntegrityState | None) -> dict[str, Any] | None:
+    """Build the <Integrity/> component's ready-made data from a derived state, or ``None`` when
+    there is no audit part to report on. The component stays dumb: every string, link, and colour
+    token it renders is decided here."""
+    if state is None:
+        return None
+    s = state.status
+    view: dict[str, Any] = {
+        "state": state.state,
+        "strip_class": _INTEGRITY_STRIP[state.tone],
+        "icon": Markup(_ICONS[_INTEGRITY_ICON[state.state]]),
+        "word": _INTEGRITY_WORD[state.state],
+        "escalate": state.escalate,
+        "role_alert": state.state == "tampered",
+        "layout": "banner" if state.state == "tampered" else "strip",
+        "when": None,
+        "when_label": "",
+        "detail": "",
+        "facts": [],
+        "cause_lines": [],
+        "headline": "",
+        "meaning": "",
+        "findings": [],
+        "next_step": None,
+    }
+
+    if state.state == "not_configured":
+        view["detail"] = "set FIRM_AUDIT_KEY to enable tamper-evidence"
+        return view
+
+    if state.state == "never_ran":
+        since = state.config.sealing_since
+        if since is not None:
+            view["detail"] = (
+                f"key + sealing active {_reltime(since)} — schedule a firm-audit verify cron"
+            )
+        else:
+            view["detail"] = (
+                "key configured — enable sealing, then schedule a firm-audit verify cron"
+            )
+        return view
+
+    assert s is not None  # ok/warning/error/tampered always carry a status row
+
+    if state.state == "tampered":
+        n = s["tampered_count"]
+        view["when"] = _when(s["ran_at"])
+        view["when_label"] = "first detected"
+        view["headline"] = f"{_num(n)} finding{'' if n == 1 else 's'}"
+        # What it means, in plain language — the framing sentence, true for every tamper class
+        # (modify / delete / insert / invalid seal or marker), kept as the lead so a non-expert
+        # reads the category first.
+        view["meaning"] = (
+            "Sealed audit data no longer matches its signatures — it was modified, deleted, or "
+            "inserted after being recorded."
+        )
+        # One line per finding: the affected record (a chip linking into /audit/<id> when the
+        # verifier named a row id) next to its plain-language reason. A single list, so nothing is
+        # said twice — no separate pill row echoing the same labels. Absent per-finding data leaves
+        # the generic ``meaning`` above to stand alone.
+        view["findings"] = [
+            {"ref": c["chip"], "why": c["message"]}
+            for c in _affected_cells(urls, s["affected_identifiers"])
+        ]
+        # What to do: verify it yourself, and don't disturb the evidence.
+        view["next_step"] = Markup(
+            '<span class="integrity-verify">Verify it yourself: '
+            "<code>firm-audit verify --full</code></span>"
+            '<span class="integrity-caution">Keep the database unchanged — it is the evidence.'
+            "</span>"
+            f'<a href="{_TAMPER_DOCS_URL}">read the runbook</a>'
+        )
+        return view
+
+    if state.state == "ok":
+        # Distinct facts, each with its own label so they don't blur into one grey run-on,
+        # ordered by what matters most at a glance: is the check fresh, how complete is its
+        # coverage, is the anchor current, how much recent data isn't sealed yet.
+        facts: list[dict[str, Any]] = [{"label": "verified", "value": _when(s["ran_at"])}]
+        if s["last_full_coverage_at"] is not None:
+            cov = _reltime(s["last_full_coverage_at"])
+        else:
+            cov = "pending"
+        facts.append({"label": "full coverage", "value": cov})
+        if s["anchor_configured"]:
+            facts.append({"label": "anchor", "value": _reltime(s["newest_anchor_at"])})
+        facts.append({"label": "unsealed tail", "value": f"{_num(s['unsealed_tail_count'])} rows"})
+        view["facts"] = facts
+        return view
+
+    view["when"] = _when(s["ran_at"])
+    view["when_label"] = "verified"
+
+    # warning / error: itemize the causes; ERROR leads with the failure message itself (D24).
+    items: list[str] = []
+    if state.state == "error" and s["error_message"]:
+        items.append(f"verify failed: {s['error_message']}")
+    items.extend(
+        _cause_text(token, s, state.verify_max_age, state.anchor_max_age) for token in state.causes
+    )
+    view["cause_lines"] = items
+    return view
+
+
+# -- per-row tamper-evidence status ------------------------------------------------------------
+# :func:`firm.audit.queries.row_status` decides a row's status token; this maps it to the small tinted
+# shield the events table / detail page shows. Icon shape + tooltip word both carry the meaning, so
+# it never rides on colour alone. Tone classes reuse the table's --ok/--warn/--danger/--text-3.
+_ROW_STATUS = {
+    #  token          icon            tone      word
+    "sealed": ("shield-check", "ok", "Sealed & verified"),
+    "unsealed": ("shield-alert", "warn", "Signed, not yet sealed"),
+    "unprotected": ("shield", "muted", "Unprotected — recorded before tamper-evidence"),
+    "tampered": ("shield-x", "danger", "Tampered — failed verification"),
+    # A sealed row on a run whose tamper findings were truncated: it is within a seal, but the run
+    # flagged more tampered rows than it listed ids for, so the table cannot vouch for THIS row
+    # (Bug #8). Warn tone + neutral shield — honest "sealed, not individually verified", not green.
+    "unverified": (
+        "shield-alert",
+        "warn",
+        "Sealed, but this run couldn't verify it (findings truncated)",
+    ),
+}
+# Shorter words for the detail page's integrity cell, where the icon already sits beside a label.
+_ROW_STATUS_WORD = {
+    "sealed": "Sealed & verified",
+    "unsealed": "Signed, not yet sealed",
+    "unprotected": "Unprotected",
+    "tampered": "Tampered",
+    "unverified": "Sealed, not individually verified",
+}
+
+
+def _row_status_icon(status: str) -> Markup:
+    """The bare tinted shield for a table cell — its ``title`` carries the verdict word."""
+    icon, tone, tooltip = _ROW_STATUS[status]
+    return Markup('<span class="row-status {}" title="{}">{}</span>').format(
+        tone, tooltip, Markup(_ICONS[icon])
+    )
+
+
+def _row_status_cell(status: str) -> Markup:
+    """The detail page's integrity value: the tinted shield followed by its word."""
+    return Markup("{} {}").format(_row_status_icon(status), _ROW_STATUS_WORD[status])
 
 
 def audit_page(
@@ -736,6 +1090,8 @@ def audit_page(
     rows: list[dict[str, Any]],
     filters: dict[str, str],
     *,
+    integrity: IntegrityState | None = None,
+    row_ctx: dict[str, Any] | None = None,
     total: int = 0,
     page: int = 1,
     per_page: int = AUDIT_DEFAULT_PER_PAGE,
@@ -744,17 +1100,25 @@ def audit_page(
     refresh: int = 10,
     request_path: str = "/audit",
     has_archive: bool = False,
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
 ) -> str:
     cards = [
         _card("events", _num(stats["events"])),
         _card("actions", _num(stats["actions"])),
         _card("last event", _reltime(stats["last_event_at"])),
     ]
+    # The per-row status column only appears when tamper-evidence is actually in use; a plain
+    # audit log adds no column, no icon (firm.audit.queries.row_status returns None when inactive).
+    integrity_active = bool(row_ctx and row_ctx["active"])
     for r in rows:
         r["subject_display"] = _ref_display(r["subject_type"], r["subject_id"], r["subject_label"])
         r["subject_filter"] = _ref_filter(r["subject_type"], r["subject_id"])
         r["actor_display"] = _ref_display(r["actor_type"], r["actor_id"], r["actor_label"])
         r["actor_filter"] = _ref_filter(r["actor_type"], r["actor_id"])
+        if row_ctx is not None and row_ctx["active"]:
+            status = row_status(r, row_ctx)  # never None here (row_ctx active)
+            r["status_icon"] = _row_status_icon(status) if status else Markup("")
     return _render(
         "audit.html",
         has_archive=has_archive,
@@ -763,26 +1127,38 @@ def audit_page(
         active_part="audit",
         refresh=refresh,
         request_path=request_path,
+        theme=theme,
+        urls=urls,
+        integrity_view=_integrity_view(urls, integrity),
+        integrity_active=integrity_active,
         cards=cards,
         rows=rows,
         filters=filters,
         sort=sort,
         dir=dir,
         per_page=per_page,
-        columns=_sort_columns(filters, sort, dir, per_page),
+        columns=_sort_columns(urls, filters, sort, dir, per_page),
         pagination=_pagination(
             page,
             per_page,
             total,
-            lambda n: _audit_href(filters, sort=sort, dir=dir, page=n, per_page=per_page),
+            lambda n: _audit_href(urls, filters, sort=sort, dir=dir, page=n, per_page=per_page),
         ),
         pagesize=_pagesize_options(
-            per_page, lambda n: _audit_href(filters, sort=sort, dir=dir, per_page=n)
+            per_page, lambda n: _audit_href(urls, filters, sort=sort, dir=dir, per_page=n)
         ),
     )
 
 
-def audit_detail_page(parts: list[str], event: dict[str, Any]) -> str:
+def audit_detail_page(
+    parts: list[str],
+    event: dict[str, Any],
+    *,
+    row_ctx: dict[str, Any] | None = None,
+    theme: str = "system",
+    request_path: str = "",
+    urls: Urls = ROOT_URLS,
+) -> str:
     subject = _ref_display(event["subject_type"], event["subject_id"], event["subject_label"])
     actor = _ref_display(event["actor_type"], event["actor_id"], event["actor_label"])
     cells = [
@@ -792,6 +1168,11 @@ def audit_detail_page(parts: list[str], event: dict[str, Any]) -> str:
         ("correlation id", event["correlation_id"] if event["correlation_id"] else _dash()),
         ("recorded", _when(event["created_at"])),
     ]
+    # The integrity cell only appears when tamper-evidence is in use (same gate as the table).
+    if row_ctx is not None and row_ctx["active"]:
+        status = row_status(event, row_ctx)
+        if status is not None:
+            cells.append(("integrity", _row_status_cell(status)))
     return _render(
         "audit_detail.html",
         title=f"Event #{event['id']}",
@@ -799,6 +1180,9 @@ def audit_detail_page(parts: list[str], event: dict[str, Any]) -> str:
         active_part="audit",
         event=event,
         cells=cells,
+        theme=theme,
+        request_path=request_path,
+        urls=urls,
     )
 
 
@@ -810,6 +1194,8 @@ def s3_audit_page(
     filters: dict[str, Any],
     *,
     has_archive: bool = False,
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
 ) -> str:
     params = {
         "start": start.isoformat(),
@@ -817,18 +1203,21 @@ def s3_audit_page(
         **{k: v for k, v in filters.items() if v is not None},
     }
     next_url = (
-        "/audit?" + urlencode({**params, "continuation": page.continuation})
+        urls.path("/audit") + "?" + urlencode({**params, "continuation": page.continuation})
         if page.continuation
         else None
     )
     rows = [
-        {**row, "href": "/audit/object?" + urlencode({"key": row["key"]})} for row in page.items
+        {**row, "href": urls.path("/audit/object") + "?" + urlencode({"key": row["key"]})}
+        for row in page.items
     ]
     return _render(
         "audit_s3.html",
         title="Audit",
         parts=parts,
         active_part="audit",
+        theme=theme,
+        urls=urls,
         rows=rows,
         page=page,
         start=start,
@@ -839,7 +1228,14 @@ def s3_audit_page(
     )
 
 
-def archive_page(parts: list[str], entries: list[dict[str, Any]], key: str) -> str:
+def archive_page(
+    parts: list[str],
+    entries: list[dict[str, Any]],
+    key: str,
+    *,
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
+) -> str:
     from firm.audit.event_format import read_event
 
     seen: set[tuple[str, str, str]] = set()
@@ -854,6 +1250,8 @@ def archive_page(parts: list[str], entries: list[dict[str, Any]], key: str) -> s
         title="Audit archive",
         parts=parts,
         active_part="audit",
+        theme=theme,
+        urls=urls,
         rows=rows,
         key=key,
     )
@@ -862,18 +1260,38 @@ def archive_page(parts: list[str], entries: list[dict[str, Any]], key: str) -> s
 # -- misc --------------------------------------------------------------------------------------
 
 
-def empty_page(parts: list[str]) -> str:
-    return _render("empty.html", title="firm", parts=parts, active_part="")
+def empty_page(parts: list[str], *, theme: str = "system", urls: Urls = ROOT_URLS) -> str:
+    return _render("empty.html", title="firm", parts=parts, active_part="", theme=theme, urls=urls)
 
 
-def not_found(parts: list[str]) -> str:
-    return _render("not_found.html", title="Not found", parts=parts, active_part="")
+def not_found(parts: list[str], *, theme: str = "system", urls: Urls = ROOT_URLS) -> str:
+    return _render(
+        "not_found.html", title="Not found", parts=parts, active_part="", theme=theme, urls=urls
+    )
 
 
-def auth_page(title: str, message: str) -> str:
+def auth_page(title: str, message: str, *, theme: str = "system", urls: Urls = ROOT_URLS) -> str:
     # No parts/tabs: this renders before authentication, so it must not reveal the configured parts.
-    return _render("auth.html", title=title, parts=[], active_part="", message=message)
+    return _render(
+        "auth.html",
+        title=title,
+        parts=[],
+        active_part="",
+        message=message,
+        theme=theme,
+        urls=urls,
+    )
 
 
-def error_page(parts: list[str], message: str) -> str:
-    return _render("error.html", title="Error", parts=parts, active_part="", message=message)
+def error_page(
+    parts: list[str], message: str, *, theme: str = "system", urls: Urls = ROOT_URLS
+) -> str:
+    return _render(
+        "error.html",
+        title="Error",
+        parts=parts,
+        active_part="",
+        message=message,
+        theme=theme,
+        urls=urls,
+    )

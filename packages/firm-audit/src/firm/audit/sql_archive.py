@@ -49,7 +49,16 @@ def source_entry(
     event = events._row_to_dict(row)
     if include_import_metadata:
         event["provenance"] = import_provenance(conn, row.id)
-    return sql_entry(stream, event)
+    entry = sql_entry(stream, event)
+    # MACs cover the stored JSON strings, including their whitespace/order. Never re-encode
+    # these bytes when copying a SQL row, even if they decode to the same Python payload.
+    for field in ("data", "changes", "context"):
+        entry["event"][field] = row._mapping[field]
+    entry["identity"] = f"{row.id}:{digest(canonical(entry['event']))}"
+    signed = {name: row._mapping[name] for name in ("entry_id", "row_mac", "key_id")}
+    if any(value is not None for value in signed.values()):
+        entry["integrity"] = signed
+    return entry
 
 
 def eligible(conn: Connection, row: Any, stream: str) -> bool:
@@ -136,15 +145,15 @@ class SQLArchiver:
                 member = schema.archive_members
                 unreserved = (
                     ~select(member.c.event_id)
-                    .where(member.c.event_id == schema.audits.c.id)
+                    .where(member.c.event_id == schema.audit_events.c.id)
                     .with_for_update()
                     .exists()
                 )
                 for row in conn.execute(
                     dialect.with_skip_locked(
-                        select(schema.audits)
+                        select(schema.audit_events)
                         .where(unreserved)
-                        .order_by(schema.audits.c.id)
+                        .order_by(schema.audit_events.c.id)
                         .limit(batch_size)
                     )
                 ):
@@ -187,7 +196,7 @@ class SQLArchiver:
 
     def status(self) -> dict[str, int]:
         with transaction(self.audit.engine) as conn:
-            total = conn.execute(select(func.count()).select_from(schema.audits)).scalar_one()
+            total = conn.execute(select(func.count()).select_from(schema.audit_events)).scalar_one()
             # Locking reads see current reservations even under MySQL REPEATABLE READ.
             # Skip locked source rows so a delayed writer cannot stall discovery.
             pending = conn.execute(
@@ -199,9 +208,9 @@ class SQLArchiver:
             archived = conn.execute(
                 select(func.count())
                 .select_from(
-                    schema.audits.join(member, schema.audits.c.id == member.c.event_id).join(
-                        batches, member.c.batch_id == batches.c.id
-                    )
+                    schema.audit_events.join(
+                        member, schema.audit_events.c.id == member.c.event_id
+                    ).join(batches, member.c.batch_id == batches.c.id)
                 )
                 .where(batches.c.receipt.is_not(None))
             ).scalar_one()
@@ -219,10 +228,14 @@ def restore_sql(archive: Archive, receipts: list[Receipt | str], target: AuditLo
     if len(ids) != len(set(ids)):
         raise ValueError("source reused SQL IDs; restore these batches into separate targets")
     with get_dialect(target.engine).begin_claim_tx(target.engine) as conn:
-        if conn.execute(select(schema.audits.c.id).limit(1)).first() is not None:
+        if conn.execute(select(schema.audit_events.c.id).limit(1)).first() is not None:
             raise ValueError("restore requires an empty target")
         if conn.execute(select(schema.archive_imports.c.event_id).limit(1)).first() is not None:
             raise ValueError("restore requires an isolated target without old import metadata")
+        if conn.execute(select(schema.seals.c.id).limit(1)).first() is not None:
+            raise ValueError("restore requires an isolated target without old integrity records")
+        if conn.execute(select(schema.verify_status.c.id).limit(1)).first() is not None:
+            raise ValueError("restore requires an isolated target without old verification state")
         from datetime import datetime
 
         for entry in entries:
@@ -230,7 +243,8 @@ def restore_sql(archive: Archive, receipts: list[Receipt | str], target: AuditLo
             event["created_at"] = datetime.fromisoformat(event["created_at"]).replace(tzinfo=None)
             if native_sql:
                 event["id"] = entry["original_id"]
-            result = conn.execute(schema.audits.insert().values(**event))
+                event.update(entry.get("integrity", {}))
+            result = conn.execute(schema.audit_events.insert().values(**event))
             primary_key = result.inserted_primary_key
             if primary_key is None:
                 raise ValueError("provider did not return the restored event identity")
@@ -242,5 +256,5 @@ def restore_sql(archive: Archive, receipts: list[Receipt | str], target: AuditLo
                 )
             )
         if entries:
-            get_dialect(target.engine).reset_identity(conn, schema.audits)
+            get_dialect(target.engine).reset_identity(conn, schema.audit_events)
     return len(entries)

@@ -81,6 +81,21 @@ def _post_form(url: str, fields: dict[str, str], cookie: str = "") -> tuple[int,
         return exc.code, dict(exc.headers.items())
 
 
+def test_chunked_request_is_refused(base_url) -> None:
+    """The stdlib handler frames a body by Content-Length alone, so a chunked body would be left in
+    the socket and read as the next request — the back half of a smuggling pair. Refuse it."""
+    import socket
+
+    host, port = base_url.removeprefix("http://").split(":")
+    with socket.create_connection((host, int(port)), timeout=5) as sock:
+        sock.sendall(
+            b"POST /cache/clear HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+            b"5\r\nhello\r\n0\r\n\r\n"
+        )
+        sock.settimeout(5)
+        assert b"400" in sock.recv(1024).split(b"\r\n", 1)[0]
+
+
 def test_overview_renders_with_all_four_tabs(base_url, seed) -> None:
     seed.ready()
     seed.failed()
@@ -156,7 +171,7 @@ def test_overview_recurring_unrecognized_schedule_has_no_tooltip(base_url, seed)
     seed.recurring_task(key="weekdays", schedule="0 9 * * 1-5")
     status, body = _get(base_url + "/")
     assert status == 200
-    assert '<span class="chip mono">0 9 * * 1-5</span>' in body
+    assert '<span class="pill mono">0 9 * * 1-5</span>' in body
 
 
 def test_jobs_page_scoped_to_queue_preserves_filter(base_url, seed) -> None:
@@ -179,7 +194,7 @@ def test_jobs_page_unfiltered_has_no_filter_chip(base_url, seed) -> None:
     seed.ready(queue="mailers")
     status, body = _get(base_url + "/jobs?state=ready")
     assert status == 200
-    assert 'class="chip filter-chip"' not in body  # no active filter -> no chip element rendered
+    assert 'class="pill accent"' not in body  # no active filter -> no filter chip rendered
     # each row's queue chip links back into the filtered view
     assert 'href="/jobs?state=ready&queue=mailers"' in body
 
@@ -264,6 +279,19 @@ def test_channels_page_and_trim(base_url, seed) -> None:
     assert "ping" in body
     status, _ = _post(base_url + "/channels/trim")  # nothing old enough -> still 200
     assert status == 200
+
+
+def test_binary_columns_are_decoded_for_display(base_url, seed) -> None:
+    # The query layers hand cache keys and channel names/payloads over as bytes; the dashboard
+    # decodes them at the edge, so a page never shows a b'...' repr of plain UTF-8 text.
+    seed.cache_entry()  # key=b"user:1"
+    seed.channel_message()  # channel=b"room:1", payload=b"hello"
+    _, cache_body = _get(base_url + "/cache")
+    _, channel_body = _get(base_url + "/channels")
+    assert "user:1" in cache_body
+    assert "room:1" in channel_body and "hello" in channel_body
+    for body in (cache_body, channel_body):
+        assert "b&#39;" not in body and "b'" not in body
 
 
 def test_cache_page_size_selector_and_pagination(base_url, seed) -> None:
@@ -619,6 +647,47 @@ def test_set_refresh_rejects_unsafe_return(base_url) -> None:
     )
     assert status == 303
     assert headers["Location"] == "/"  # falls back to a safe default, not the attacker's URL
+
+
+def test_overview_shows_theme_control_defaulting_to_system(base_url) -> None:
+    status, body = _get(base_url + "/")
+    assert status == 200
+    assert '<html data-theme="system">' in body  # unset cookie -> follow the OS
+    assert 'action="/settings/theme"' in body
+    assert 'name="theme" value="light"' in body
+
+
+def test_set_theme_updates_cookie_and_html_attribute(base_url) -> None:
+    status, headers = _post_form(base_url + "/settings/theme", {"theme": "dark", "return": "/"})
+    assert status == 303
+    assert headers["Location"] == "/"
+    cookie = headers["Set-Cookie"].split(";")[0]
+    assert cookie == "firm_theme=dark"
+    _, body = _get_with_cookie(base_url + "/", cookie)
+    assert '<html data-theme="dark">' in body
+
+
+def test_set_theme_rejects_invalid_value(base_url) -> None:
+    status, _ = _post_form(base_url + "/settings/theme", {"theme": "neon", "return": "/"})
+    assert status == 404
+
+
+def test_set_theme_rejects_unsafe_return(base_url) -> None:
+    status, headers = _post_form(
+        base_url + "/settings/theme",
+        {"theme": "dark", "return": "https://evil.example/steal"},
+    )
+    assert status == 303
+    assert headers["Location"] == "/"  # falls back to a safe default, not the attacker's URL
+
+
+def test_theme_control_present_on_detail_page(base_url, seed) -> None:
+    # Unlike the refresh control, the theme toggle also appears on detail pages.
+    job_id = seed.failed(error="boom")
+    status, body = _get(f"{base_url}/job/{job_id}")
+    assert status == 200
+    assert 'action="/settings/theme"' in body
+    assert 'action="/settings/refresh"' not in body
 
 
 def test_cross_origin_post_is_rejected(base_url, seed) -> None:

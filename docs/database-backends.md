@@ -12,8 +12,8 @@ Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick wit
 | MySQL / MariaDB | `mysql+pymysql://user:pw@host/db`      | [PyMySQL](https://pymysql.readthedocs.io/) | `…[mysql]`    |
 
 ```bash
-pip install "firm[queue,postgres]"   # queue on PostgreSQL  (or [queue,mysql])
-pip install "firm[cache,postgres]"   # cache on PostgreSQL  (or [cache,mysql])
+pip install "firm-queue[postgres]"   # queue on PostgreSQL  (or [mysql])
+pip install "firm-cache[postgres]"   # cache on PostgreSQL  (or [mysql])
 ```
 
 **Bare URLs are normalized for you:** `postgresql://…` becomes `postgresql+psycopg://…` and
@@ -38,7 +38,7 @@ holds on all three.
 - **SQLite** — zero setup, perfect for development, tests, single-process apps, and low-to-moderate
   volume on one host. Its one writer at a time means write-heavy, multi-worker, multi-host
   deployments will serialize on the write lock. WAL + `busy_timeout` keep that smooth up to a point.
-  On Kubernetes/shared storage it needs special care — see [SQLite on Kubernetes](#sqlite-on-kubernetes-and-other-shared-network-storage).
+  On Kubernetes/shared storage it needs special care — see [SQLite on Kubernetes](#sqlite-on-kubernetes-and-other-sharednetwork-storage).
 - **PostgreSQL** — the recommended default for production and anything multi-host: real
   `SKIP LOCKED`, no global writer lock, scales horizontally.
 - **MySQL / MariaDB** — equally supported; same `SKIP LOCKED` path. MariaDB 10.6+ supports

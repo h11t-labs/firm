@@ -107,6 +107,10 @@ def read_entry_locked(
 
 
 def delete_entry(conn: Connection, key_bytes: bytes) -> bool:
+    # Deletion is hash-scoped only — unlike reads there is no ``bytes(row.key) == key_bytes``
+    # verify. That is safe: the unique index on ``key_hash`` means at most one row can carry a
+    # given hash, so a hash collision can only ever cause a *spurious* eviction of the colliding
+    # key (which merely recomputes on next access), never a wrong read or wrong value returned.
     kh = key_hash(key_bytes)
     result = conn.execute(delete(_entries).where(_entries.c.key_hash == kh))
     return bool(result.rowcount)

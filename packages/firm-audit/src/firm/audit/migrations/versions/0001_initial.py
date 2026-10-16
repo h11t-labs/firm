@@ -1,4 +1,4 @@
-"""initial schema (firm_audits)
+"""initial schema (firm_audit_events)
 
 Revision ID: 0001
 Revises:
@@ -18,8 +18,8 @@ depends_on = None
 
 
 def upgrade() -> None:
-    schema.audits.create(op.get_bind(), checkfirst=True)
+    schema.metadata.create_all(op.get_bind())
 
 
 def downgrade() -> None:
-    schema.audits.drop(op.get_bind(), checkfirst=True)
+    schema.metadata.drop_all(op.get_bind())

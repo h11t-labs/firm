@@ -63,3 +63,56 @@ def test_archive_view_and_bad_cursor(s3_dashboard_url):
     with pytest.raises(HTTPError) as caught:
         urlopen(base + "/audit?start=2026-01-01&end=2026-01-02&continuation=invalid")
     assert caught.value.code == 400
+
+
+def test_mounted_s3_routes_keep_prefix_theme_and_authentication():
+    from datetime import date
+
+    from firm.ui.app import DashboardApp, Headers, UIRequest
+    from firm.ui.auth import BasicAuth
+
+    client = MemoryS3()
+    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
+    for _ in range(26):
+        receipt = log.record("mounted", created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    archive = Archive(ObjectStore("archives", client=client))
+    archived = archive.export_s3(
+        log, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
+    )
+    dash = build_dashboard(audit_s3=log, audit_archive=archive)
+    try:
+        app = DashboardApp(dash)
+        headers = Headers([("Cookie", "firm_theme=dark")])
+        response = app.handle(
+            UIRequest(
+                "GET",
+                "/audit",
+                prefix="/ops",
+                query="start=2026-01-01&end=2026-01-02",
+                headers=headers,
+            )
+        )
+        assert response.status == 200
+        body = response.body.decode()
+        assert '<html data-theme="dark">' in body
+        assert 'href="/ops/audit/object?' in body
+        assert 'href="/ops/audit?start=' in body
+        assert 'action="/ops/audit"' in body
+        assert 'href="/ops/audit/archive"' in body
+        detail = app.handle(
+            UIRequest("GET", "/audit/object", prefix="/ops", query=urlencode({"key": receipt.key}))
+        )
+        assert detail.status == 200
+        assert 'href="/ops/audit"' in detail.body.decode()
+        response = app.handle(
+            UIRequest(
+                "GET", "/audit/archive", prefix="/ops", query=urlencode({"key": archived.key})
+            )
+        )
+        assert response.status == 200
+        assert 'action="/ops/audit/archive"' in response.body.decode()
+        protected = DashboardApp(dash, authenticator=BasicAuth("ops", password="test-password"))
+        for path in ("/audit", "/audit/object", "/audit/archive"):
+            assert protected.handle(UIRequest("GET", path)).status == 401
+    finally:
+        dash.close()

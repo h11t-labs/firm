@@ -91,7 +91,7 @@ INDEX_TAIL = """\
 
 - [Comparison to Rails](docs/comparison-to-rails.md): how firm relates to solid_queue/solid_cache/solid_cable and where it diverges
 - [Testing & contributing](docs/testing-and-contributing.md)
-- [Roadmap](IMPROVEMENTS.md)"""
+- [Roadmap](ROADMAP.md)"""
 
 
 def _nav(root: Path) -> list:

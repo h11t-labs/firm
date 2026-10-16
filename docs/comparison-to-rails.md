@@ -22,16 +22,21 @@ reinterpretation. Where it differs, it's deliberate and documented.
 | Retry counting      | tracked by Active Job                   | a `jobs.attempts` column (we own retries)                                          |
 | Crash recovery      | orphaned claims are marked **failed**   | orphaned claims are **re-readied** (at-least-once; another worker finishes them)   |
 | SQLite concurrency  | row-level locking tests are skipped     | `BEGIN IMMEDIATE` gives the same guarantee, so concurrency is fully tested on SQLite |
-| Recurring schedules | Fugit (cron **and** natural language)   | cron only (`croniter`)                                                            |
+| Recurring schedules | Fugit (cron **and** natural language), timezone-aware | cron only (`croniter`), evaluated in **UTC**                          |
 | Job arguments       | Active Job + GlobalID (pass records)    | JSON + datetime/date/Decimal/UUID (pass IDs)                                       |
 | Pub/sub trimming    | inline `TrimJob` per broadcast          | async probabilistic trim on a background thread (+ manual `trim()` / CLI)          |
 | Pub/sub delivery    | Action Cable adapter                    | a standalone `Channel` with `broadcast`/`subscribe`/`unsubscribe` (no Action Cable) |
 | Cache value coder   | Marshal (arbitrary Ruby objects)        | **JSON by default** (safer against a writable cache table); `PickleCoder` is one import away |
-| Cache entry expiry  | per-entry `expires_in` / `expires_at`   | **global expiry only** — `max_age` + `max_size` FIFO trim; no per-entry TTL (planned, see `IMPROVEMENTS.md`) |
+| Cache entry expiry  | per-entry `expires_in` / `expires_at`   | **global expiry only** — `max_age` + `max_size` FIFO trim; no per-entry TTL (planned, see `ROADMAP.md`) |
 | Cache failure safety | a dead cache DB degrades **reads and writes** | **reads** degrade to a miss (routed to `on_error`); **writes still raise** — a silently dropped write is a worse surprise than an error |
 
 The at-least-once recovery choice means **jobs should be idempotent** — see
 [Retries & failures](queue/retries-and-failures.md).
+
+Recurring `schedule` cron expressions are evaluated in **UTC**: `croniter` runs over firm's
+naive-UTC clock, whereas solid_queue's fugit schedules honor the application's configured time
+zone. Porting a schedule like `0 9 * * *` therefore shifts its fire time by your UTC offset — it
+fires at 09:00 UTC, not 09:00 local. Adjust the cron fields to UTC when migrating.
 
 ## Beyond the port: firm-audit
 
@@ -52,5 +57,8 @@ reproduced, and a few pieces are still future work:
 - **Active Support / Notifications instrumentation** — replaced by lifecycle hooks + your own
   logging.
 - **Cache sharding** (multi-database consistent hashing) and the **Mission Control** dashboard.
+- **Continuations** (`ActiveJob::Continuable`) — checkpointing inside a job and resuming after an
+  interruption. A recovered job restarts from the top, which is why jobs must be idempotent.
 
-See the [roadmap](#) — `IMPROVEMENTS.md` in the repo root — for the full list of planned work.
+See `ROADMAP.md` in the repo root for the roadmap — the six things planned next. Everything
+else lives in the issue tracker.

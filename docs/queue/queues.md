@@ -23,7 +23,7 @@ queues.is_paused(rt, "mailers")    # -> True
 queues.resume(rt, "mailers")       # start again
 ```
 
-Pausing is durable (a row in `firm_pauses`), so it survives restarts.
+Pausing is durable (a row in `firm_queue_pauses`), so it survives restarts.
 
 ## Clearing a queue
 

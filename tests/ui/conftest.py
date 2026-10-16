@@ -172,10 +172,13 @@ class Seeder:
         actor_label: str | None = None,
         correlation_id: str | None = None,
         data: str | None = None,
+        row_mac: str | None = None,
     ) -> int:
+        """``row_mac`` left None mimics a legacy/pre-key row (renders "unprotected"); pass hex to
+        mimic a signed row (renders sealed/unsealed depending on the seal range)."""
         with self.engine.begin() as conn:
             return conn.execute(
-                insert(audit_schema.audits).values(
+                insert(audit_schema.audit_events).values(
                     action=action,
                     subject_type=subject_type,
                     subject_id=subject_id,
@@ -185,9 +188,74 @@ class Seeder:
                     actor_label=actor_label,
                     correlation_id=correlation_id,
                     data=data,
+                    row_mac=row_mac,
                     created_at=now_utc(),
                 )
             ).inserted_primary_key[0]
+
+    def seal(
+        self,
+        *,
+        kind: str = "seal",
+        from_id: int | None = 0,
+        to_id: int = 1,
+        row_count: int | None = 1,
+        rows_mac: str | None = "00" * 32,
+        sealed_at=None,
+    ) -> None:
+        """A new-schema ``firm_audit_seals`` record with harmless placeholder MACs."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(audit_schema.seals).values(
+                    kind=kind,
+                    from_id=from_id,
+                    to_id=to_id,
+                    row_count=row_count,
+                    rows_mac=rows_mac,
+                    seal_mac="ab" * 32,
+                    sealed_at=sealed_at or now_utc(),
+                    key_id="deadbeef",
+                )
+            )
+
+    def verify_status(
+        self,
+        *,
+        outcome: str = "ok",
+        ran_at=None,
+        ok_count: int = 0,
+        warning_count: int = 0,
+        unprotected_count: int = 0,
+        tampered_count: int = 0,
+        error_message: str | None = None,
+        last_full_coverage_at=None,
+        newest_anchor_at=None,
+        anchor_configured: bool = False,
+        unsealed_tail_count: int = 0,
+        unsealed_tail_oldest_at=None,
+        affected_identifiers: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """The single ``firm_audit_verify_status`` row the verifier would upsert."""
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(audit_schema.verify_status).values(
+                    ran_at=ran_at or now_utc(),
+                    outcome=outcome,
+                    ok_count=ok_count,
+                    warning_count=warning_count,
+                    unprotected_count=unprotected_count,
+                    tampered_count=tampered_count,
+                    error_message=error_message,
+                    last_full_coverage_at=last_full_coverage_at,
+                    newest_anchor_at=newest_anchor_at,
+                    anchor_configured=anchor_configured,
+                    unsealed_tail_count=unsealed_tail_count,
+                    unsealed_tail_oldest_at=unsealed_tail_oldest_at,
+                    affected_identifiers=affected_identifiers,
+                    duration_seconds=duration_seconds,
+                )
+            )
 
 
 @pytest.fixture

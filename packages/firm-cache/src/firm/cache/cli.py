@@ -6,7 +6,7 @@ from .._core.cli import db_option, require_click, require_url
 from .._core.database import create_engine_for, dispose_engine, transaction
 from . import __version__
 from .estimate import entry_count, estimate_size
-from .store import Cache
+from .store import DEFAULT_MAX_SIZE, TWO_WEEKS_SECONDS, Cache
 
 click = require_click("cache")
 
@@ -48,10 +48,30 @@ def clear(database_url: str | None) -> None:
 
 @main.command(help="Run one eviction pass and exit.")
 @_db_option
-def trim(database_url: str | None) -> None:
+@click.option("--max-age", type=float, default=None, help="Override max entry age (seconds).")
+@click.option("--max-size", type=int, default=None, help="Override max total size (bytes).")
+@click.option("--max-entries", type=int, default=None, help="Override max entry count.")
+@click.option("--batch-size", type=int, default=None, help="Max rows to evict in one pass.")
+def trim(
+    database_url: str | None,
+    max_age: float | None,
+    max_size: int | None,
+    max_entries: int | None,
+    batch_size: int | None,
+) -> None:
+    # A bare `trim` evicts against the Cache defaults; each option that is given overrides one
+    # limit so the one-shot command can target a specific eviction (e.g. down to --max-entries).
     engine = create_engine_for(_url(database_url))
     try:
-        with Cache(engine=engine, create_schema=False, auto_expire=False) as cache:
+        with Cache(
+            engine=engine,
+            create_schema=False,
+            auto_expire=False,
+            max_age=max_age if max_age is not None else TWO_WEEKS_SECONDS,
+            max_size=max_size if max_size is not None else DEFAULT_MAX_SIZE,
+            max_entries=max_entries,
+            expiry_batch_size=batch_size if batch_size is not None else 100,
+        ) as cache:
             click.echo(f"evicted {cache.expiry.run_once()} entries")
     finally:
         dispose_engine(engine)

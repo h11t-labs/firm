@@ -44,7 +44,7 @@ on PG/MySQL it skips rows another worker holds.
 
 `"*"` polls every non-paused queue in a single global `(priority, job_id)` order. A list of exact
 names / `prefix*` patterns polls the matched queues in order, each by `(priority, job_id)`. Paused
-queues (rows in `firm_pauses`) are always excluded.
+queues (rows in `firm_queue_pauses`) are always excluded.
 
 ## Semaphores
 

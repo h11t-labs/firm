@@ -1,17 +1,18 @@
 [project]
 name = "firm"
-version = "0.1.0"
+version = "1.1.0"
 description = "Pure-Python ports of the Rails Solid stack: database-backed background jobs (queue), caching (cache), pub/sub (channel), and an append-only audit log. No Redis required. This is a meta-package: pick modules via extras — firm[queue], firm[cache], firm[channel], firm[audit], or firm[all]."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = [
     "jobs", "queue", "cache", "channel", "audit", "background", "tasks",
     "sqlite", "postgresql", "mysql", "solid_queue", "solid_cache", "solid_cable",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
@@ -21,34 +22,39 @@ classifiers = [
 # Extras-only meta-package: `pip install "firm[queue]"` really does install just that module
 # (each module is its own PyPI package; they share the `firm.*` namespace). A bare
 # `pip install firm` installs no modules — pick at least one extra.
+#
+# `firm-stack` is the interim name for this meta-package while the PyPI name transfer is pending
+# (PEP 541, https://github.com/pypi/support/issues/11384). Keep this file and
+# packages/firm-stack/pyproject.toml in lockstep: same extras, same pins.
 dependencies = []
 
 [project.optional-dependencies]
-audit-s3 = ["firm-audit[s3]~=0.1.0"]
-queue = ["firm-queue~=0.1.0"]              # background jobs
-cache = ["firm-cache~=0.1.0"]              # cache store
-channel = ["firm-channel~=0.1.0"]          # pub/sub
-audit = ["firm-audit~=0.1.0"]              # append-only audit log
-ui = ["firm-ui~=0.1.0"]                     # web dashboard (pulls all four modules)
-flask = ["firm-queue[flask]~=0.1.0"]       # Flask integration (contrib)
-fastapi = ["firm-queue[fastapi]~=0.1.0"]  # FastAPI integration (contrib)
-postgres = ["firm-core[postgres]~=0.1.0"] # PostgreSQL driver
-mysql = ["firm-core[mysql]~=0.1.0"]       # MySQL / MariaDB driver
-encryption = ["firm-cache[encryption]~=0.1.0"]  # cache at-rest encryption
-msgpack = ["firm-cache[msgpack]~=0.1.0"]  # cache msgpack coder
+audit-s3 = ["firm-audit[s3]~=1.0"]
+queue = ["firm-queue~=1.0"]              # background jobs
+cache = ["firm-cache~=1.1"]              # cache store
+channel = ["firm-channel~=1.0"]          # pub/sub
+audit = ["firm-audit~=1.0"]              # append-only audit log
+ui = ["firm-ui~=1.0"]                     # web dashboard (pulls all four modules)
+flask = ["firm-queue[flask]~=1.0"]       # Flask integration (contrib)
+fastapi = ["firm-queue[fastapi]~=1.0"]  # FastAPI integration (contrib)
+postgres = ["firm-core[postgres]~=1.0"] # PostgreSQL driver
+mysql = ["firm-core[mysql]~=1.0"]       # MySQL / MariaDB driver
+encryption = ["firm-cache[encryption]~=1.1"]  # cache at-rest encryption
+msgpack = ["firm-cache[msgpack]~=1.1"]  # cache msgpack coder
 all = [
-    "firm-audit[s3]~=0.1.0",
-    "firm-ui~=0.1.0",
-    "firm-queue[flask,fastapi]~=0.1.0",
-    "firm-core[postgres,mysql]~=0.1.0",
-    "firm-cache[encryption,msgpack]~=0.1.0",
+    "firm-audit[s3]~=1.0",
+    "firm-ui~=1.0",
+    "firm-queue[flask,fastapi]~=1.0",
+    "firm-core[postgres,mysql]~=1.0",
+    "firm-cache[encryption,msgpack]~=1.1",
 ]
 
 [project.urls]
 Homepage = "https://github.com/h11t-labs/firm"
-Documentation = "https://github.com/h11t-labs/firm/tree/main/docs"
+Documentation = "https://h11t-labs.github.io/firm/"
 Repository = "https://github.com/h11t-labs/firm"
 Issues = "https://github.com/h11t-labs/firm/issues"
+Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm/CHANGELOG.md"
 
 # Metadata-only distribution (no importable module of its own — `import firm` is provided by
 # the namespace sub-packages). hatchling builds a module-less wheel cleanly.

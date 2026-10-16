@@ -3,9 +3,9 @@
 ## Install
 
 ```bash
-pip install "firm[channel]"             # or: uv add "firm[channel]"
-pip install "firm[channel,postgres]"    # psycopg, for PostgreSQL
-pip install "firm[channel,mysql]"       # PyMySQL, for MySQL/MariaDB
+pip install firm-channel             # or: uv add firm-channel
+pip install "firm-channel[postgres]"    # psycopg, for PostgreSQL
+pip install "firm-channel[mysql]"       # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -18,7 +18,7 @@ from firm.channel import Channel
 ps = Channel(database_url="sqlite:///channel.db")
 ```
 
-By default `Channel(...)` creates the `firm_messages` table if it's missing
+By default `Channel(...)` creates the `firm_channel_messages` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
 `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 

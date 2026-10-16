@@ -3,6 +3,26 @@
 Validated 11 October 2026 in the managed `firm-audit-s3` worktree, branch
 `codex/firm-audit-s3`, based on `8568c4731762279cab0fe89f1bab1385589d5f12`.
 
+## Integration with main — 16 October 2026
+
+Integrated main `5c77af3` into the feature branch. Archive tables now use migration `0003`
+after the released tamper-evidence `0002`. The SQL archive preserves stored JSON bytes and
+row signatures; archive-before-prune also guards whole signed ranges and their legacy prefix.
+S3 UI routes use the transport-free dashboard, with shared mount prefixes, themes, and auth.
+The final diff against main excludes inherited cache changes. Both meta-packages expose the
+optional SDK consistently; a dedicated SDK-enabled CI job covers the S3/archival surface.
+
+Focused live validation: **83 passed, 3 skipped** on SQLite, PostgreSQL, MySQL, and versioned
+MinIO. New regressions cover signed-row restore, sealed-range pruning, a real pre-archive
+schema upgrade, and mounted/authenticated routes. Ruff, formatting, full type checking,
+pre-commit, eight package builds, and a clean SQL wheel install without boto3 passed.
+Independent Standards and Spec reviews found no remaining integration findings.
+
+The complete integrated workspace suite is running; its final result will be recorded here
+before this PR is marked ready. The PR remains open and unmerged for the user.
+
+## Original implementation validation — 11 October 2026
+
 The implementation provides an optional database-free `S3AuditLog` beside SQL, immutable
 copy-only archives for both backends, cross-backend restores with provenance, continuous
 SQL archival with persisted archive-before-prune protection, CLI commands, and audit-only

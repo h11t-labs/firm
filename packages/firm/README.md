@@ -2,8 +2,8 @@
 
 **Pure-Python ports of the Rails Solid stack — database-backed, no Redis required.**
 
-`firm` is a meta-package that installs the full stack in one shot. Each component is also
-published independently, so you can install only what you need:
+`firm` is a meta-package that installs the modules you pick via extras, in one shot. Each
+component is also published independently, so you can install only what you need:
 
 | Component       | Package                                                  | Ports           |
 |-----------------|----------------------------------------------------------|-----------------|
@@ -17,9 +17,12 @@ Everything runs on SQLite, PostgreSQL, or MySQL via SQLAlchemy.
 
 ## Install
 
+`firm` is extras-only — a bare `pip install firm` installs no modules, so always pick at
+least one:
+
 ```bash
-pip install firm            # the four core modules (queue, cache, channel, audit)
-pip install "firm[ui]"      # + the web dashboard
+pip install "firm[queue]"   # background jobs
+pip install "firm[ui]"      # the web dashboard (pulls all four modules)
 pip install "firm[all]"     # everything, all drivers and integrations
 
 # or just one component:

@@ -1,0 +1,28 @@
+{#def view #}
+{# The tamper-evidence verify-status panel (design D22-D25). `view` is the ready-made dict built
+   by render._integrity_view: every string, link, icon, and tone token is decided there, so this
+   only places them. OK/WARNING/ERROR/never/not-configured render as a thin strip; TAMPERED
+   expands to a full-width `role="alert"` banner that says what is wrong, which records, and how to
+   verify it. A tinted shield medallion anchors every state; the verdict word travels alongside,
+   so meaning never rides on icon or colour alone. #}
+<div class="integrity {{ view.strip_class }}{{ ' banner' if view.layout == 'banner' }}"{% if view.role_alert %} role="alert"{% endif %}>
+  <span class="integrity-icon">{{ view.icon }}</span>
+  <div class="integrity-body">
+    {% if view.layout == 'banner' %}
+    <div class="integrity-head">
+      <span class="integrity-word">{{ view.word }}</span>
+      {% if view.headline %}<span class="integrity-headline">{{ view.headline }}</span>{% endif %}
+      {% if view.when %}<span class="integrity-when">{{ view.when_label }} {{ view.when }}</span>{% endif %}
+    </div>
+    {% if view.meaning %}<p class="integrity-meaning">{{ view.meaning }}</p>{% endif %}
+    {% if view.findings %}<ul class="integrity-findings">{% for f in view.findings %}<li>{% if f.ref %}<span class="finding-ref">{{ f.ref }}</span>{% endif %}{% if f.why %}<span class="finding-why">{{ f.why }}</span>{% endif %}</li>{% endfor %}</ul>{% endif %}
+    {% else %}
+    <span class="integrity-verdict"><span class="integrity-label">Integrity</span> <span class="integrity-word">{{ view.word }}</span></span>
+    {% if view.facts %}<span class="integrity-facts">{% for f in view.facts %}<span class="integrity-fact"><span class="fk">{{ f.label }}</span> <span class="fv">{{ f.value }}</span></span>{% endfor %}</span>{% endif %}
+    {% if view.when %}<span class="integrity-when">{{ view.when_label }} {{ view.when }}</span>{% endif %}
+    {% if view.detail %}<span class="integrity-detail" title="{{ view.detail }}">{{ view.detail }}</span>{% endif %}
+    {% endif %}
+    {% if view.cause_lines %}<ul class="integrity-items">{% for line in view.cause_lines %}<li>{{ line }}</li>{% endfor %}</ul>{% endif %}
+    {% if view.next_step %}<div class="integrity-next">{{ view.next_step }}</div>{% endif %}
+  </div>
+</div>

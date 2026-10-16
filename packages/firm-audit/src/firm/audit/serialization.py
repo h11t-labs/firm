@@ -1,7 +1,7 @@
 """JSON codec for the audit log's ``data``/``changes``/``context`` columns.
 
 ``load_json`` is a supported read surface — the dashboard (firm-ui) decodes stored payloads
-with it, like it reads ``schema.audits``. Changing its signature is a breaking change.
+with it, like it reads ``schema.audit_events``. Changing its signature is a breaking change.
 
 Stored as plain ``Text`` (matching :mod:`firm.queue`'s argument serialization, not native JSON/
 JSONB) so the three columns are dialect-uniform but not SQL-filterable —

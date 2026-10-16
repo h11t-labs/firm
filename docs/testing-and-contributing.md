@@ -12,7 +12,7 @@ firm/
 ├── pyproject.toml                 # virtual workspace root: members, dev tools, lint/type config
 ├── packages/
 │   ├── firm-core/    src/firm/_core/    # shared: engine, dialects, poller, clock, config, process
-│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + firm.contrib + migrations/
+│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + queue/contrib/ + migrations/
 │   ├── firm-cache/   src/firm/cache/     # firm.cache  (cache)  + migrations/
 │   ├── firm-channel/ src/firm/channel/   # firm.channel (pub/sub) + migrations/
 │   ├── firm-audit/   src/firm/audit/     # firm.audit  (audit log) + migrations/
@@ -34,12 +34,12 @@ uv sync    # venv + all workspace packages (editable) + all dev tools/drivers
 ## The gate
 
 ```bash
-uv run pytest                                  # tests
-uv run ruff check && uv run ruff format --check # lint + format
-uv run ty check packages                       # types
+uv run pytest                                    # tests
+uv run ruff check && uv run ruff format --check  # lint + format
+uv run ty check packages scripts examples        # types
 ```
 
-All three must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
+All must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
 with `ruff`.
 
 ## Running against Postgres and MySQL
@@ -68,12 +68,123 @@ Notes:
 - **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
   render correctly for Postgres/MySQL with no live database.
 
+## Upstream test parity
+
+firm is a port of the Rails Solid stack (`solid_queue` / `solid_cache` / `solid_cable`), but it is
+its own project with its own suite — not a mirror of upstream. The porting rule is simple: **every
+upstream test case is handled as one of firm's own behavior tests**, living beside the functionality
+it exercises (a claim spec in `test_claim.py`, an eviction spec in `test_expiry.py`, and so on).
+Where firm deliberately behaves differently from Rails, that divergence is written up in
+[comparison-to-rails.md](comparison-to-rails.md) rather than left as a red test.
+
+Tests ported from upstream keep a short `# upstream: <file>.rb :: <case>` comment so the lineage is
+discoverable when reconciling against a newer Solid release — but they are ordinary firm tests: they
+assert firm's behavior and go green.
+
 ## Conventions
 
 - Tests are spec-style and grouped by behavior. New behavior gets a failing test first.
 - Keep the public API small; internal machinery lives under `_core/`.
 - Match the surrounding style — concise docstrings, explicit SQL via SQLAlchemy Core, no clever
   metaprogramming.
+
+## Releasing
+
+Every package under `packages/` is published to PyPI independently (they share the `firm.*`
+namespace but carry their own versions). Publishing is fully automated through
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) using
+[PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/) — there are no PyPI tokens
+to manage. The workflow checks the changelog, builds, runs the test suite, `twine check`s,
+uploads, and finishes by creating a GitHub Release for the tag — the changelog section for the
+released version is the entire body (no auto-generated PR list: it isn't path-aware and would
+pull in unrelated packages' PRs).
+
+### Changelogs
+
+Each package keeps a `packages/<name>/CHANGELOG.md` in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. PRs that make a user-visible
+change add a line under the affected package's `## [Unreleased]` section — a review convention,
+not CI-enforced. At release time it **is** enforced: the workflow runs
+`scripts/check_changelog.py` and refuses to publish a version that has no matching
+`## [<version>]` section. The changelog ships in the sdist, and PyPI links it in each package's
+sidebar via the `Changelog` project URL.
+
+### Releasing one package
+
+To release **one package** (the common case):
+
+1. In one PR: bump `version` in `packages/<name>/pyproject.toml` and retitle the package's
+   `## [Unreleased]` section to `## [<version>] - <YYYY-MM-DD>` (leave a fresh, empty
+   `## [Unreleased]` above it). If other packages should pick up the new version, adjust their
+   `~=` pins in the same PR.
+2. Tag the merged commit `<name>-v<version>` and push the tag:
+
+   ```bash
+   git tag firm-queue-v0.2.0 && git push origin firm-queue-v0.2.0
+   ```
+
+   The workflow refuses to publish if the tag version doesn't match the package's
+   `pyproject.toml`, or if the changelog has no section for it.
+
+### Releasing everything
+
+To release **everything at once** (e.g. a coordinated bump), tag `v<version>`. That builds all
+packages and uploads whatever isn't already on PyPI — previously published files are skipped, so
+the tag is safe even when some packages didn't change (their changelogs already carry the
+section for their current, released version).
+
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): breaking changes bump
+the major version. Which *other* packages a release drags along is decided by the cross-package
+pins below.
+
+### Cross-package pins
+
+Workspace packages depend on each other with `~=<major>.<minor>` — `firm-cache~=1.1` resolves to
+`>=1.1, ==1.*`. The two bounds are separate decisions:
+
+- **The upper bound (`==1.*`) is compatibility.** It stays wide so a package never blocks someone
+  from upgrading a module. A narrow `~=1.1.0` (`==1.1.*`) makes `firm-ui` and the next `firm-cache`
+  minor uninstallable *together* — a resolver conflict, not merely a missed upgrade.
+- **The lower bound is distribution.** Raising it is how a package guarantees the capability that
+  shipped in that minor. Without it, `pip install -U firm-stack` leaves the existing `firm-cache`
+  in place: pip's default `--upgrade-strategy only-if-needed` moves a dependency only when the new
+  release *requires* it.
+
+So a pin-only change is versioned by which bound moved:
+
+| Change | Bump | Why |
+|---|---|---|
+| Upper bound widened | patch | Nothing new is promised; the package only stops blocking. |
+| Lower bound raised | minor | The package now guarantees something it didn't before. |
+
+After a module's minor release, decide per dependent whether its users should get the new
+functionality:
+
+- `firm` and `firm-stack` exist to deliver the suite, so their extras normally raise the floor.
+  Otherwise it matters whether you installed the meta-package or the modules separately, which is
+  the one thing a meta-package is for.
+- `firm-ui` raises its floor only when the dashboard actually needs the new module version;
+  widening its ceiling is enough otherwise.
+- A package that doesn't depend on the released module doesn't move at all.
+
+Tag the module first. A dependent that has already raised its floor isn't installable until the
+module it points at is on PyPI.
+
+The root `uv.lock` plays no part in any of this: it pins the *development* environment and resolves
+internal dependencies to local paths (`source = { editable = ... }`), and it ships in neither the
+wheels nor the sdists. What a consumer ends up with is decided by these pins plus their own lockfile
+— which is also why raising a floor is the only way to actively push a module version out, and why
+that deserves the minor bump.
+
+> **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
+> [PEP 541 name-transfer request](https://github.com/pypi/support/issues/11384) is pending.
+> Until it's granted, the release workflow excludes the meta-package from `v*` all-package tags
+> (see the `rm dist/firm-[0-9]*` line in `release.yml`), docs use the per-package install form
+> (`pip install firm-queue`), and the extras form is provided by the interim
+> [`firm-stack`](https://pypi.org/project/firm-stack/) meta-package (`packages/firm-stack/` —
+> keep its extras/pins in lockstep with `packages/firm/`). Once the name is ours: remove that
+> `rm` line, publish the meta with a `firm-v<ver>` tag, and the `firm[queue]` extras form starts
+> working; `firm-stack` then stays as a compatible alias.
 
 ## Building the docs
 

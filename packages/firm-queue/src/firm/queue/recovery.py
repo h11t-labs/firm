@@ -10,11 +10,13 @@ Jobs must therefore be idempotent — the standard guidance for any at-least-onc
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from sqlalchemy import delete, insert, select
 
+from .._core import process as process_registry
 from .._core.config import Runtime
+from .._core.poller import InterruptiblePoller
 from . import schema
 
 _claimed = schema.claimed_executions
@@ -52,3 +54,41 @@ def recover_orphaned_claims(runtime: Runtime, process_ids: Sequence[int] | None 
             )
             conn.execute(delete(_claimed).where(_claimed.c.id == row.id))
         return len(rows)
+
+
+def reap_dead_processes(runtime: Runtime, alive_threshold_s: float) -> int:
+    """Prune processes with stale heartbeats and recover their claims; return the recovered count.
+
+    The absent-row sweep in :func:`recover_orphaned_claims` only sees claims whose process row is
+    *gone* — a hard-killed process (SIGKILL, OOM) leaves its row behind with a stale heartbeat,
+    which shields its claims from that sweep. Something must therefore prune stale rows in every
+    deployment shape, not just under :class:`~firm.queue.supervisor.ForkSupervisor`.
+    """
+    dead = process_registry.prune_dead(runtime.engine, alive_threshold_s)
+    if not dead:
+        return 0
+    return recover_orphaned_claims(runtime, dead)
+
+
+class ReaperLoop(InterruptiblePoller):
+    """Run :func:`reap_dead_processes` on a timer.
+
+    ForkSupervisor reaps inline in its supervise loop; ThreadSupervisor (thread mode and the
+    embedded contrib adapters) and the standalone ``firm-queue work`` command run this poller
+    instead, so a hard-killed peer's in-flight jobs are recovered there too.
+    """
+
+    def __init__(
+        self,
+        runtime: Runtime,
+        interval: float,
+        alive_threshold_s: float,
+        *,
+        on_error: Callable[[BaseException], None] | None = None,
+    ) -> None:
+        super().__init__(interval, name="reaper", on_error=on_error)
+        self.runtime = runtime
+        self.alive_threshold_s = alive_threshold_s
+
+    def poll(self) -> int:
+        return reap_dead_processes(self.runtime, self.alive_threshold_s)

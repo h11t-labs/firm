@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import Engine, Table, func, insert, select
 
+from firm._core.clock import now_utc
 from firm._core.config import Runtime
 from firm._core.database import create_engine_for
 from firm.queue import config, schema
@@ -95,6 +97,91 @@ def count(engine: Engine) -> Callable[[Table], int]:
             return conn.execute(select(func.count()).select_from(table)).scalar() or 0
 
     return _count
+
+
+class Seeder:
+    """Inserts rows directly, so read-layer tests can set up each job state without running a
+    worker. Plain Core inserts, so it works on every backend the suite parametrizes."""
+
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+
+    def _job(self, *, queue: str = "default", class_name: str = "app.task", finished: bool = False):
+        with self.engine.begin() as conn:
+            return conn.execute(
+                insert(schema.jobs).values(
+                    queue_name=queue,
+                    class_name=class_name,
+                    finished_at=now_utc() if finished else None,
+                )
+            ).inserted_primary_key[0]
+
+    def ready(self, *, queue: str = "default") -> int:
+        job_id = self._job(queue=queue)
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.ready_executions).values(job_id=job_id, queue_name=queue, priority=0)
+            )
+        return job_id
+
+    def scheduled(self, *, queue: str = "default") -> int:
+        job_id = self._job(queue=queue)
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.scheduled_executions).values(
+                    job_id=job_id, queue_name=queue, priority=0, scheduled_at=now_utc()
+                )
+            )
+        return job_id
+
+    def claimed(self, *, process_id: int = 1) -> int:
+        job_id = self._job()
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.claimed_executions).values(job_id=job_id, process_id=process_id)
+            )
+        return job_id
+
+    def failed(self, *, error: str = "Traceback...\nValueError: boom") -> int:
+        job_id = self._job()
+        with self.engine.begin() as conn:
+            conn.execute(insert(schema.failed_executions).values(job_id=job_id, error=error))
+        return job_id
+
+    def finished(self) -> int:
+        return self._job(finished=True)
+
+    def process(self, *, kind: str = "worker", name: str = "w1", age_seconds: float = 0.0) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.processes).values(
+                    kind=kind,
+                    name=name,
+                    pid=4242,
+                    hostname="testhost",
+                    last_heartbeat_at=now_utc() - timedelta(seconds=age_seconds),
+                )
+            )
+
+    def recurring_task(
+        self,
+        *,
+        key: str = "cleanup",
+        schedule: str = "*/10 * * * *",
+        class_name: str = "app.task",
+        queue: str = "default",
+    ) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                insert(schema.recurring_tasks).values(
+                    key=key, schedule=schedule, class_name=class_name, queue_name=queue
+                )
+            )
+
+
+@pytest.fixture
+def seed(engine: Engine) -> Seeder:
+    return Seeder(engine)
 
 
 @pytest.fixture

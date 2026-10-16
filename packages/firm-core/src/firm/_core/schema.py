@@ -1,4 +1,4 @@
-"""Schema for firm-core's own table: ``firm_processes``.
+"""Schema for firm-core's own table: ``firm_queue_processes``.
 
 Process registration (:mod:`firm._core.process`) is core infrastructure, so its table is
 defined here rather than in a feature package. firm-core has no migration story of its own:
@@ -56,7 +56,7 @@ def long_text() -> Text:
 
 
 processes = Table(
-    "firm_processes",
+    "firm_queue_processes",
     metadata,
     Column("id", pk_bigint(), primary_key=True),
     Column("kind", String(255), nullable=False),
@@ -67,12 +67,12 @@ processes = Table(
     Column("metadata", Text),
     Column("name", String(255), nullable=False),
     Column("created_at", dt_type(), nullable=False, default=now_utc),
-    Index("index_firm_processes_on_last_heartbeat_at", "last_heartbeat_at"),
+    Index("index_firm_queue_processes_on_last_heartbeat_at", "last_heartbeat_at"),
     Index(
-        "index_firm_processes_on_name_and_supervisor_id",
+        "index_firm_queue_processes_on_name_and_supervisor_id",
         "name",
         "supervisor_id",
         unique=True,
     ),
-    Index("index_firm_processes_on_supervisor_id", "supervisor_id"),
+    Index("index_firm_queue_processes_on_supervisor_id", "supervisor_id"),
 )

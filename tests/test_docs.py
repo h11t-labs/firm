@@ -17,6 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
+EXAMPLES = ROOT / "examples"
 # Modules used only as illustrative placeholders in multi-file examples.
 _PLACEHOLDER_MODS = {"myapp", "jobs", "shared", "app", "worker", "tasks", "pipeline", "models"}
 
@@ -32,6 +33,10 @@ def _blocks() -> list[tuple[str, str]]:
 
 
 _BLOCKS = _blocks()
+_EXAMPLES = sorted(EXAMPLES.glob("*.py"))
+# The `firm.*` modules this workspace ships (packages/*/src/firm/<name>). A missing one of these
+# means the extra just isn't installed here; any other `firm.*` import cannot exist anywhere.
+_FIRM_MODULES = {f"firm.{p.name}" for p in ROOT.glob("packages/*/src/firm/*") if p.is_dir()}
 
 
 def _is_submodule(module: str, name: str) -> bool:
@@ -42,9 +47,27 @@ def _is_submodule(module: str, name: str) -> bool:
         return False
 
 
-@pytest.mark.parametrize("code", [b[1] for b in _BLOCKS], ids=[b[0] for b in _BLOCKS])
-def test_doc_python_block(code: str) -> None:
-    tree = ast.parse(code)  # a SyntaxError here fails the test
+def _skip_or_fail(missing: str | None) -> None:
+    """Skip for a genuinely absent optional dependency; fail for a `firm.*` module that can't exist.
+
+    A missing `firm.<module>` this workspace ships (`firm.ui`, ...) just means that extra isn't
+    installed in this environment — skip, so the check stays meaningful under any extras
+    combination. Anything else under `firm.` is a typo, a removed module, or a bad submodule
+    path: a real defect in the doc or example, and the whole point of this guard.
+    """
+    name = missing or ""
+    if name == "firm" or name.startswith("firm."):
+        assert name in _FIRM_MODULES, f"{name} does not exist"
+    pytest.skip(f"optional dependency not installed: {name}")
+
+
+def _check_imports(tree: ast.Module) -> None:
+    """Assert every non-placeholder import target in *tree* resolves.
+
+    Optional-dependency imports (croniter, fastapi, ...) are skipped when that dependency isn't
+    installed, so the check stays meaningful under any extras combination. Only import *targets*
+    are imported — the parsed source itself is never executed.
+    """
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -53,7 +76,7 @@ def test_doc_python_block(code: str) -> None:
                 try:
                     importlib.import_module(alias.name)
                 except ModuleNotFoundError as exc:
-                    pytest.skip(f"optional dependency not installed: {exc.name}")
+                    _skip_or_fail(exc.name)
         elif isinstance(node, ast.ImportFrom):
             if node.level or node.module is None:
                 continue
@@ -62,14 +85,25 @@ def test_doc_python_block(code: str) -> None:
             try:
                 module = importlib.import_module(node.module)
             except ModuleNotFoundError as exc:
-                pytest.skip(f"optional dependency not installed: {exc.name}")
-                return
+                _skip_or_fail(exc.name)
             for alias in node.names:
                 if alias.name == "*":
                     continue
                 assert hasattr(module, alias.name) or _is_submodule(node.module, alias.name), (
                     f"{node.module}.{alias.name} does not exist"
                 )
+
+
+@pytest.mark.parametrize("code", [b[1] for b in _BLOCKS], ids=[b[0] for b in _BLOCKS])
+def test_doc_python_block(code: str) -> None:
+    tree = ast.parse(code)  # a SyntaxError here fails the test
+    _check_imports(tree)
+
+
+@pytest.mark.parametrize("path", _EXAMPLES, ids=[p.name for p in _EXAMPLES])
+def test_example_imports(path: Path) -> None:
+    """Every import in examples/ must parse and resolve (the file itself is never executed)."""
+    _check_imports(ast.parse(path.read_text()))  # a SyntaxError here fails the test
 
 
 def _load_generator():

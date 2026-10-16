@@ -9,7 +9,7 @@
 # Source: docs/index.md
 ================================================================================
 
-# firm
+# 🪨 firm
 
 **Pure-Python ports of the Rails 8 "Solid" stack.** Keep background jobs and caching in the SQL
 database you already run — no Redis, no extra broker, no new infrastructure.
@@ -94,65 +94,70 @@ including deployments without an audit database or persistent volume.
 
 # Installation
 
-`firm` is a single package with four independent modules — `firm.queue` (jobs),
-`firm.cache` (caching), `firm.channel` (publish/subscribe), and `firm.audit` (an append-only
-audit log) — plus a shared internal core. **You install only what you use** via extras, so a
-queue-only service never pulls cache, pub/sub, or audit dependencies, and vice versa.
+firm is four independent modules — `firm.queue` (jobs), `firm.cache` (caching), `firm.channel`
+(publish/subscribe), and `firm.audit` (an append-only audit log) — plus a shared internal core.
+Each module is its own package on PyPI, all sharing the `firm.*` import namespace. **You install
+only what you use**, so a queue-only service never pulls cache, pub/sub, or audit dependencies,
+and vice versa.
 
 ```bash
-pip install "firm[queue]"     # just the job queue
-pip install "firm[cache]"     # just the cache
-pip install "firm[channel]"    # just pub/sub
-pip install "firm[audit]"      # just the audit log
+pip install firm-queue      # just the job queue
+pip install firm-cache      # just the cache
+pip install firm-channel    # just pub/sub
+pip install firm-audit      # just the audit log
+pip install firm-ui         # the web dashboard (pulls all four modules)
 ```
 
-> `firm` is an extras-only meta-package: the bare `pip install firm` (no extras) installs **no
-> modules at all** — always name at least one. Each module is also its own package
-> (`pip install firm-queue` ≡ `pip install "firm[queue]"`) if you prefer direct dependencies.
+> Prefer a single meta-package? [`firm-stack`](https://pypi.org/project/firm-stack/) installs
+> modules via extras: `pip install "firm-stack[queue]"`, `"firm-stack[all]"`, … It will also be
+> published as plain `firm` (`pip install "firm[queue]"`) once a pending
+> [name transfer](https://github.com/pypi/support/issues/11384) for that PyPI name resolves.
+> The per-package installs above are the canonical form and keep working either way.
 
 ## Extras
 
-| Extra | Pulls in | Use it for |
-|---|---|---|
-| `queue` | `firm-queue` (croniter, click) | the background-job queue (scheduler + the `firm-queue` CLI) |
-| `cache` | `firm-cache` (click) | the cache store + the `firm-cache` CLI |
-| `channel` | `firm-channel` (click) | pub/sub + the `firm-channel` CLI |
-| `audit` | `firm-audit` (click) | the SQL audit log + the `firm-audit` CLI |
-| `audit-s3` | `firm-audit[s3]` (boto3) | [database-free audit and S3 archives](audit/s3-and-archives.md) |
-| `flask` | `flask` | the Flask integration ([`firm.contrib.flask`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
-| `fastapi` | `fastapi` | the FastAPI integration ([`firm.contrib.fastapi`](contrib.md)) — pulls the queue module (the integration ships with `firm-queue`) |
-| `postgres` | `psycopg` | running on PostgreSQL |
-| `mysql` | `pymysql` | running on MySQL / MariaDB |
-| `encryption` | `cryptography` | cache at-rest encryption (Fernet) |
-| `msgpack` | `msgpack` | the cache msgpack value coder |
-| `all` | everything above | the full kitchen sink |
+Database drivers and optional features are extras on the module packages:
 
-Combine freely — extras are additive:
+| Install | Pulls in | Use it for |
+|---|---|---|
+| `firm-queue[postgres]` / `firm-cache[postgres]` / … | `psycopg` | running on PostgreSQL |
+| `firm-queue[mysql]` / `firm-cache[mysql]` / … | `pymysql` | running on MySQL / MariaDB |
+| `firm-queue[flask]` | `flask` | the Flask integration ([`firm.queue.contrib.flask`](contrib.md)) |
+| `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.queue.contrib.fastapi`](contrib.md)) |
+| `firm-cache[encryption]` | `cryptography` | cache at-rest encryption (Fernet) |
+| `firm-cache[msgpack]` | `msgpack` | the cache msgpack value coder |
+| `firm-audit[s3]` | `boto3` | [database-free audit and archives](audit/s3-and-archives.md) |
+
+The driver extras (`postgres`, `mysql`) exist on every module (they resolve to
+`firm-core[postgres]` / `firm-core[mysql]` under the hood), so add them to whichever module you
+install. Combine freely — extras are additive:
 
 ```bash
-pip install "firm[queue,postgres]"          # queue on PostgreSQL
-pip install "firm[cache,encryption]"        # cache with at-rest encryption
-pip install "firm[queue,cache,mysql]"       # both modules on MySQL/MariaDB
-pip install "firm[all]"                     # everything
+pip install "firm-queue[postgres]"            # queue on PostgreSQL
+pip install "firm-cache[encryption]"          # cache with at-rest encryption
+pip install "firm-queue[mysql]" firm-cache    # both modules on MySQL/MariaDB
+pip install firm-ui "firm-queue[flask,fastapi]" "firm-core[postgres,mysql]" "firm-cache[encryption,msgpack]"   # everything
 ```
 
 With `uv`:
 
 ```bash
-uv add "firm[queue,postgres]"
+uv add "firm-queue[postgres]"
 ```
 
 ## What each install gives you
 
-- **`firm[queue]`** → `import firm.queue as bq`, the `@bq.job` decorator, enqueuing, the
+- **`firm-queue`** → `import firm.queue as bq`, the `@bq.job` decorator, enqueuing, the
   worker/dispatcher/scheduler/supervisor, and the `firm-queue` CLI. No cache dependencies.
-- **`firm[cache]`** → `from firm.cache import Cache`, all cache operations, and the
+- **`firm-cache`** → `from firm.cache import Cache`, all cache operations, and the
   `firm-cache` CLI. No queue dependencies (no `croniter`).
-- **`firm[channel]`** → `from firm.channel import Channel`, broadcast/subscribe, the polling
+- **`firm-channel`** → `from firm.channel import Channel`, broadcast/subscribe, the polling
   listener, message trimming, and the `firm-channel` CLI. No queue dependencies (no `croniter`).
-- **`firm[audit]`** → `from firm.audit import AuditLog, record`, append-only event recording,
+- **`firm-audit`** → `from firm.audit import AuditLog, record`, append-only event recording,
   `history()` querying, opt-in retention, and the `firm-audit` CLI. No queue dependencies (no
   `croniter`).
+- **`firm-ui`** → the [web dashboard](ui.md) and its `firm-ui` command; depends on all four
+  modules.
 - **SQLite** needs no driver extra. **PostgreSQL/MySQL** need `postgres`/`mysql`. Bare
   `postgresql://` / `mysql://` URLs are auto-normalized to the shipped drivers — see
   [Database backends](database-backends.md).
@@ -168,10 +173,10 @@ names the extra to add — not a bare `ModuleNotFoundError`:
 
 ```text
 >>> Cache(..., encrypt_key=key)                # without [encryption]
-ImportError: At-rest cache encryption requires "cryptography". Install the encryption extra: pip install "firm[cache,encryption]"
+ImportError: At-rest cache encryption requires "cryptography". Install the encryption extra: pip install "firm-cache[encryption]"
 
 >>> bq.configure(database_url="postgresql://…") # without [postgres]
-ImportError: The postgres driver "psycopg" is not installed. Install the postgres extra: pip install "firm[postgres]"
+ImportError: The postgres driver "psycopg" is not installed. Install the postgres extra: pip install "firm-core[postgres]"
 ```
 
 ## Next steps
@@ -317,7 +322,7 @@ run_maintenance(rt)                            # expire stale semaphores, unbloc
 ```python
 from firm.cache import Cache
 
-# create the cache; create_schema=True auto-creates the firm_entries table
+# create the cache; create_schema=True auto-creates the firm_cache_entries table
 cache = Cache(database_url="sqlite:///cache.db")
 
 # store / fetch / probe
@@ -360,18 +365,22 @@ cache.decrement("hits")            # -> 10
 cache.decrement("hits", by=4)      # -> 6
 ```
 
-### Coders: JSON vs default pickle
+### Coders: JSON (default), msgpack, pickle
 
-The default `PickleCoder` handles any Python object. Use `JSONCoder` for interop / human-readable bytes (values must be JSON-serializable).
+`JSONCoder` is the default: human-readable bytes, portable across languages, and safe to decode no matter who wrote the row. `MsgpackCoder` takes the same value shapes into a compact binary form (needs the `msgpack` extra). `PickleCoder` handles any Python object but executes code on load — opt in only when every writer to the cache table is trusted.
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
+# JSONCoder() is the default; passing it explicitly is equivalent to coder=None
 cache = Cache(database_url="sqlite:///cache.db", coder=JSONCoder())
 cache.set("config", {"theme": "dark", "limit": 50})   # stored as UTF-8 JSON
 cache.get("config")                                    # -> {"theme": "dark", "limit": 50}
 
-# PickleCoder() is the default; passing it explicitly is equivalent to coder=None
+# pip install "firm-cache[msgpack]" — smaller rows, and bytes round-trip as bytes
+cache = Cache(database_url="sqlite:///cache.db", coder=MsgpackCoder())
+
+# arbitrary Python objects, at the cost of code execution on load
 cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 ```
 
@@ -380,7 +389,7 @@ cache = Cache(database_url="sqlite:///cache.db", coder=PickleCoder())
 Pass `encrypt_key` to encrypt the serialized bytes with Fernet. This needs the `encryption` extra (`cryptography`). The key is a standard Fernet key (str or bytes).
 
 ```bash
-pip install "firm[cache,encryption]"
+pip install "firm-cache[encryption]"
 ```
 
 ```python
@@ -431,7 +440,7 @@ from firm.channel import Channel
 
 # Either a database_url (Channel owns the engine) or a shared engine= is required.
 ch = Channel(database_url="sqlite:///channel.db")
-# create_schema=True (default) auto-creates the firm_messages table.
+# create_schema=True (default) auto-creates the firm_channel_messages table.
 ```
 
 ```python
@@ -506,7 +515,7 @@ def mark_invoice_paid(engine, invoice, user, amount):
 
 ```python
 # standalone (or a separate audit database) — AuditLog manages its own connection
-audit = AuditLog(database_url="sqlite:///audit.db")   # create_schema=True auto-creates firm_audits
+audit = AuditLog(database_url="sqlite:///audit.db")   # create_schema=True auto-creates firm_audit_events
 
 audit.record("user.login", actor=("User", 7), context={"ip": "127.0.0.1"})
 audit.record(
@@ -919,8 +928,8 @@ from sqlalchemy.orm import Session
 
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.fastapi import lifespan
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.fastapi import lifespan
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 DATABASE_URL = "postgresql://localhost/app"
 
@@ -992,22 +1001,24 @@ firm-queue start --import app --mode fork
 
 ## Flask app (full) {#flask}
 
-A complete single-file Flask app: `Firm(app)` configures the queue from `app.config["FIRM_DATABASE_URL"]`, routes enqueue jobs, and a cached endpoint reuses computed results. Run workers out-of-process with `flask firm worker`; flip `embed_workers=True` only for local dev.
+A complete single-file Flask app: `FirmQueue(app)` configures the queue from `app.config["FIRM_DATABASE_URL"]`, routes enqueue jobs, and a cached endpoint reuses computed results. Run workers out-of-process with `flask firm-queue worker`; flip `embed_workers=True` only for local dev.
 
 ```python
 # app.py
 from flask import Flask, jsonify
 import firm.queue as bq
 from firm.cache import Cache
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import FirmQueue
 
 app = Flask(__name__)
+# One shared URL for every module here; set FIRM_QUEUE_DATABASE_URL to point the queue elsewhere.
 app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
 
-# Reads app.config["FIRM_DATABASE_URL"] and calls bq.configure() for you.
-# embed_workers=False (default) -> run workers separately via `flask firm worker`.
+# Reads app.config["FIRM_QUEUE_DATABASE_URL"], then ["FIRM_DATABASE_URL"], and calls
+# bq.configure() for you.
+# embed_workers=False (default) -> run workers separately via `flask firm-queue worker`.
 # Set embed_workers=True to run an in-process ThreadSupervisor (dev / single process only).
-Firm(app)  # or: Firm(app, embed_workers=True, queues=("*",), threads=3)
+FirmQueue(app)  # or: FirmQueue(app, embed_workers=True, queues=("*",), threads=3)
 
 # A cache backed by the same database (its own tables; create_schema=True auto-creates them).
 cache = Cache(database_url=app.config["FIRM_DATABASE_URL"])
@@ -1043,8 +1054,8 @@ Run the web server and a worker process side by side:
 flask --app app run
 
 # Terminal 2 — a worker + dispatcher, running until Ctrl-C.
-# `firm` is the CLI group, `worker` the command (registered by Firm(app)).
-flask --app app firm worker --queues "*" --threads 3
+# `firm-queue` is the CLI group, `worker` the command (registered by FirmQueue(app)).
+flask --app app firm-queue worker --queues "*" --threads 3
 ```
 
 ---
@@ -1285,7 +1296,7 @@ with no Redis or other broker.
 
 ## The model
 
-A job is a registered function. Enqueuing it inserts a row into `firm_jobs` (the source of
+A job is a registered function. Enqueuing it inserts a row into `firm_queue_jobs` (the source of
 truth) plus one *execution* row that tracks where the job is in its lifecycle. The execution moves
 between tables:
 
@@ -1342,10 +1353,10 @@ hidden behind a small dialect seam, so the rest of the code is database-agnostic
 ## Install
 
 ```bash
-pip install "firm[queue]"            # or: uv add "firm[queue]"
+pip install firm-queue            # or: uv add firm-queue
 # add a database driver as needed (SQLite needs nothing):
-pip install "firm[queue,postgres]"   # psycopg
-pip install "firm[queue,mysql]"      # PyMySQL
+pip install "firm-queue[postgres]"   # psycopg
+pip install "firm-queue[mysql]"      # PyMySQL
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -1664,8 +1675,8 @@ tasks = [
 | `args` | `()` | Positional arguments passed to the job. |
 | `kwargs` | `{}` | Keyword arguments passed to the job. |
 
-> **Note:** schedule syntax is standard cron (`"*/5 * * * *"`, `"0 3 * * *"`, …). Natural-language
-> forms (`"every 5 minutes"`, Fugit-style) are not supported.
+> **Note:** schedule syntax is standard cron (`"*/5 * * * *"`, `"0 3 * * *"`, …), evaluated in
+> **UTC**. Natural-language forms (`"every 5 minutes"`, Fugit-style) are not supported.
 
 ## Running the scheduler
 
@@ -1707,6 +1718,15 @@ assert Scheduler(rt, tasks).tick(at=noon) == 1   # this one enqueued it
 assert Scheduler(rt, tasks).tick(at=noon) == 0   # deduped
 ```
 
+## Concurrency controls
+
+A recurring job honors its [concurrency controls](concurrency.md) like any other enqueue. With
+`on_conflict="block"` (the default), a fire that finds the key full waits in `blocked_executions`
+and runs once the slot frees. With `on_conflict="discard"`, that period is skipped and the next one
+fires as usual, which keeps a slow recurring job from overlapping itself. Each scheduler tries a
+period once, and a restarted scheduler counts as a new one: with several schedulers, or a restart
+mid-period, a slot that frees between attempts can still let that period run late.
+
 
 
 ================================================================================
@@ -1740,7 +1760,7 @@ Attempt counting is tracked on the `jobs.attempts` column.
 
 ## Inspecting failures
 
-A failed job has a row in `firm_failed_executions` with the full traceback in `error`:
+A failed job has a row in `firm_queue_failed_executions` with the full traceback in `error`:
 
 ```python
 from sqlalchemy import select
@@ -1812,7 +1832,7 @@ queues.is_paused(rt, "mailers")    # -> True
 queues.resume(rt, "mailers")       # start again
 ```
 
-Pausing is durable (a row in `firm_pauses`), so it survives restarts.
+Pausing is durable (a row in `firm_queue_pauses`), so it survives restarts.
 
 ## Clearing a queue
 
@@ -1926,13 +1946,20 @@ killed.
 
 ## Heartbeats & crash recovery {#crash-recovery}
 
-Every running process registers a row in `firm_processes` and refreshes `last_heartbeat_at`
-on a timer. The supervisor:
+Every running process registers a row in `firm_queue_processes` and refreshes `last_heartbeat_at`
+on a timer. Both supervisors (and a standalone `firm-queue work`), at startup and then every
+`heartbeat_interval`:
 
-- **Prunes** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and
-- **Recovers** their in-flight work: any claim held by a dead process is moved back to
-  `ready_executions` so another worker finishes it (`recovery.recover_orphaned_claims`). This also
-  runs on supervisor startup, to clean up after an earlier crash.
+- **Prune** processes whose heartbeat is older than `alive_threshold` (they're presumed dead), and
+- **Recover** their in-flight work: any claim held by a dead process is moved back to
+  `ready_executions` so another worker finishes it (`recovery.recover_orphaned_claims`). Startup
+  also sweeps up claims whose process row is already gone, to clean up after an earlier crash.
+
+A process that is still alive but finds its own row pruned (its heartbeats stalled past
+`alive_threshold`, say through a long database outage) has already had its claims recovered
+elsewhere, so it stops claiming under that row: a forked child exits and is replaced,
+`firm-queue work` exits, and a `ThreadSupervisor` restarts its components under a fresh
+registration, reporting the eviction through `on_thread_error`.
 
 This gives at-least-once delivery — see the idempotency note in
 [Retries & failures](retries-and-failures.md).
@@ -2153,7 +2180,7 @@ on PG/MySQL it skips rows another worker holds.
 
 `"*"` polls every non-paused queue in a single global `(priority, job_id)` order. A list of exact
 names / `prefix*` patterns polls the matched queues in order, each by `(priority, job_id)`. Paused
-queues (rows in `firm_pauses`) are always excluded.
+queues (rows in `firm_queue_pauses`) are always excluded.
 
 ## Semaphores
 
@@ -2204,7 +2231,7 @@ for most read-through caches that's a fine deal.
 
 ## The model
 
-One table, `firm_entries`:
+One table, `firm_cache_entries`:
 
 | Column | Purpose |
 |---|---|
@@ -2224,8 +2251,9 @@ atomic upsert.
   `decrement`, and `clear` — see [Operations](operations.md).
 - **Eviction** by age (`max_age`), total size (`max_size`), or entry count (`max_entries`), FIFO
   (oldest first) — see [Eviction & expiry](eviction.md).
-- **Pluggable serialization** (pickle / JSON / your own) and optional **at-rest encryption** —
-  see [Encryption & coders](encryption-and-coders.md).
+- **Values of any shape** — JSON by default, raw `bytes` and smaller rows via the msgpack coder,
+  arbitrary Python objects via the opt-in pickle coder, or bring your own — plus optional **at-rest
+  encryption**. See [Encryption & coders](encryption-and-coders.md).
 
 ```python
 from firm.cache import Cache
@@ -2248,10 +2276,10 @@ Read on: **[Getting started](getting-started.md)**.
 ## Install
 
 ```bash
-pip install "firm[cache]"              # or: uv add "firm[cache]"
-pip install "firm[cache,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[cache,mysql]"        # PyMySQL, for MySQL/MariaDB
-pip install "firm[cache,encryption]"   # cryptography, for at-rest encryption
+pip install firm-cache              # or: uv add firm-cache
+pip install "firm-cache[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-cache[mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install "firm-cache[encryption]"   # cryptography, for at-rest encryption
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -2264,7 +2292,7 @@ from firm.cache import Cache
 cache = Cache(database_url="sqlite:///cache.db")
 ```
 
-By default `Cache(...)` creates the `firm_entries` table if it's missing
+By default `Cache(...)` creates the `firm_cache_entries` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
 `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 
@@ -2400,6 +2428,11 @@ Set any to `None` to disable it:
 Cache(database_url=..., max_age=3600, max_size=None, max_entries=100_000)
 ```
 
+`max_size` counts *serialized* bytes, so your [coder](encryption-and-coders.md) sets how much fits:
+`MsgpackCoder` writes typical values about a third smaller than the JSON default, and at-rest
+encryption adds ~170 bytes per entry. If the cache is trimming sooner than you'd like, that's a
+cheaper lever than raising the limit.
+
 `max_age` is also enforced at **read time**: an entry older than `max_age` reads as a miss
 (`get` returns `None`, `fetch` recomputes) even if eviction hasn't physically deleted the row
 yet — eviction is opportunistic, so an idle or read-heavy cache would otherwise keep serving
@@ -2454,29 +2487,91 @@ constant cost.
 
 # Encryption & coders
 
-## Coders
+## Which coder?
 
-A *coder* turns a value into bytes and back. The default is **JSON** (dict/list/str/num/bool/
-None) — safe to decode no matter who wrote the row. `PickleCoder` handles arbitrary Python
-objects and is available as an explicit opt-in, and you can supply your own coder.
+A *coder* turns a value into bytes and back. The default covers the common case; reach for another
+when one of these lines describes you:
+
+| You want to… | Coder | What it costs |
+|---|---|---|
+| cache dicts, lists, strings, numbers | `JSONCoder` — the default | nothing: readable rows, portable to any language |
+| cache **`bytes`** (thumbnails, protobuf, compressed blobs), or fit **more entries** under the same `max_size` | `MsgpackCoder` | `pip install "firm-cache[msgpack]"`; rows are no longer human-readable |
+| cache arbitrary Python objects (tuples, dataclasses, sets) | `PickleCoder` | executes code on load — only when every writer to the table is trusted |
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 Cache(database_url=...)                        # JSON by default
+Cache(database_url=..., coder=MsgpackCoder())  # compact binary; bytes stay bytes
 Cache(database_url=..., coder=PickleCoder())   # arbitrary objects — read the warning below
 ```
 
-A custom coder is anything with `dumps(value) -> bytes` and `loads(bytes) -> value`:
+**Switching coders on an existing cache is safe but not free.** Rows written by the old coder can't
+be decoded by the new one, so they read as misses until they age out — plan for a cold cache, not a
+migration. This is also why the default stays JSON across releases.
+
+### More on `MsgpackCoder`
+
+Same value shapes as JSON in a compact binary form, and just as safe to decode (no code execution on
+load). Typical payloads land around a third smaller, which matters because `byte_size` drives
+[eviction](eviction.md): smaller values mean more entries survive under `max_size`.
+
+Two differences from JSON: `bytes` values round-trip as `bytes` instead of needing an encoding, and
+dict keys must be `str`/`bytes` — msgpack's unpacker rejects other key types by default as a
+hash-flooding guard, so a dict keyed by ints writes fine but reads back as a miss. Constructing the
+coder without the extra installed raises `ImportError` naming it.
+
+Rows carry a one-byte tag (`0xc1`) in front of the msgpack payload, which is what makes the
+switch-to-a-cold-cache promise above hold. Untagged, a JSON row holding the int `1` is the single
+byte `b"1"` — and `0x31` is a valid msgpack fixint, so it would decode as `49` rather than miss, and
+`increment` would persist the corruption. Small ints are exactly what counters hold, so this is the
+common case, not a corner one. The cost is a byte per entry.
+
+`0xc1` is the one byte the msgpack spec marks *never used*, and no UTF-8 text can start with it, so
+the tag can't collide with a bare msgpack payload or with a JSON row. There is no option to turn it
+off: the only thing that switch would do is re-open the misread above.
+
+### What ends up in the `value` column
+
+| Coder | Bytes written |
+|---|---|
+| `JSONCoder` | UTF-8 JSON |
+| `MsgpackCoder` | the `0xc1` tag, then the msgpack body |
+| `PickleCoder` | a pickle stream |
+
+With `encrypt_key` set, that payload is wrapped in a Fernet token instead — so an encrypted row is
+opaque to any reader without the key, whichever coder produced it.
+
+Reading a msgpack row from outside firm therefore means stripping one byte:
 
 ```python
-import msgpack   # pip install "firm[cache,msgpack]"
+import msgpack
 
-class MsgpackCoder:
-    def dumps(self, value): return msgpack.packb(value, use_bin_type=True)
-    def loads(self, data):  return msgpack.unpackb(data, raw=False)
+def decode_firm_msgpack(value: bytes):
+    if value[:1] != b"\xc1":
+        raise ValueError("not a firm msgpack payload")
+    return msgpack.unpackb(value[1:])
+```
 
-Cache(database_url=..., coder=MsgpackCoder())
+(Finding the row is the harder half: lookups go through `key_hash`, a signed 64-bit hash of the
+normalized key — see [Internals](internals.md).)
+
+### Your own coder
+
+Anything with `dumps(value) -> bytes` and `loads(bytes) -> value` works — a coder may return any
+bytes it likes, so binary formats and compression are fair game:
+
+```python
+import zlib
+
+from firm.cache import Cache, JSONCoder
+
+class GzipJSONCoder:
+    def __init__(self): self._inner = JSONCoder()
+    def dumps(self, value): return zlib.compress(self._inner.dumps(value))
+    def loads(self, data):  return self._inner.loads(zlib.decompress(data))
+
+Cache(database_url=..., coder=GzipJSONCoder())
 ```
 
 > **Security:** `PickleCoder` deserializes with `pickle`, which executes code on load — anyone
@@ -2490,7 +2585,7 @@ Cache(database_url=..., coder=MsgpackCoder())
 Wrap any coder with Fernet encryption by passing an `encrypt_key`:
 
 ```python
-from cryptography.fernet import Fernet   # pip install "firm[cache,encryption]"
+from cryptography.fernet import Fernet   # pip install "firm-cache[encryption]"
 
 key = Fernet.generate_key()              # store this securely
 cache = Cache(database_url=..., encrypt_key=key)
@@ -2528,7 +2623,7 @@ Every `Cache(...)` option, with its default:
 Cache(
     database_url=None,            # SQLAlchemy URL (or pass engine=)
     engine=None,                  # a pre-built SQLAlchemy Engine, instead of database_url
-    coder=None,                   # value coder; defaults to PickleCoder()
+    coder=None,                   # value coder; defaults to JSONCoder()
     encrypt_key=None,             # Fernet key -> encrypt values at rest
     max_age=1209600.0,            # evict entries older than this many seconds (2 weeks); None = off
     max_size=268435456,           # evict when estimated total bytes exceed this (256 MiB); None = off
@@ -2536,7 +2631,7 @@ Cache(
     expiry_batch_size=100,        # rows per eviction run; also sets the write-trigger probability
     max_key_bytesize=1024,        # keys longer than this are truncated + hash-suffixed
     size_estimate_samples=10000,  # exact-sum threshold / sample size for the size estimator
-    create_schema=True,           # create firm_entries if missing
+    create_schema=True,           # create firm_cache_entries if missing
     auto_expire=True,             # let writes probabilistically trigger eviction
     background_expiry=False,      # run an eviction loop on a timer
     expiry_interval=60.0,         # seconds between background eviction runs
@@ -2546,7 +2641,7 @@ Cache(
 | Option | Default | Notes |
 |---|---|---|
 | `database_url` / `engine` | — | Provide one. `engine` lets two caches share a pool; bare `postgresql://`/`mysql://` URLs are normalized to the shipped drivers. |
-| `coder` | `PickleCoder()` | See [Encryption & coders](encryption-and-coders.md). |
+| `coder` | `JSONCoder()` | `MsgpackCoder` / `PickleCoder` are opt-in — see [Encryption & coders](encryption-and-coders.md). |
 | `encrypt_key` | `None` | Fernet key (needs the `[encryption]` extra). |
 | `max_age` / `max_size` / `max_entries` | 2 wk / 256 MiB / off | Eviction limits — see [Eviction & expiry](eviction.md). |
 | `expiry_batch_size` | `100` | Eviction batch + write-trigger rate (~`2/N`). |
@@ -2622,7 +2717,7 @@ firm-cache trim
 
 ## Schema
 
-One table, `firm_entries`:
+One table, `firm_cache_entries`:
 
 ```
 id          autoincrement PK, FIFO eviction order
@@ -2688,18 +2783,18 @@ SQLite, PostgreSQL, or MySQL/MariaDB — no Redis, no message broker, no websock
 
 ## The model
 
-A broadcast inserts a row into `firm_messages`. Subscribers register an in-process callback
+A broadcast inserts a row into `firm_channel_messages`. Subscribers register an in-process callback
 per channel; a background **listener** polls the table for rows newer than the last id it has seen
 on those channels and hands each payload to the matching callbacks.
 
 ```
-broadcast("room:42", payload) ──▶ INSERT firm_messages (channel, payload, channel_hash, …)
+broadcast("room:42", payload) ──▶ INSERT firm_channel_messages (channel, payload, channel_hash, …)
 
 listener (every polling_interval):
   SELECT … WHERE channel_hash IN (subscribed) AND id > last_id  ──▶ callback(payload)
 ```
 
-One table, `firm_messages`:
+One table, `firm_channel_messages`:
 
 | Column | Purpose |
 |---|---|
@@ -2744,9 +2839,9 @@ Old messages are deleted automatically. Each broadcast has a small (~2%) chance 
 ## Install
 
 ```bash
-pip install "firm[channel]"             # or: uv add "firm[channel]"
-pip install "firm[channel,postgres]"    # psycopg, for PostgreSQL
-pip install "firm[channel,mysql]"       # PyMySQL, for MySQL/MariaDB
+pip install firm-channel             # or: uv add firm-channel
+pip install "firm-channel[postgres]"    # psycopg, for PostgreSQL
+pip install "firm-channel[mysql]"       # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -2759,7 +2854,7 @@ from firm.channel import Channel
 ps = Channel(database_url="sqlite:///channel.db")
 ```
 
-By default `Channel(...)` creates the `firm_messages` table if it's missing
+By default `Channel(...)` creates the `firm_channel_messages` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and pass
 `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 
@@ -2830,7 +2925,7 @@ Channel(
     message_retention=86400.0,# trim messages older than this many seconds (1 day)
     auto_trim=True,            # let broadcasts probabilistically trigger trimming
     trim_batch_size=100,      # rows per trim pass; also sets the trim-trigger rate (~2/N per write)
-    create_schema=True,       # create firm_messages if missing
+    create_schema=True,       # create firm_channel_messages if missing
 )
 ```
 
@@ -2907,7 +3002,7 @@ firm-channel trim --retention 86400 --batch-size 100
 
 ## Schema
 
-One table, `firm_messages`:
+One table, `firm_channel_messages`:
 
 ```
 id            autoincrement PK, the delivery cursor
@@ -2963,14 +3058,14 @@ than waiting out the poll interval.
 
 ## Trimming
 
-`firm_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
+`firm_channel_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
 a ~`2 / trim_batch_size` chance (≈ 2% at the default batch of 100) of submitting a **trim** to a
 single background thread — the same probabilistic trigger the cache uses for eviction. A trim is:
 
 ```sql
-SELECT id FROM firm_messages WHERE created_at < :cutoff
+SELECT id FROM firm_channel_messages WHERE created_at < :cutoff
   FOR UPDATE SKIP LOCKED LIMIT :batch_size;   -- SKIP LOCKED on PG/MySQL; BEGIN IMMEDIATE on SQLite
-DELETE FROM firm_messages WHERE id IN (...);
+DELETE FROM firm_channel_messages WHERE id IN (...);
 ```
 
 `SKIP LOCKED` (via the shared dialect seam) means several processes can trim concurrently without
@@ -3006,7 +3101,8 @@ no longer atomic with the business write. See [Configuration](configuration.md).
 
 ## The model
 
-One table, `firm_audits`:
+The core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
+it plus two side tables — see [Tamper-evidence](tamper-evidence.md)):
 
 | Column | Purpose |
 |---|---|
@@ -3038,6 +3134,10 @@ are display-only and, like the JSON payloads, never filtered on in SQL.
 - **Append-only by construction**: the public API has no update or delete. The only thing that
   ever removes a row is opt-in, age-based **retention** — off by default (keep forever) — see
   [Retention & querying](retention-and-querying.md).
+- **Opt-in tamper-evidence** (off until you set a key): each row is HMAC-signed, a background
+  sealer signs independent ranges, and a read-only `verify` detects any modify / delete / insert /
+  truncation by an attacker with database access but not the key — see
+  [Tamper-evidence](tamper-evidence.md).
 
 ```python
 from firm.audit import AuditLog, record
@@ -3054,14 +3154,13 @@ log.record("sync.ran", actor="cron")  # a non-entity actor — a role, no id
 log.history(action="user.login")
 ```
 
-Read on: **[Getting started](getting-started.md)**.
+Read on: **[Getting started](getting-started.md)**, or **[Tamper-evidence](tamper-evidence.md)** for
+the cryptographic integrity layer.
 
+## S3 backend and archives
 
-## Optional S3 storage
-
-The existing SQL backend remains the default. `firm-audit[s3]` adds a database-free S3 backend
-and optional archives for SQL/S3 sources. See [S3 & archives](s3-and-archives.md) for configuration,
-retry guarantees, CLI commands, and retention requirements.
+See [S3 backend and archival storage](s3-and-archives.md) for database-free audit,
+bounded scans, export, restore, and archive-before-prune protection. SQL remains the default.
 
 
 
@@ -3074,9 +3173,9 @@ retry guarantees, CLI commands, and retention requirements.
 ## Install
 
 ```bash
-pip install "firm[audit]"              # or: uv add "firm[audit]"
-pip install "firm[audit,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[audit,mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install firm-audit              # or: uv add firm-audit
+pip install "firm-audit[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-audit[mysql]"        # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -3089,7 +3188,7 @@ from firm.audit import AuditLog
 audit = AuditLog(database_url="sqlite:///audit.db")
 ```
 
-By default `AuditLog(...)` creates the `firm_audits` table if it's missing
+By default `AuditLog(...)` creates the `firm_audit_events` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and
 pass `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 
@@ -3230,7 +3329,7 @@ audit.history(actor="cron")                                    # a role/label ac
 ```
 
 The same-transaction `record(conn, ...)` path has no equivalent inline query — open your own
-connection and call `audit.history(...)`, or query `firm.audit.schema.audits` directly if you
+connection and call `audit.history(...)`, or query `firm.audit.schema.audit_events` directly if you
 need something `history()` doesn't express.
 
 ## Retention
@@ -3270,6 +3369,712 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000
 > a retention policy. For compliance-sensitive deployments, this is the point: nothing deletes
 > audit history unless you've configured it to.
 
+### Pruning with tamper-evidence on
+
+Without a configured key, pruning simply deletes rows older than `max_age` in batches. With a key
+configured, expired rows are not plain-pruned until a signed activation exists. Once
+[tamper-evidence](tamper-evidence.md) has an activation/seal/floor record, pruning **aligns to seal
+boundaries and only prunes what verifies**:
+
+- It deletes only rows in ranges **fully covered by independent seals older than the cutoff** —
+  never partial ranges and never unsealed rows — then appends a signed `kind="floor"` record saying
+  every id through that boundary was legitimately retired.
+- Before deleting a range it **re-verifies** it (recomputing each row's `row_mac` and the range's
+  `rows_mac`/`row_count` against the seal, plus the seal's own MAC). A range that no longer verifies
+  is **refused**: nothing in or beyond it is pruned, the floor does not advance,
+  `Retention.last_refused_tampered` records it, and the refusal routes through `on_error`. This
+  stops a tampered-then-expired row from being laundered by deletion — the evidence stays in place,
+  and a later `firm-audit verify` still reports it as `TAMPERED`.
+- When an anchor is configured, retention appends the `FLOOR` line **before** committing the floor
+  row and deletions and fsyncs the file. If either anchor sink fails, pruning is refused. The signed
+  floor row, event deletion, and retired covering-seal deletion then commit in one write
+  transaction; serialization/deadlock failures get a bounded retry.
+- A host missing any current or retired seal key needed by existing records refuses loudly and
+  sets `last_refused_no_seal_key`; it never categorizes the evidence as prunable tampering.
+- The refusal repeats on every subsequent run until you preserve the database and investigate with
+  `firm-audit verify --full`.
+
+The one cost of the guarantee is a read: pre-prune verification re-reads (keyset-paginated) every
+row it is about to delete.
+
+
+
+================================================================================
+# Source: docs/audit/tamper-evidence.md
+================================================================================
+
+# Tamper-evidence
+
+An audit log is only as trustworthy as its worst day — the day someone with database access
+edits a row, deletes an inconvenient event, or drops the table and swears it never happened.
+firm-audit's tamper-evidence layer is **opt-in** and makes those changes *detectable*: not
+prevented (anyone with `DELETE` can delete), but impossible to do without leaving a mark that
+verification will find.
+
+It is off until you configure a key. **Without `FIRM_AUDIT_KEY`, the runtime behavior on this page
+is inert**: writes leave the evidence columns NULL and reads behave as before. The nullable columns
+and two side tables are always part of the migrated schema, independent of key configuration.
+
+## Threat model
+
+The attacker has **full read/write access to the database** — a SQL console, leaked credentials,
+a rogue DBA — but **not** the application's secret key. Against that attacker, verification
+detects:
+
+- **modification** of an existing row (any column, including `created_at`),
+- **deletion** of a row,
+- **insertion** of a row from outside the application, or **replay** of a copied real row,
+- **truncation** of the tail ("the last hour never happened"),
+- **dropping or resetting** the whole table.
+
+This is tamper-*evidence*, not tamper-*proofing* — the same trust model as AWS QLDB digests or
+certificate-transparency proofs. It is **not** designed to stop an attacker who holds the
+database *and* the secret key *and* the external anchor, and it does not prevent destruction:
+someone with access can always `DROP TABLE`; the guarantee is that this cannot go **unnoticed**.
+Rows stay plaintext — this is integrity, not confidentiality.
+
+### What the anchor is worth depends on where it lives
+
+Detection of deletion, tail-truncation, and wholesale reset needs external memory. The anchor is
+therefore **mandatory for the full guarantee**, and only works when this hard requirement holds:
+**DB compromise must not grant anchor write.** Placement is the deployer's choice:
+
+| Safety level | Placement | Guarantee / tradeoff |
+|---|---|---|
+| Weakest | **Local file on the app host** | Safe against a database-only compromise when the DB is managed elsewhere (for example RDS) and those credentials cannot write the app filesystem. Risky on one all-in-one host |
+| Better | **Separate host or append-only mount** | The DB attacker is outside the anchor filesystem's write boundary |
+| Strongest | **S3 Object Lock / WORM** | Storage enforces immutability; use object lifecycle expiry rather than rewriting old objects |
+| Documented-weak mode | **No anchor** | Layers 1+2 detect modification and deletion under surviving seals, but not a total wipe of hidden events plus seals plus verify status |
+
+Whoever can compromise the database must not be able to write the anchor. A local path is not
+automatically unsafe; the trust boundary matters. Conversely, an off-host sink reachable with the
+same compromised credentials is not independent.
+
+## The three layers
+
+Protection is split so that the fast path (writing rows) stays lock-free and multi-writer, and the
+slow path (proving ordering) needs no coordination.
+
+| Layer | Mechanism | Catches |
+|---|---|---|
+| **1 — row MAC** | every row self-authenticates with `HMAC-SHA256(key, canonical(row))` | modify, forge, replay |
+| **2 — seals** | a background loop independently signs exact id ranges | delete/insert inside a range, seal-tampering |
+| **3 — anchor** | monotonic signed coverage/floor watermarks live outside the database | seal-tail truncation, deletion, table reset |
+
+**Layer 1 — per-row MAC.** At insert time, when a key is configured, the writer generates a ULID
+(`entry_id`, unique-indexed — identity and anti-replay) and stores `row_mac`, a keyed HMAC over the
+row's canonical bytes. It depends on **nothing but the row itself**: no locks, no reads, no extra
+round-trips, so N app instances insert exactly as they do today. Editing any column breaks its MAC;
+an out-of-band insert has no valid MAC; a replayed row collides on `entry_id`. In the *unsealed*
+tail a valid `(entry_id, row_mac)` pair is modification- and forgery-protected but not yet pinned
+to its position — id-to-content binding arrives with the seal.
+
+**Layer 2 — seals.** A background `SealLoop` periodically hashes one contiguous settled range
+`(from_id, to_id]` into a `firm_audit_seals` row. `rows_mac` covers every `(id, row_mac)` pair in id
+order; `seal_mac` signs the range bounds, `row_count`, `rows_mac`, time, and signing `key_id`. Each
+seal stands alone. Deleting, inserting, or moving a row inside its range breaks
+`row_count`/`rows_mac`; editing the seal breaks its own MAC. Adjacent seals must be contiguous.
+Any instance may run the loop — the unique `from_id` constraint arbitrates races, so no leader
+election is needed.
+
+The first sealer pass also writes one signed `kind="activation"` record. Its boundary is the
+highest NULL-MAC event id already outside the grace window (or zero when there are none):
+pre-key rows at or below it are the legacy prefix and are never sealed, while every keyed row is
+above the boundary and is sealed, including keyed rows written before activation. Retention later
+records the pruned prefix with signed
+`kind="floor"` advances. Activation, seals, and floors use the seal key.
+
+**Layer 3 — anchor.** Every signed record also leaves the database — appended to a local file
+and/or handed to a callback (ship it to S3, a second database, a log pipeline). The file is
+append-only and has one canonical line per event:
+
+```text
+<sealed_at> SEAL <from_id> <to_id> <seal_mac>
+<retired_at> FLOOR <through_id> <floor_mac>
+<at> ACTIVATION <boundary_id> <activation_mac>
+<at> CHECKPOINT <coverage_id> <floor_id> <checkpoint_mac>
+```
+
+Verification streams the file once in O(1) memory. It keeps only (1) the greatest mature
+`SEAL.to_id` coverage and (2) the greatest authentic `FLOOR.through_id`; a signed `CHECKPOINT`
+contains the same values after compaction. Coverage below the anchor watermark is `TAMPERED`.
+Rows at/below the floor are `TAMPERED`, while missing rows and seals there are an authorized
+prune. Malformed or partial lines cannot lower a maximum, so they are skipped and collapsed into
+one `WARNING`, never treated as tampering by themselves.
+
+Seal and activation emission happens after the database commit and is best-effort. Before new
+work, the sealer only ensures that the current maximum seal coverage is anchored. A floor is
+stricter: retention appends and `fsync`s it before the prune commits; append failure refuses the
+prune.
+
+`on_anchor` is a write-only delivery callback. If it is your only sink (for example S3 or another
+database), materialize that history as the canonical line format and supply it to verification via
+`anchor_path`; the callback alone cannot be read back to detect truncation or reset.
+
+### Turning it on, level by level
+
+Each layer is a flag on top of the previous one. This walkthrough is runnable end to end (SQLite,
+`grace=0` so seals happen immediately — in production keep the default grace and let the background
+loop seal):
+
+```python
+from firm.audit import AuditLog
+
+# Level 1 — integrity. A row key makes every row self-authenticating (HMAC).
+audit = AuditLog(database_url="sqlite:///audit.db", mac_key="a-32+char-row-secret-................")
+audit.record("invoice.paid", subject=("Invoice", 42), actor=("User", 7), data={"amount": 4200})
+assert audit.verify(full=True).outcome == "ok"
+# An edit to any column is now caught:
+#   UPDATE firm_audit_events SET action='forged' WHERE id=1   ->  verify() == "tampered"
+
+# Level 2 — deletion/insertion. Sealing signs exact id ranges, so a *deleted* row is caught too.
+audit = AuditLog(
+    database_url="sqlite:///audit.db",
+    mac_key="a-32+char-row-secret-................",
+    seal_key="a-DISTINCT-32+char-seal-secret-.....",   # two-key split (optional; omit for single-key)
+    grace=0.0,
+    anchor_path="/var/lib/firm/audit.anchor",           # Level 3 — external memory (see below)
+)
+audit.record("order.created", subject=("Order", 1001), actor=("worker", "w1"))
+audit.sealer.run_once()          # or background_sealing=True to run it on a timer
+assert audit.verify(anchor_path="/var/lib/firm/audit.anchor", full=True).outcome == "ok"
+# Deleting a sealed row now fails the seal's rows_mac -> "tampered".
+
+# Level 3 — truncation/reset. The anchor above is a separate trust domain (place it where a DB
+# compromise cannot write it). Deleting a whole seal *and* its rows drops present coverage below the
+# anchor's watermark -> "tampered", which the database alone could not remember.
+
+# Keep checking continuously (pick one): the in-process loop, a firm-queue recurring task, or cron.
+audit = AuditLog(..., background_verification=True, verify_interval=3600.0, verify_full_every=24)
+```
+
+The progression maps onto the [threat model](#threat-model): Level 1 catches modification/forgery,
+Level 2 adds deletion/insertion inside sealed history, and Level 3 adds seal-deletion and
+tail-truncation. Verification is read-only and must be [scheduled](#scheduling-verification-run-it-continuously);
+the [dashboard](../ui.md) then shows the latest verdict.
+
+### Anchor growth, compaction, and rotation
+
+File length does not affect verification memory or correctness. On a mutable local/separate-host
+anchor, compact it to one signed watermark when needed:
+
+```bash
+firm-audit anchor-compact --database-url "$FIRM_AUDIT_DATABASE_URL" \
+  --anchor /var/lib/firm/audit.anchor
+```
+
+The command first appends and `fsync`s a signed `CHECKPOINT`, then removes strictly older lines
+under the same file lock. Verification accepts the compacted file like the full history. Keep the
+current and retired seal keys available while compacting and reading checkpoints. For S3 Object
+Lock or other WORM storage, do not rewrite an object: rotate to new objects and use lifecycle
+expiry for old ones. Growth is harmless to verifier memory.
+
+## Rolling it out — key first, then sealing
+
+Key presence and sealing are **two separate switches, enabled in order**, because enabling a key
+is never atomic across a fleet.
+
+1. **Phase 1 — deploy the key everywhere.** Set `FIRM_AUDIT_KEY` on every instance. Rows start
+   carrying MACs. No seal boundary exists yet, so a straggler instance still writing MAC-less rows
+   is harmless — it is not yet an alarm.
+2. **Phase 2 — enable sealing**, once every writer carries the key: `background_sealing=True` (or
+   run `firm-audit seal`). The first sealer pass writes an explicit signed **activation marker**
+   whose boundary is the highest pre-key (NULL-MAC) row id outside the grace window, or zero when
+   there are none. From then on, a row *above* the boundary
+   with no MAC is `TAMPERED` (a configured writer never produces one), while rows at or below it
+   are the legacy `UNPROTECTED` set.
+
+Doing it in the other order would make every rollout flash red while stragglers catch up. The
+sealer restates this order in its startup log.
+
+> Pre-existing rows, written before the key was configured, verify as **UNPROTECTED** — reported
+> once as a count, never as tampering.
+
+## Sizing the grace window
+
+Seals only cover rows older than a **grace window** (`grace`, default 60 s). The normal
+`AuditLog.record()` path omits `conn=` and writes durably in its own short transaction, so the row
+is settled well before its range is eligible. The window also absorbs ordinary scheduling and
+clock skew between instances.
+
+If you deliberately pass `conn=` (or call module-level `record(conn, ...)`) for same-transaction
+atomicity, **`grace` must exceed the longest audit-recording transaction plus expected
+inter-instance clock skew**. There is no late-commit
+exception: a row that appears inside an already sealed range changes the exact signed membership
+and is permanently `TAMPERED`, even when its row MAC is valid. It is stranded below the seal high
+water mark: no later sealer pass and no `verify --full` run can self-heal it. Each range is exactly
+the rows its `row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification.
+`AuditLog` emits a startup hint restating this when sealing is enabled.
+
+`grace` also bounds the anchor's truncation guard: the coverage watermark only enforces seals older
+than `grace` (so a just-committed seal that a verifier's snapshot cannot yet see is not read as a
+truncation). The flip side is that deleting a seal **younger than `grace`** is not caught by the
+watermark until it ages — and if the sealer's clock runs ahead of the verifier's by δ, that
+unenforced tail widens to `grace + δ`. Keep `grace` small (and clocks in sync) so this recent-tail
+exposure stays narrow.
+
+### Long jobs: record on their own transaction
+
+No single `grace` fits both a 50 ms web request and a 40-minute ETL. Rather than widen `grace`
+fleet-wide (which forces a long deletion-unprotected tail on everyone), **long-running jobs record
+outside their own transaction**:
+
+```python
+from firm.audit import AuditLog
+
+audit = AuditLog(engine=app_engine, mac_key="...")
+
+# In a long job: record on the audit log's OWN connection (omit conn=), so the row is
+# durable and settled immediately — deliberately not atomic with the 40-minute job.
+audit.record("etl.completed", subject=batch, actor="etl", data={"rows": 1_000_000})
+```
+
+Recording via the own-transaction path (omit `conn=`) makes the row durable immediately, or record
+*after* the job's transaction commits. `grace` then stays tight (60 s) without risking a row
+appearing inside a range whose exact membership was already sealed.
+
+## Key management
+
+The key comes from `FIRM_AUDIT_KEY` (or `AuditLog(..., mac_key=...)`). No key means the feature is
+off: columns stay NULL and everything behaves as it did before tamper-evidence existed.
+
+- **The key must be a UTF-8 string of at least 32 characters.** A shorter key is a **hard error at
+  startup**, not a warning — a weak key silently voids all three layers, so it fails loudly
+  instead. Empty or absent means the feature is simply off.
+- `key_id` — the first 8 hex chars of `SHA-256(key)` — is stored on every row and seal so a
+  verifier knows which key to check under. It is not the key and reveals nothing about it. Two
+  *distinct* configured keys that happen to share a `key_id` (astronomically unlikely, but it would
+  otherwise let one key shadow the other in the key_id-indexed keyring and flag the shadowed key's
+  objects as a false `TAMPERED`) is a **hard error** — at startup for the row/seal pair, at verify
+  time for a colliding retired key. Change one of the keys so their `key_id`s differ.
+
+### Field length limits (signed path)
+
+Under a key, over-length values fail **loudly at `record()` time** rather than being silently
+truncated later. A non-strict MySQL truncates a value longer than its column — a `VARCHAR(255)`
+scalar (`action`, the subject/actor type/id/label, `correlation_id`) or a `TEXT` JSON payload
+(`data`/`changes`/`context`, max 65535 bytes) — which would leave the *stored* bytes different from
+the *signed* bytes and make an untouched row verify as `TAMPERED`. So a value that would be clipped
+raises a `ValueError` before the insert (put large detail in `data=`, and keep it under the TEXT
+limit). Without a key the write path is unchanged — the database handles length exactly as it did
+before tamper-evidence existed.
+
+```python
+# Explicit key (overrides the environment). Pass "" to force the feature off.
+audit = AuditLog(engine=app_engine, mac_key="a-32-char-or-longer-secret-here!!")
+```
+
+### Rotation
+
+Rotate without re-signing — re-signing would require an `UPDATE`, which the append-only contract
+forbids. New writes use the new key; the **retired** key stays on the verifier so its old objects
+still verify. Retired keys live in two **role-scoped** archives. Verification and retention read
+them; the sealer accepts old Layer-2 records signed by the retired seal archive while writing new
+records with the current seal key. Writers never use retired keys to sign new evidence:
+
+- **`FIRM_AUDIT_RETIRED_KEYS`** — retired **row** keys. Eligible to validate row MACs only, and
+  **never** a seal, in any mode.
+- **`FIRM_AUDIT_RETIRED_SEAL_KEYS`** — retired **seal** keys. Eligible to validate Layer-2 records
+  only. In single-key mode the same old secret also belongs in the row archive.
+
+The archives never hold the *new* key — writers pick that up from `FIRM_AUDIT_KEY` /
+`FIRM_AUDIT_SEAL_KEY` alone. Where the **old** key goes depends on what it signed:
+
+| Deployment | Key you rotate | New key → | Retire the old key into | Its old objects that still verify |
+|---|---|---|---|---|
+| Single-key | the one key | `FIRM_AUDIT_KEY` (every writer) | **both** `FIRM_AUDIT_RETIRED_KEYS` and `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its rows **and** seals |
+| Two-key split | row key | `FIRM_AUDIT_KEY` (every instance) | `FIRM_AUDIT_RETIRED_KEYS` | its rows (seals untouched) |
+| Two-key split | seal key | `FIRM_AUDIT_SEAL_KEY` (sealer/verifier hosts) | `FIRM_AUDIT_RETIRED_SEAL_KEYS` | its seals (rows untouched) |
+
+```bash
+# Split deployment, rotating the ROW key. Instances carry the new row key:
+export FIRM_AUDIT_KEY="the-new-32-char-or-longer-row-secret!!!!"
+
+# The verifier holds the new keys plus the retired row key, labelled — split on the FIRST '='
+# (a comma is always an entry delimiter; never put one in a secret):
+export FIRM_AUDIT_SEAL_KEY="the-unchanged-32-char-or-longer-seal-key"
+export FIRM_AUDIT_RETIRED_KEYS="2025=the-old-32-char-or-longer-row-secret"
+firm-audit verify --anchor /var/lib/firm/audit.anchor
+```
+
+**Why the row archive is role-scoped.** A row key lives on every app instance, so an attacker who
+compromises one holds it. If a rotated-out row key were still eligible to validate *seals*, that
+attacker could wait for the rotation, then re-sign a sealed range under the stolen key and relabel
+its `key_id` — laundering a rewrite of sealed history. `FIRM_AUDIT_RETIRED_KEYS` is therefore
+row-only in **every** mode: a retired row key validates the rows it signed and nothing more. A seal
+signed by a key that is not a *seal* key (current or retired) is a `TAMPERED` unverifiable-signer
+finding, never a laundered OK.
+
+Both archives split each entry on the **first** `=`, so a secret may itself contain `=`. A comma is
+**always an entry delimiter** — a secret cannot contain one: `id1=A,id2=B` is two keys and is
+byte-identical to a lone key whose secret were `A,id2=B`, so the two cannot be distinguished. A
+comma that yields a malformed fragment (no `=`, empty label, or a too-short secret — the common
+accidental case) is rejected with a pointed error; a comma followed by a well-formed `label=secret`
+is taken as a separate key. Either way parsing is **fail-closed** — it never silently merges two
+distinct secrets into one identity, and a genuine `key_id` collision between the parsed keys is a
+hard error. **Do not put a comma in a secret;** use a longer comma-free random value. Writer and
+verifier parse secrets with the same function — a parse divergence would masquerade as tampering.
+Verify hard-fails on an unknown **row** `key_id` only when it is the run's sole obstacle. If another
+finding proves tampering, that verdict wins and the alert still fires. Unknown Layer-2 signers are
+always `TAMPERED` findings.
+
+> **A leaked key is not a retired key.** The archives are for keys aged out on schedule, still
+> trusted. A key that was **leaked or compromised** does **not** belong in any archive: adding it
+> tells verify to trust MACs the attacker can now forge. Every row and seal it signed is no longer
+> trustworthy — treat those objects as suspect and lean on the seals and anchors made under keys the
+> attacker never held. Rotate the compromised key out of `FIRM_AUDIT_KEY` / `FIRM_AUDIT_SEAL_KEY`
+> immediately, and do not archive it.
+
+### Two-key split: a separate seal key (optional hardening)
+
+By default one key signs everything, and it lives on **every** app instance — so compromising any
+instance leaks the ability to forge not just rows but *seals*, and thus to rewrite sealed history
+undetected. The two-key split shrinks that blast radius:
+
+- Set a distinct **seal key** — `FIRM_AUDIT_SEAL_KEY` (or `AuditLog(..., seal_key=...)`) — on the
+  **designated sealer/verifier hosts only**. It signs everything on the seal side (`rows_mac` and
+  `seal_mac`, including range seals, activation, and floors); ordinary app instances keep only
+  `FIRM_AUDIT_KEY` and sign just their row MACs.
+- After the split, an attacker who compromises an app instance holds only the row key and can forge
+  at most an individual **unsealed** row — the independent seals are out of reach. Even editing a
+  sealed row and recomputing its `row_mac` *and* the seal's `rows_mac`/`seal_mac` under the row key
+  is caught: verify checks seals under the seal key, and refuses the row key as a seal signer.
+
+```bash
+# App instances (row MACs only):
+export FIRM_AUDIT_KEY="the-32-char-or-longer-row-secret-value!!"
+
+# Sealer / verifier hosts also carry the seal key:
+export FIRM_AUDIT_SEAL_KEY="a-different-32-char-or-longer-seal-secret"
+```
+
+The verifier needs **both** keys (rows are checked under the row key, seals under the seal key);
+configure `mac_key`/`FIRM_AUDIT_KEY` *and* `seal_key`/`FIRM_AUDIT_SEAL_KEY` on it. If verify meets a
+seal signed by a key it holds only as a *row* key — the current row key, or a retired one from
+`FIRM_AUDIT_RETIRED_KEYS` — it reports a `TAMPERED` unverifiable-signer finding. Retention is more
+conservative: an unavailable current or retired seal key causes a loud no-op, never a prune.
+
+**This is opt-in and the default is unchanged.** Leave `FIRM_AUDIT_SEAL_KEY` unset (or set it equal
+to `FIRM_AUDIT_KEY`) and the seal key *is* the row key: every instance may seal, one key signs
+everything, and behavior is byte-identical to single-key mode.
+
+**The tradeoff is honest:** the split turns "any instance may seal" into a **designated sealer
+role**. Sealing and retention's floor advance both need the seal key, so in a split deployment they
+run on a sealer-role host, not just anywhere. A host without the seal key that tries to seal is the
+usual loud no-op after a seal-key-signed record exists; a host without it that tries to prune the
+aligned path **refuses loudly**
+(see [Retention and the signed floor](#retention-and-the-signed-floor)) rather than sign a floor
+with the wrong key. You gain a smaller blast radius; you pay with a second secret to manage and a
+role to place.
+
+The first-ever activation has no existing signer from which to infer deployment intent. In a
+two-key deployment, run both the sealer and retention only on the seal-key host from the start.
+After a seal-key rotation, mixed current+retired seal `key_id` history is expected. The sealer
+refuses only an unknown signer or one available solely as a row key.
+
+## Verifying
+
+`firm-audit verify` (and `AuditLog.verify()`) check Layer 1 rows (keyset-paginated on `id` for
+bounded memory), independent Layer 2 seals plus the signed activation/floor records, and the Layer
+3 anchor. Every finding carries one of four **verdict classes**:
+
+| Verdict | Meaning |
+|---|---|
+| `OK` | rows, seals, activation/floor records, and anchor all consistent |
+| `WARNING` | liveness or non-authoritative input issue: old unsealed tail, stale/missing anchor, unreadable anchor lines, or a bounded side-table scan |
+| `UNPROTECTED` | NULL-MAC rows at or below the activation boundary — written before the key existed |
+| `TAMPERED` | invalid/missing MAC after activation, exact-range mismatch, invalid/non-contiguous seal or marker, a row at/below the floor, or an anchor contradiction |
+
+A signed database record an attacker can edit but not re-sign is a tampering **finding**, never an
+uncaught parse exception. Malformed anchor lines are warning-only because they cannot lower a
+monotonic maximum. Verify persists the result, so malformed attacker-controlled content cannot
+freeze the dashboard's last status at `OK`. An unknown row
+`key_id` becomes `VerifyError` only when no tampered finding exists; otherwise tampering takes
+precedence and `on_finding` still fires.
+
+> **Activation-boundary caveat.** The boundary is the highest settled NULL-MAC row id, not the
+> highest id overall. This keeps every keyed row — including rows written before activation —
+> above the boundary and eligible for sealing. A NULL `row_mac` at or below the boundary remains
+> `UNPROTECTED`; above it, NULL is `TAMPERED`. If unkeyed and keyed writers interleave during
+> rollout, a keyed row whose id falls below a later straggler NULL-MAC row can still land in the
+> unprotected prefix. Phase 2 must therefore start only after every writer carries the row key.
+
+### Exit codes
+
+- **Exit 0** — `OK` or `UNPROTECTED` only. `WARNING`s also exit 0, but they print.
+- **Non-zero** — any `TAMPERED` finding.
+- **Non-zero (anchor exception)** — when `--anchor` is given and the newest anchor is older than
+  `anchor_max_age` (default: 3× the seal interval, configurable). The silently-truncatable window
+  between the last anchored event and the newest database record is the one thing only Layer 3
+  guards; letting it grow unbounded behind an exit-0 warning would quietly degrade the only
+  guarantee the anchor exists to give. Seal writes stay best-effort and maximum coverage heals on
+  a later sealer pass; floor writes are a hard pre-prune gate.
+
+The evidence scan is read-only and runs anywhere the key is available; persisting
+`firm_audit_verify_status` requires a write grant. Inside the snapshot transaction it reads the
+seal side table first, which actually acquires the `REPEATABLE READ` snapshot on Postgres/MySQL
+(and the WAL snapshot on SQLite), and only then reads the external anchor. A concurrent legitimate
+prune therefore cannot make verification compare an anchor view with a not-yet-acquired database
+snapshot and report a false `TAMPERED`.
+
+### Stateless partial coverage
+
+Re-reading every sealed range on every run is expensive; only reading the tail would leave old
+row edits unchecked. The default run verifies every always-on invariant (all signed-record MACs,
+activation/floor validity, seal contiguity, anchor watermarks, pruned-region emptiness, duplicate
+`entry_id`s, and tail liveness), recomputes the unsealed tail, and selects
+`ceil(range_count / verify_cycle)` ranges from the day's distance since 1970. It always adds the
+newest range if that slice did not select it. The choice is deterministic and **stateless**: there
+is no cursor, state file, or mutable rotation position.
+
+`verify_cycle` is a cost divisor, not a period: larger values recompute fewer old ranges per run.
+Because the date-derived start advances through id-range positions, the conservative worst-case
+rotation bound is `n_ranges` days, not `verify_cycle` days.
+
+This keeps the default cost bounded, but **only a periodic `--full` guarantees every sealed range
+is recomputed**. A skipped schedule can skip a date-selected slice too; do not treat partial runs as
+proof that every old row was recently checked. Run `--full` on a schedule appropriate to the risk
+and data volume.
+
+> **Green is honestly scoped.** The dashboard's integrity strip states the age of the last
+> *full-coverage* pass, not just the last run — "green" never silently means "only the tail was
+> swept".
+
+## Alerting / log stream
+
+A verify run that *detects* tampering is a signal, not just a return value. So besides attempting to persist
+the outcome (for the dashboard) and returning an exit code (for a cron), every run whose outcome is
+`TAMPERED` or `WARNING` fires an **`on_finding`** hook — **once per run, after status persistence
+is attempted** — with a structured `IntegrityAlert` (severity `critical` for tampered, `warning` for
+warning; the outcome, the counts, the affected identifiers, and `ran_at`). This is the *in-process
+event path*; a scheduled `firm-audit verify` (cron) plus its **exit code** is the *batch path*.
+
+Wire a sink to forward alerts to Datadog / Loki / a JSON logger:
+
+```python
+from firm.audit import AuditLog, IntegrityAlert
+
+def to_logs(alert: IntegrityAlert) -> None:
+    # alert.severity is "critical" (tampered) or "warning"; never the key or row content.
+    my_logger.error("audit integrity", extra={"severity": alert.severity, **alert.__dict__})
+
+audit = AuditLog(engine=app_engine, mac_key="...", on_finding=to_logs)
+audit.verify(full=True)  # fires to_logs on a tampered/warning outcome
+```
+
+**The default is present, not silent.** With no `on_finding` configured, a detection writes **one**
+concise high-severity line to stderr (the project bans stdlib logging, so this mirrors
+`on_error`'s stderr route) — so even a stock deployment's logstream shows it:
+
+```text
+firm-audit: CRITICAL tamper detected — 2 findings, affected: #42 invoice.paid, sealed range (11, 20] (verified 2026-07-21 03:00:00)
+```
+
+`OK` and `UNPROTECTED` runs stay silent; the `error` outcome (verify itself could not check — e.g.
+an unknown `key_id`) is surfaced by the raised `VerifyError` and `on_error`, not `on_finding`. To
+**mute** the default line, pass a no-op (`on_finding=lambda alert: None`); to redirect it, pass your
+own sink. A sink that raises is routed to `on_error` and never crashes verification.
+
+This fires for both `AuditLog.verify()` and the CLI `firm-audit verify` (the CLI still prints the
+per-finding messages to stdout and returns the exit code; the stderr line is the log-pipeline
+event). `on_finding` is what turns each run into an event — so verification has to actually *run*
+on a schedule, which is the subject of the next section.
+
+## Scheduling verification — run it continuously
+
+**You want verification running all the time.** Tamper-evidence is not passive: a modification is
+only detected the next time `verify` recomputes over it, and `on_finding` only fires on a run that
+detects something. A log that is written and sealed but never verified is exactly as forgeable in
+practice as one with no evidence at all — the signatures are there, but nobody is checking them. So
+treat verification like a health check: run it on a short interval, and run `--full` on a longer one.
+
+**Option A — the in-process loop.** The simplest cadence is a flag, mirroring `background_sealing`
+/ `background_retention`:
+
+```python
+audit = AuditLog(
+    engine=verifier_engine, mac_key="...", anchor_path="/var/lib/firm/audit.anchor",
+    on_finding=to_logs,                 # your alert sink (see Alerting above)
+    background_verification=True,       # start the in-process VerifyLoop
+    verify_interval=3600.0,             # a tail verify every hour...
+    verify_full_every=24,              # ...and a --full every 24th tick (≈ daily); 0 disables it
+)
+```
+
+`VerifyLoop` runs a tail verify each interval and a `--full` recompute every `verify_full_every`
+ticks, each persisting `firm_audit_verify_status` and firing `on_finding` on a tampered/warning
+outcome; a run that raises is routed to `on_error` and the loop keeps ticking. It is fine for a
+single process, but *where* verify runs is itself a hardening lever — a separate verifier/anchor
+host that only reads the database is stronger than verifying from an app instance. For that, and for
+multi-process fan-out, drive it from a scheduler instead:
+
+**Option B — a recurring job on `firm-queue`** (dogfooding: use firm's own queue). `firm-queue`
+ships cron-scheduled [recurring tasks](../queue/recurring.md), so a verifier is a `@bq.job` plus two
+`RecurringTask`s:
+
+```python
+import firm.queue as bq
+from firm.audit import AuditLog, IntegrityAlert
+from firm.queue.scheduler import RecurringTask
+
+def to_logs(alert: IntegrityAlert) -> None:
+    my_logger.error("audit integrity", extra={"severity": alert.severity, **alert.__dict__})
+
+@bq.job(queue="audit")
+def verify_audit(*, full: bool = False) -> None:
+    audit = AuditLog(engine=verifier_engine, mac_key="...", anchor_path="/var/lib/firm/audit.anchor",
+                     on_finding=to_logs)
+    report = audit.verify(full=full)          # to_logs fires on a tampered/warning outcome
+    if report.exit_code != 0:
+        raise RuntimeError(f"audit verify: {report.outcome}")   # job failure surfaces in the queue
+
+tasks = [
+    RecurringTask(key="audit-verify-tail", schedule="*/15 * * * *", job=verify_audit),
+    RecurringTask(key="audit-verify-full", schedule="0 3 * * *", job=verify_audit, kwargs={"full": True}),
+]
+# Hand `tasks` to your SupervisorConfig(recurring=tasks); the scheduler enqueues them on schedule
+# and the unique index on recurring_executions dedupes across schedulers.
+```
+
+The frequent `*/15` run does the always-on invariants plus the rolling slice; the nightly `--full`
+guarantees every sealed range is recomputed (see [Stateless partial coverage](#stateless-partial-coverage)).
+Detection reaches your logs two ways: `on_finding` → `to_logs`, and the raised failure → the queue's
+own failed-job path and alerting.
+
+**Option C — an external scheduler.** If you would rather not run verification inside the queue, any
+cron / systemd timer / CI cron works the same way, using the exit code as the gate:
+
+```cron
+*/15 * * * *  firm-audit verify --database-url "$DB" --anchor /var/lib/firm/audit.anchor || alert
+0    3 * * *  firm-audit verify --database-url "$DB" --anchor /var/lib/firm/audit.anchor --full || alert
+```
+
+Either way, the anchor-age rule (a stale anchor forces a non-zero exit) means a verifier that stops
+running, or an anchor sink that stalls, eventually trips the same alarm as tampering — silence is not
+mistaken for health.
+
+## Retention and the signed floor
+
+Pruning deletes old rows, which would otherwise read as tampering. Retention therefore advances one
+logical, signed **retirement floor** (append-only `kind="floor"` records; the highest valid advance
+wins). See [Retention & querying](retention-and-querying.md).
+
+1. `Retention.run_once` aligns its cutoff to a seal boundary — it deletes only rows in ranges
+   **fully covered by seals older than the cutoff**, never partial ranges and never unsealed rows.
+2. **Retention refuses to prune what verify would call `TAMPERED`.** Before deleting each expired
+   range, it rechecks the independent seal's own MAC and runs the **same exact range classifier as
+   verify**: every row MAC plus the range's `rows_mac`/`row_count`. Any surplus, missing, altered,
+   or moved row fails; there is no late-arrival exception. Pruning stops at the first bad range,
+   `Retention.last_refused_tampered` records the refusal, `on_error` fires, and every row remains
+   for `firm-audit verify --full` and investigation. The read is keyset-paginated but must revisit
+   every row about to be deleted.
+3. Retention signs the next floor (`through_id`, retirement time, and signing `key_id`). Every
+   configured anchor sink must accept the `FLOOR` event **before** the database transaction can
+   commit; the file append is flushed and `fsync`ed, and a sink failure refuses the prune. The floor row, event deletion, and deletion of fully
+   retired covering seals then commit together in one write transaction. Serialization/deadlock
+   aborts are retried a bounded number of times. Floor records themselves are append-only and
+   monotonic.
+4. Verify honors the highest authentic database or anchor floor. Seals entirely at/below it may
+   legitimately be absent. Above it, seals must
+   tile contiguously from `max(floor, activation boundary)`. Verify also probes the retired prefix
+   on every run: any surviving or reinserted row with `id <= floor` is `TAMPERED`.
+
+This gives retention a hidden dependency on **sealer liveness**: with a stalled sealer, nothing
+past the last seal is prunable, so the table can grow past `max_age`. That failure is **loud, not
+silent** — `run_once` returns and logs the count of expired-but-unsealed rows it had to skip,
+`firm-audit prune` prints it, a skip count above a threshold routes through `on_error`, and
+verify's unsealed-tail-age `WARNING` independently flags the stalled sealer.
+
+The floor is seal-side evidence, so in a
+[two-key deployment](#two-key-split-a-separate-seal-key-optional-hardening) **retention needs the
+seal key**. Run pruning on a sealer-role host that has `FIRM_AUDIT_SEAL_KEY`. On a host without it
+— one carrying only the row key — `run_once` **refuses the whole aligned prune**: it deletes
+nothing, sets `Retention.last_refused_no_seal_key`, routes the refusal through `on_error`, and
+`firm-audit prune` prints it. (In single-key mode the seal key *is* the row key, so this never
+triggers and pruning is unchanged.)
+
+If a seal key is configured but no activation exists while rows are already older than the
+retention cutoff, retention refuses plain pruning. This prevents an emptied side table from silently
+downgrading a keyed deployment to unguarded age deletion.
+
+Without an anchor, verify persists a `sealing_observed` fact the first time it sees authentic
+activation/seal coverage. If events later remain while those records vanish, verification reports
+`TAMPERED`; a genuinely never-sealed growing keyed log stays `OK`. This status lives in the same
+database and is therefore only a limited guard: **no-anchor mode cannot detect a total wipe of the
+events being hidden plus the seal side table plus verify status.** The anchor is the independent
+memory that closes that gap and is mandatory for the full deletion/truncation guarantee.
+
+## Deployment hardening
+
+The [two-key split](#two-key-split-a-separate-seal-key-optional-hardening) above is itself a
+deployment-hardening measure — keeping the seal key off ordinary app instances — and composes with
+the database grants below.
+
+### Least-privilege database grants (docs-only)
+
+Orthogonal to the MAC/seal layers, and worth doing where your database supports it: give the
+application a role with **`INSERT` + `SELECT` only** on `firm_audit_events` — no `UPDATE`, no
+`DELETE` — and a *separate* role for retention. Casual tampering is then *prevented* outright, and
+the MAC/seal layers catch whoever can bypass the grants.
+
+```sql
+-- PostgreSQL sketch. The app role appends and reads but cannot mutate history.
+CREATE ROLE firm_app LOGIN PASSWORD '...';
+GRANT INSERT, SELECT ON firm_audit_events TO firm_app;
+GRANT USAGE, SELECT ON SEQUENCE firm_audit_events_id_seq TO firm_app;
+
+-- A separate role that retention (pruning) runs as:
+CREATE ROLE firm_retention LOGIN PASSWORD '...';
+GRANT SELECT, DELETE ON firm_audit_events TO firm_retention;
+GRANT INSERT, SELECT, DELETE ON firm_audit_seals TO firm_retention;  -- floor + retired seals
+```
+
+> A database first created on firm-audit 0.1.0 and upgraded through migration `0002` keeps its
+> original Postgres sequence name `firm_audits_id_seq` (renaming a table does not rename its owned
+> sequence). Use that name in the `USAGE, SELECT ON SEQUENCE …` grant on such a database; a
+> freshly created schema uses `firm_audit_events_id_seq`.
+
+This is deliberately **not** built into firm-audit as code: it is not portable to SQLite, and the
+DBA is part of the threat model. It is a recommendation, applied by whoever owns the database.
+
+### MySQL: use `utf8mb4`
+
+On MySQL, the `firm_audit_events` table (and the audit database's default charset) **must be
+`utf8mb4`**. A lossy charset silently mangles 4-byte characters — emoji, some CJK — between the
+moment the MAC is computed and the moment the row is read back. Under tamper-evidence that
+mismatch surfaces as a **false `TAMPERED`** instead of staying invisible. `utf8` (the 3-byte MySQL
+alias) is not enough.
+
+## Schema and migration
+
+Turning the feature on requires Alembic migration **`0002`**, which first renames the released
+`firm_audits` table to `firm_audit_events` (with its secondary indexes) to match the workspace
+`firm_<module>_<entity>` convention, then adds three nullable columns (`entry_id`, `row_mac`,
+`key_id`), a unique index on `entry_id`, and two side tables. `firm_audit_seals` stores three signed
+record kinds (`seal`, `activation`, `floor`) in one id-based schema: `from_id`, `to_id`,
+`row_count`, `rows_mac`, `seal_mac`, `sealed_at`, and `key_id`. `firm_audit_verify_status` stores
+the latest result and last explicit full-coverage time; partial verification has no cursor or state
+columns. The rename is in place and preserves existing rows; nullable event columns are
+zero-downtime. Direct-SQL consumers and least-privilege grants that reference `firm_audits` by name
+must be updated to `firm_audit_events`.
+
+The **unique index on `entry_id` is not** zero-downtime by default:
+
+- **PostgreSQL** — the migration builds it with `CREATE UNIQUE INDEX CONCURRENTLY` inside an
+  autocommit block, so it does not lock the table.
+- **MySQL / SQLite** — the index build is **blocking**, and its duration scales with table size.
+  On a large existing table, run migration `0002` in a quiet window.
+
+If you manage the schema yourself (`create_schema=False`), apply migration `0002` as part of the
+same rollout that sets `FIRM_AUDIT_KEY` — Phase 1 above.
+
+## See also
+
+- [Configuration](configuration.md) — every `AuditLog(...)` option, including the tamper-evidence
+  parameters.
+- [CLI](cli.md) — `firm-audit verify` and `firm-audit seal`.
+- [Retention & querying](retention-and-querying.md) — how pruning and the signed floor interact.
+
 
 
 ================================================================================
@@ -3284,10 +4089,26 @@ Every `AuditLog(...)` option, with its default:
 AuditLog(
     database_url=None,              # SQLAlchemy URL (or pass engine=)
     engine=None,                    # a pre-built SQLAlchemy Engine, instead of database_url
-    create_schema=True,             # create firm_audits if missing
+    create_schema=True,             # create firm_audit_events if missing
     max_age=None,                   # prune events older than this many seconds; None = keep forever
     background_retention=False,     # run a retention loop on a timer
     retention_interval=3600.0,      # seconds between background retention runs
+    mac_key=None,                   # tamper-evidence secret; None = feature off (env: FIRM_AUDIT_KEY)
+    seal_key=None,                  # separate seal-side secret; None = use mac_key (env: FIRM_AUDIT_SEAL_KEY)
+    background_sealing=False,       # run the seal loop on a timer (requires a key)
+    seal_interval=60.0,             # seconds between seal runs
+    grace=60.0,                     # seal only rows older than this (settling window)
+    seal_batch_size=10_000,         # max rows sealed per transaction
+    anchor_path=None,               # append seal/floor/activation events here
+    on_anchor=None,                 # callback(kind, from_id, to_id, mac, at) for custom sinks
+    verify_cycle=7,                 # old-range verification cost divisor, not a day period
+    background_verification=False,   # run a verify loop on a timer (the in-process continuous watch)
+    verify_interval=3600.0,         # seconds between background tail verifications
+    verify_full_every=24,           # every Nth background run is a --full recompute; 0 disables it
+    anchor_max_age=None,            # a newer-than-this anchor is required; None = 3x seal_interval
+    unsealed_tail_max_age=None,     # warn if the oldest unsealed row is older; None = derived
+    on_error=None,                  # callback(exc) for background/anchor failures; None = stderr
+    on_finding=None,                # callback(IntegrityAlert) on a tampered/warning verify run
 )
 ```
 
@@ -3297,15 +4118,69 @@ AuditLog(
 | `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
-| `on_error` | traceback to stderr | Callback for background-pruning failures. |
+| `background_verification` / `verify_interval` / `verify_full_every` | `False` / `3600.0` / `24` | Opt-in in-process verify loop — see [Scheduling verification](tamper-evidence.md#scheduling-verification-run-it-continuously). |
+| `on_error` | traceback to stderr | Callback for background-pruning, sealing, and anchor-write failures. |
+| `on_finding` | one stderr line | Callback `(IntegrityAlert)` fired once per verify run whose outcome is `tampered`/`warning` — wire it to your log pipeline. See [Alerting](tamper-evidence.md#alerting--log-stream). |
+
+## Tamper-evidence
+
+All opt-in and off until a key is set — see [Tamper-evidence](tamper-evidence.md) for the full
+picture. Without a key, runtime behavior is inert; the migrated schema still contains the nullable
+evidence columns and side tables.
+
+| Option | Default | Notes |
+|---|---|---|
+| `mac_key` | `None` (env `FIRM_AUDIT_KEY`) | Feature key (the **row key**). Must be a UTF-8 string of **≥ 32 chars** — shorter is a hard error at startup. Pass `""` to force the feature off and ignore the environment. |
+| `seal_key` | `None` (env `FIRM_AUDIT_SEAL_KEY`) | Optional **separate seal key** — signs independent seals, the activation marker, and retirement floors; row MACs keep using `mac_key`. Unset (or equal to `mac_key`) = single-key mode, unchanged. Same ≥ 32-char validation. Set it on **sealer/verifier hosts only** to shrink the blast radius of an instance compromise — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
+| `background_sealing` / `seal_interval` | `False` / `60.0` | Opt-in timer-based sealing (Layer 2), signing with the seal key. Enable only after the key is deployed fleet-wide — see the [two-phase rollout](tamper-evidence.md#rolling-it-out-key-first-then-sealing). |
+| `grace` | `60.0` | Seals cover only rows older than this. The default `record()` path commits in its own short transaction; if you pass `conn=`, this window **must exceed that caller transaction plus clock skew** — see the [sizing rule](tamper-evidence.md#sizing-the-grace-window). |
+| `seal_batch_size` | `10_000` | Max rows sealed per transaction, so a sealer backlog becomes several seals, never one monster transaction. |
+| `anchor_path` | `None` (env `FIRM_AUDIT_ANCHOR_PATH`) | Append-only Layer-3 source for `SEAL`, `FLOOR`, `ACTIVATION`, and compacted `CHECKPOINT` lines. Mandatory for the full deletion/truncation guarantee; see placement below. |
+| `on_anchor` | `None` | Callback `(kind, from_id, to_id, mac, at)` for shipping events off-host. Seal failures route to `on_error` and maximum coverage heals later; a floor sink failure refuses the prune. For verification, materialize callback-only history and pass it as `anchor_path`; the callback is a write sink, not a readable Layer-3 source. |
+| `verify_cycle` | `7` | Cost divisor: default verify checks `ceil(range_count / verify_cycle)` date-selected ranges and always includes the newest range. It is not a period; the conservative rotation bound is `range_count` days. Only `full=True` / `--full` guarantees complete coverage. |
+| `anchor_max_age` | `None` → `3 × seal_interval` | Verify forces a non-zero exit / `WARNING` when the newest anchor event is older than this — a stalled anchor sink or verifier trips the same alarm as tampering. |
+| `unsealed_tail_max_age` | `None` → derived | Verify `WARNING`s when the oldest unsealed row outlives this, surfacing a stalled sealer. Derived from `seal_interval`/`grace` when unset. |
+
+Rotation uses two role-scoped archives of **retired** keys, `FIRM_AUDIT_RETIRED_KEYS` (retired
+**row** keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired **seal** keys), each
+`"label=secret,label2=secret2"` — see [Key rotation](tamper-evidence.md#rotation).
+
+### Anchor placement
+
+Hard requirement: **DB compromise must not grant anchor write.** Choose the boundary appropriate
+to the deployment:
+
+1. A local app-host file is the weakest option. It is acceptable with a managed remote DB when
+   compromised DB credentials cannot reach the app filesystem; it is risky on an all-in-one host.
+2. A separate host or append-only mount is better because the DB attacker is outside that
+   filesystem.
+3. S3 Object Lock / WORM is strongest because storage enforces immutability.
+
+Mutable files can be rotated with `firm-audit anchor-compact`, which replaces old history with one
+signed coverage/floor `CHECKPOINT`. Do not compact WORM objects; rotate objects and expire older
+ones through lifecycle policy. Without any anchor, a total wipe of hidden events, seals, and
+verify status is undetectable.
+
+### Environment variables
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `FIRM_AUDIT_KEY` | writer, sealer, verify | The tamper-evidence secret — the **row key** (≥ 32 chars). |
+| `FIRM_AUDIT_SEAL_KEY` | sealer, retention, verify | Optional **seal key** (≥ 32 chars). Signs seals, activation, and floors; unset = use the row key (single-key mode). Put it on sealer/verifier hosts only — see the [two-key split](tamper-evidence.md#two-key-split-a-separate-seal-key-optional-hardening). |
+| `FIRM_AUDIT_RETIRED_KEYS` | verify, retention | Retired **row** keys (rotation): `"id1=old,…"`. Eligible for row-MAC validation only — **never** a seal. |
+| `FIRM_AUDIT_RETIRED_SEAL_KEYS` | sealer heal, retention, verify | Retired **seal** keys: `"id1=old,…"`. Eligible for Layer-2 validation only. A single-key deployment puts its old key in **both** retired archives. |
+| `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
+| `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 
 Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
 
 ## Two topologies
 
 **Shared database** — pass `engine=` pointing at your application's own engine (or the same
-`database_url`). `AuditLog.record(..., conn=...)` and the module-level `record(conn, ...)` then
-write inside *your* transaction: atomic with the business change, the same-transaction guarantee.
+`database_url`). By default `AuditLog.record(...)` writes durably in its own short transaction.
+`AuditLog.record(..., conn=...)` and the module-level `record(conn, ...)` instead write inside
+*your* transaction: atomic with the business change. With sealing enabled, that caller transaction
+must commit inside `grace`; a row that appears inside an already sealed range is tampering.
 
 ```python
 from firm.audit import AuditLog
@@ -3356,7 +4231,7 @@ runs in stateless Kubernetes replicas against an existing bucket, without a SQL 
 persistent volume, leader process, or exporter. Archival is a separate optional capability for
 both SQL and S3 sources.
 
-Install `pip install "firm-audit[s3]"` (or `"firm[audit-s3]"`). Default SQL imports do not load
+Install `pip install "firm-audit[s3]"` (or `"firm-stack[audit-s3]"`). Default SQL imports do not load
 boto3. The SDK uses its normal credential chain, including workload identity; do not embed
 credentials in application code. Configure the bucket yourself. Opening the log does not create
 buckets, configure Object Lock, change lifecycle, or delete events.
@@ -3543,9 +4418,9 @@ backups, and asynchronous archives do not protect unexported events lost with th
 
 ## Continuous SQL export with archive-before-prune
 
-Copy-only SQL export also supports the original `0001` schema. Upgrade to audit migration
-`0002` before using `SQLArchiver` or restoring into a SQL target. Auto-create also creates archival
-tables; Alembic upgrades existing `0001` installations without modifying audit event columns.
+Copy-only SQL export also supports the pre-archive `0002` schema. Upgrade to audit migration
+`0003` before using `SQLArchiver` or restoring into a SQL target. Auto-create also creates archival
+tables; Alembic upgrades existing `0002` installations without modifying audit event columns.
 **Upgrade every pruning process and pause pruning during policy activation/backfill.** Old
 library versions do not honor the new persisted guard.
 
@@ -3647,6 +4522,22 @@ publication; real-provider tests exercise conditional writes, pagination, versio
 and restore. Actual workload latency/cost, Kubernetes rollout behavior, and production IAM/
 Object Lock policies need deployment-specific validation before rollout.
 
+### SQL integrity compatibility
+
+SQL archives preserve the stored JSON bytes and row signature columns (`entry_id`, `row_mac`,
+`key_id`). Native SQL restores retain those columns so row MACs remain verifiable with the
+original key. Cross-backend conversions retain original signature metadata in provenance;
+they do not create a new SQL signature. Seals, activation/floor records, verification status,
+and external anchors belong to the original database and are not included in event archives.
+An isolated restore therefore does not recreate the original sealed history or anchor chain.
+Use a separate database/anchor backup when that evidence must be recovered.
+
+With SQL sealing active, archive-before-prune applies to complete verified seal ranges,
+including any pre-activation rows covered by deletion. One unarchived row blocks retirement
+of its whole range. This keeps both the archive policy and signed-floor invariants intact.
+S3 primary storage does not implement SQL row signing, sealing, or external anchor verification.
+Its receipt digests detect corruption; they are not authentication signatures.
+
 
 
 ================================================================================
@@ -3706,6 +4597,61 @@ firm-audit prune --database-url sqlite:///audit.db --max-age 7776000   # 90 days
 # pruned 12 events
 ```
 
+With sealing enabled, `prune` deletes only rows in ranges already covered by a seal, and prints the
+count of expired-but-**unsealed** rows it had to skip — a nonzero skip count means the sealer is
+behind. Successful pruning advances a signed retirement floor. See
+[Tamper-evidence › Retention and the signed floor](tamper-evidence.md#retention-and-the-signed-floor).
+
+### `seal` — run the seal loop (tamper-evidence)
+
+Writes independent seals over settled id ranges (Layer 2), then exports each seal to the anchor
+(Layer 3). The first pass also writes and exports the signed activation marker; later passes ensure
+the current maximum committed seal coverage is anchored. Requires a seal key (the row key in
+single-key mode). Run it on a timer (cron, or `background_sealing=True` in-process); it is
+idempotent and safe to run on more than one host at once — the loser of a `from_id` race retries.
+
+```bash
+firm-audit seal --database-url sqlite:///audit.db
+# sealed 2841 events
+```
+
+### `anchor-compact` — rotate a mutable anchor
+
+Streams a local/separate-host anchor, signs one `CHECKPOINT` with its current coverage and floor
+watermarks, appends and `fsync`s it, then removes strictly older lines under the file lock.
+
+```bash
+firm-audit anchor-compact --database-url sqlite:///audit.db \
+  --anchor /var/lib/firm/audit.anchor
+# compacted anchor: coverage=12040, floor=9000
+```
+
+Use this only for mutable anchors. With S3 Object Lock or WORM storage, rotate objects and use
+lifecycle expiry instead.
+
+### `verify` — check the audit trail for tampering
+
+Checks row MACs, independent range seals, the signed activation/floor markers, and (with
+`--anchor`) the external anchor. Reads the key from `FIRM_AUDIT_KEY`; during a rotation it also
+reads the retired-key archives
+`FIRM_AUDIT_RETIRED_KEYS` (retired row keys) and `FIRM_AUDIT_RETIRED_SEAL_KEYS` (retired seal keys).
+The evidence scan is read-only; updating `firm_audit_verify_status` requires a write grant.
+
+```bash
+firm-audit verify --database-url sqlite:///audit.db --anchor /var/lib/firm/audit.anchor
+# OK: 12040 ok, 0 warning, 0 unprotected, 0 tampered (6 unsealed)
+```
+
+Options: `--anchor PATH` (also enforces anchor freshness) and `--full` (re-read every sealed
+range). Without `--full`, verify runs every always-on invariant, the unsealed tail, the newest
+range, and a stateless date-derived slice of older ranges. There is no cursor or state file;
+`--full` is the only full-coverage guarantee.
+
+**Exit codes:** `0` for `OK`/`UNPROTECTED`/`WARNING`; **non-zero** for any `TAMPERED` finding, and
+non-zero when `--anchor` is given but the newest anchor is older than `anchor_max_age`. This makes
+`verify` a usable cron/CI gate. Verdict classes and the anchor-age rule are described in
+[Tamper-evidence › Verifying](tamper-evidence.md#verifying).
+
 > **Tip:** set `FIRM_AUDIT_DATABASE_URL` in your environment to omit `--database-url`.
 
 
@@ -3725,10 +4671,10 @@ retry guarantees, CLI commands, and retention requirements.
 
 ## Schema
 
-One table, `firm_audits`:
+The event table, `firm_audit_events`:
 
 ```
-id              autoincrement PK, total event order
+id              autoincrement PK, total event order (strictly monotonic; SQLite AUTOINCREMENT)
 action          VARCHAR(255), not null — what happened
 subject_type    VARCHAR(255) — polymorphic target type
 subject_id      VARCHAR(255) — polymorphic target id
@@ -3741,7 +4687,17 @@ data            TEXT — JSON-encoded free-form payload
 changes         TEXT — JSON-encoded before/after diff
 context         TEXT — JSON-encoded request metadata
 created_at      timestamp — when the event was recorded
+entry_id        VARCHAR(26) — client ULID, unique; identity + anti-replay (tamper-evidence)
+row_mac         VARCHAR(64) — hex HMAC over the canonical row (tamper-evidence)
+key_id          VARCHAR(16) — which key signed the row, for rotation (tamper-evidence)
 ```
+
+The last three columns are **always present but nullable**: they stay NULL until a key is
+configured, so a no-key deployment behaves exactly as before. Enabling tamper-evidence adds no
+columns — it only starts populating them, and starts writing the two side tables `firm_audit_seals`
+(independent range seals plus the signed activation and floor markers) and
+`firm_audit_verify_status` (the single row the verifier upserts, read by the dashboard). Those side
+tables are detailed in [Tamper-evidence › Schema and migration](tamper-evidence.md#schema-and-migration).
 
 Every part of a reference is nullable: an actor/subject may have a type without an id (a role
 label like `cron`), an id without a type, or neither (a system event) — see
@@ -3760,7 +4716,7 @@ is no `update`, and the only `delete` anywhere in the package is opt-in, age-bas
 [Retention & querying](retention-and-querying.md)) — recording never triggers it.
 
 This is an application-level guarantee, not a database constraint: nothing stops raw SQL against
-`firm_audits` from outside firm-audit. The guarantee is "the module is the sole writer, and it
+`firm_audit_events` from outside firm-audit. The guarantee is "the module is the sole writer, and it
 only inserts."
 
 ## JSON-as-text, not JSONB
@@ -3781,7 +4737,7 @@ A small tagged-object protocol round-trips `datetime`/`date`/`Decimal`/`UUID` va
 ## Same-transaction guarantee — the fine print
 
 `record(conn, ...)` writes on exactly the connection you pass. The atomicity guarantee holds
-only when `firm_audits` lives in the same database that connection belongs to — pass a
+only when `firm_audit_events` lives in the same database that connection belongs to — pass a
 connection from a different database and the row is simply written there, untethered from
 whatever transaction you think it's joining. There's no cheap way to detect this misuse at
 runtime, so it's a documented contract rather than an enforced one.
@@ -3800,21 +4756,51 @@ precision, matching `firm.cache` and `firm.queue`.
 
 # Framework integration
 
-`firm.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
+`firm.queue.contrib` has **optional** glue for embedding firm-queue in a web app. Each piece
 is opt-in, behind its own extra, and **nothing in core imports it** — if you don't use it, it costs
 nothing. You still define jobs the normal way with `@bq.job`.
 
+!!! note "Renamed from `firm.contrib` / `Firm`"
+
+    These live under `firm.queue.contrib` as of the next release, so that each module's
+    integrations sit under that module's own path. `firm.contrib` read like a firm-wide namespace
+    while everything in it only ever configured the queue — and it squats the name a genuinely
+    suite-wide integration would want. As integrations land for the other modules they grow their
+    own `contrib` too, so the queue must not be the odd one out.
+
+    The Flask extension is renamed `Firm` → `FirmQueue` for the same reason, along with
+    `app.extensions["firm"]` → `app.extensions["firm_queue"]` and `flask firm` →
+    `flask firm-queue`.
+
+    Everything above shipped in 1.0.0, so every old spelling keeps working, and all of them are
+    removed in 2.0. The old import paths re-export the same objects, so `is` and `isinstance`
+    still hold across both.
+
+    The old import paths, the `Firm` name and `flask firm` raise a `DeprecationWarning` you can
+    grep a migration for. **`app.extensions["firm"]` cannot** — it is an ordinary dict key that
+    both spellings point at, and reading it runs no code of ours. Search for it by hand.
+
 | Import | Install | What it does |
 |---|---|---|
-| `firm.contrib.fastapi.lifespan` | `firm[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
-| `firm.contrib.flask.Firm` | `firm[flask]` | a Flask extension + a `flask firm worker` command |
-| `firm.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+| `firm.queue.contrib.fastapi.lifespan` | `firm-queue[fastapi]` | a FastAPI lifespan that configures the queue (and optionally runs workers) |
+| `firm.queue.contrib.flask.FirmQueue` | `firm-queue[flask]` | a Flask extension + a `flask firm-queue worker` command |
+| `firm.queue.contrib.sqlalchemy.enqueue_after_commit` | — (SQLAlchemy is core) | enqueue only when a session commits |
+
+There is no `firm.cache.contrib.flask` or `firm.channel.contrib.fastapi`, and that is deliberate.
+The queue needs framework glue because it has process-global state and background threads that
+must be tied to the app lifecycle; `Cache`, `Channel` and `audit.record` are plain objects you
+construct yourself, so there is nothing to hook. Django is the exception — it has pluggable
+backend contracts to fill — which is why the integrations for the other modules start there.
+
+The dashboard has framework glue of its own — `firm.ui.contrib` mounts it in a Django, Flask, or
+FastAPI application instead of running it as a second process. See
+[Dashboard § Mount it in your application](ui.md#mount-it-in-your-application).
 
 ## FastAPI
 
 ```python
 from fastapi import FastAPI
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
 app = FastAPI(lifespan=lifespan(database_url="postgresql://localhost/app"))
 
@@ -3832,11 +4818,11 @@ process** — convenient for development or a single-process deploy; it's stoppe
 
 ```python
 from flask import Flask
-from firm.contrib.flask import Firm
+from firm.queue.contrib.flask import FirmQueue
 
 app = Flask(__name__)
-app.config["FIRM_DATABASE_URL"] = "postgresql://localhost/app"
-Firm(app)                         # or Firm(app, database_url="...")
+app.config["FIRM_QUEUE_DATABASE_URL"] = "postgresql://localhost/app"
+FirmQueue(app)                    # or FirmQueue(app, database_url="...")
 
 @app.post("/welcome/<int:user_id>")
 def welcome(user_id):
@@ -3844,13 +4830,17 @@ def welcome(user_id):
     return "", 202
 ```
 
+The URL is looked up in `database_url=`, then `app.config`, then the environment; within each of
+those the queue's own `FIRM_QUEUE_DATABASE_URL` wins over the suite-wide `FIRM_DATABASE_URL`, so
+one shared setting still configures every module while a single module can override it.
+
 The extension configures the queue and registers a CLI group, so you run workers with:
 
 ```bash
-flask firm worker --threads 5 --queues default,mailers
+flask firm-queue worker --threads 5 --queues default,mailers
 ```
 
-`Firm(app, embed_workers=True)` runs the worker inside the web process instead (dev /
+`FirmQueue(app, embed_workers=True)` runs the worker inside the web process instead (dev /
 single-process only — otherwise every web worker starts its own supervisor).
 
 ## Transactional enqueue
@@ -3859,7 +4849,7 @@ single-process only — otherwise every web worker starts its own supervisor).
 rollback — so you never enqueue a job for a request that didn't persist:
 
 ```python
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 
 def create_order(session, payload):
     order = Order(**payload)
@@ -3875,8 +4865,216 @@ def create_order(session, payload):
 ## Production shape
 
 Embed workers for dev; in production run them as **separate processes** (`firm-queue start`
-or `flask firm worker`) so you scale web and worker capacity independently. See
+or `flask firm-queue worker`) so you scale web and worker capacity independently. See
 [Workers & the supervisor](queue/workers-and-supervisor.md).
+
+
+
+================================================================================
+# Source: docs/deployment.md
+================================================================================
+
+# Deployment
+
+firm is **database-backed** — the SQL database *is* the coordination substrate, so there is no
+broker (no Redis, no RabbitMQ) and no new stateful component to run. The database you already have
+is the only stateful piece; everything else is stateless and coordinates through it.
+
+Only the **queue** runs a long-lived process. `cache`, `channel`, and `audit` are in-process
+libraries your app calls directly — they add tables, not daemons.
+
+| Module | Runs as | Periodic housekeeping |
+|---|---|---|
+| **queue** | a worker process (embedded thread **or** a separate `firm-queue start`) | — |
+| **cache** | in-process library calls | eviction is opportunistic (on write, or an in-process timer); optional [`firm-cache trim`](cache/cli.md) |
+| **channel** | in-process publish/subscribe | optional [`firm-channel trim`](channel/cli.md) |
+| **audit** | in-process writes | [`firm-audit prune`](audit/cli.md) on a schedule (never automatic) |
+
+!!! note "The database is the only stateful component"
+    Adding firm to an app you already run costs, at most, **one extra worker deployment** plus a
+    run-once migration — no broker, no cache server, no new datastore.
+
+So there are two ways to run the queue. Pick by scale.
+
+## Option A — Embedded (in your app process)
+
+The [`ThreadSupervisor`](queue/workers-and-supervisor.md) runs every role (worker, dispatcher) as a
+background thread inside your existing process. It's a context manager:
+
+```python
+from firm.queue import current_runtime
+from firm.queue.supervisor import (
+    DispatcherConfig,
+    SupervisorConfig,
+    ThreadSupervisor,
+    WorkerConfig,
+)
+
+config = SupervisorConfig(
+    workers=[WorkerConfig(queues=("*",), threads=3, poll_interval=0.1)],
+    dispatchers=[DispatcherConfig()],
+)
+
+with ThreadSupervisor(current_runtime(), config):
+    run_my_app()  # requests are served here; jobs drain in the background
+```
+
+**Use it when** you run a single service at low-to-moderate job volume and want the simplest
+possible operations — one image, one deployment, nothing extra to schedule.
+
+**The trade-offs:** web and job work share the same pods (and the GIL), so they compete for CPU and
+can't scale independently, and a misbehaving job shares a process with request serving. When those
+bite, move to Option B.
+
+→ Runnable: [`examples/embedded_worker.py`](../examples/embedded_worker.py)
+
+## Option B — A separate worker deployment
+
+The [`ForkSupervisor`](queue/workers-and-supervisor.md) forks one child process per role and keeps
+them alive; it's what the [`firm-queue start`](queue/cli.md) CLI runs. Run it as its own
+deployment, using the **same image** as your app with a different command:
+
+```bash
+# your web pods enqueue:
+uvicorn myapp:app
+# your worker pods process (same image, different command):
+firm-queue start --mode fork --import myapp.jobs --queues '*' --threads 5
+```
+
+Workers coordinate entirely through the database, so you scale throughput by **running more
+replicas**. There's no leader to elect: the recurring scheduler deduplicates each cron tick across
+every replica (a unique index on `(task_key, run_at)`), so it's safe to run the full stack —
+including recurring tasks — on all of them.
+
+**Use it when** you want to scale jobs independently of web traffic, isolate job crashes from
+request serving, or saturate more than one core (CPU-bound work scales by *processes*, not threads,
+because of the GIL).
+
+See [Running on Kubernetes](#running-on-kubernetes) below for the deployment shape.
+
+## Running on Kubernetes
+
+The DB-backed model keeps the topology small: no StatefulSets or PVCs on the app side, no broker.
+
+| Component | k8s object | Notes |
+|---|---|---|
+| Database | managed service or an operator (CloudNativePG, …) | the only stateful piece; **SQLite can't be shared across pods** — use PostgreSQL or MySQL |
+| Schema migration | run-once `Job` (or a Helm/Argo pre-upgrade hook) | creates + stamps the schema before workers roll out |
+| Workers | `Deployment` | `firm-queue start`; scale with `replicas` |
+| Dashboard (optional) | `Deployment` + `Service` + `Ingress` | `firm-ui`; one replica |
+| Trim / prune (optional) | `CronJob`s | `firm-cache trim`, `firm-channel trim`, `firm-audit prune` |
+
+A worker Deployment is your app's image running a different command — the fields the subsections
+below explain are the load-bearing ones:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: firm-workers }
+spec:
+  replicas: 3                                    # scale throughput here
+  template:
+    spec:
+      terminationGracePeriodSeconds: 120         # >= your longest job (see below)
+      containers:
+        - name: worker
+          image: your-registry/yourapp:tag       # your app image, with firm installed
+          # exec form -> the supervisor is PID 1 and receives SIGTERM for a graceful drain
+          command: ["firm-queue", "start", "--mode", "fork",
+                    "--import", "yourapp.jobs", "--queues", "*", "--threads", "5"]
+          env:
+            - name: FIRM_QUEUE_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: firm-db, key: url } }
+          livenessProbe:                          # no HTTP port -> probe the process
+            exec: { command: ["pgrep", "-f", "firm-queue"] }
+```
+
+### Graceful shutdown & rolling deploys
+
+The supervisor treats `SIGTERM`/`SIGINT` as a **graceful drain**: it stops claiming new work, lets
+in-flight jobs finish within `shutdown_timeout` (default 5s), forwards `TERM` to its children, and
+`SIGKILL`s any that overrun (see
+[Signals](queue/workers-and-supervisor.md#signals-graceful-shutdown)). Kubernetes sends `SIGTERM`,
+then `SIGKILL`s after `terminationGracePeriodSeconds` (default **30s**).
+
+- Set **`terminationGracePeriodSeconds` above your longest job** (and raise `shutdown_timeout` to
+  match) so k8s doesn't hard-kill mid-drain.
+- **Make the supervisor PID 1** so it receives the signal — run the CLI as the container's command
+  directly (exec form), not wrapped in a shell that swallows `SIGTERM`. If you must wrap it, use
+  `exec firm-queue …`.
+
+!!! tip "Hard kills are safe"
+    Every process heartbeats into `firm_queue_processes`; when one dies, its in-flight claims are
+    recovered to `firm_queue_ready_executions` and another worker finishes them (at-least-once — keep
+    jobs idempotent). An ungraceful kill is never lost work; graceful shutdown just avoids
+    re-running in-flight jobs. See [crash recovery](queue/workers-and-supervisor.md#crash-recovery).
+
+### Database connections
+
+The default engine pool is `pool_size=20` + `max_overflow=40` — **up to 60 connections per
+process** — and fork mode runs worker + dispatcher (+ scheduler) as *separate* processes, each with
+its own pool. Multiply by replicas and you can exhaust PostgreSQL's `max_connections` quickly.
+
+- Right-size the pool to your worker's `threads` (a 5-thread worker needs ~5–8 connections, not 60)
+  by passing `pool_size`/`max_overflow` to [`configure()`](queue/configuration.md) in your worker
+  entrypoint, **or** front the database with **PgBouncer** (transaction pooling) and keep app pools
+  small.
+- `pool_pre_ping` is on for PostgreSQL/MySQL, so dropped connections (failovers, PgBouncer
+  restarts) heal automatically.
+
+### Health & liveness
+
+Workers expose **no HTTP endpoint** — if the supervisor exits, the container exits and k8s restarts
+it, so a simple process-liveness probe (`pgrep -f firm-queue`) is enough. For a deeper check,
+assert the pod's row in `firm_queue_processes` has a fresh `last_heartbeat_at`.
+
+The dashboard *does* serve HTTP, but with Basic auth every request returns **401**, which an
+`httpGet` probe counts as a failure — use a **`tcpSocket`** probe on its port instead.
+
+### Autoscaling (optional)
+
+You often don't need it — idle workers back off their polling, so a right-sized fixed replica count
+is a legitimate setup. If you do want it: the built-in **CPU `HorizontalPodAutoscaler`** works with
+no extra components, and to scale on actual backlog instead, point [KEDA](https://keda.sh)'s
+PostgreSQL scaler (or a Prometheus adapter feeding a standard HPA) at
+`SELECT count(*) FROM firm_queue_ready_executions`. Either way, remember the GIL: scale CPU-bound work
+with **more replicas (processes)**, not more `--threads`.
+
+### Recurring tasks
+
+Wire recurring tasks into your worker entrypoint and let firm's scheduler run them — it's
+dedup-safe across replicas, so no singleton deployment is needed:
+
+```python
+from firm.queue.scheduler import RecurringTask
+from firm.queue.supervisor import SupervisorConfig, WorkerConfig
+from myapp.jobs import cleanup
+
+config = SupervisorConfig(
+    workers=[WorkerConfig()],
+    recurring=[RecurringTask(key="nightly-cleanup", schedule="0 3 * * *", job=cleanup)],
+)
+```
+
+### Migrations
+
+Run migrations as a one-shot `Job` (or an init container / pre-upgrade hook) before rolling out
+workers. Each module keeps its own version table (`firm_<module>_alembic_version`), so all four can
+share one database and migrate independently — see
+[Database backends](database-backends.md#migrations). In a source checkout that's
+`alembic -c alembic.queue.ini upgrade head`. A pip-installed image doesn't ship the `.ini`, so
+create and stamp the baseline from code instead — it's idempotent, so it's safe to run before every
+rollout:
+
+```python
+import os
+
+import firm.queue as bq
+from firm.queue import current_runtime, schema
+
+bq.configure(database_url=os.environ["FIRM_QUEUE_DATABASE_URL"])
+schema.create_all(current_runtime().engine)  # create tables + stamp the Alembic baseline
+```
 
 
 
@@ -3930,6 +5128,86 @@ It points at existing databases — it never creates or migrates a schema.
 
 Queue actions reuse the library's own helpers (`queues.pause/resume`, `maintenance.retry_failed`),
 so the UI applies exactly the same semantics as the library and CLIs.
+
+## Mount it in your application
+
+Everything above is unchanged and still the default: `firm-ui` is its own process, serving the
+dashboard at the root of its own port. Mounting is the alternative for when you already run a web
+application — then the dashboard doesn't need a second process, and can live in your own routing,
+on your own domain, behind the permissions you already have. One adapter per framework, each
+behind its own extra (`firm-ui[django]`, `firm-ui[flask]`, `firm-ui[fastapi]`). Build the
+`Dashboard` once at startup — it owns database engines — and close it on shutdown.
+
+Take the standalone process when the dashboard should stay reachable while the application is
+down or being deployed, or when ops and the application are separately owned. Mount it when you
+would otherwise be duplicating the application's own access rules in proxy config.
+
+```python
+# Django — urls.py
+from django.contrib.admin.views.decorators import staff_member_required
+from django.urls import include, path
+from firm.ui import build_dashboard
+from firm.ui.contrib.django import dashboard_urls
+
+dash = build_dashboard(database_url="sqlite:///app.db")
+
+urlpatterns = [
+    path("firm/", include(dashboard_urls(dash, host_auth=True,
+                                         decorator=staff_member_required))),
+]
+```
+
+Runnable: [examples/mounted_dashboard_django.py](../examples/mounted_dashboard_django.py).
+
+```python
+# Flask
+from firm.ui.contrib.flask import blueprint
+
+app.register_blueprint(blueprint(dash, host_auth=True), url_prefix="/firm")
+```
+
+Runnable: [examples/mounted_dashboard_flask.py](../examples/mounted_dashboard_flask.py).
+
+```python
+# FastAPI
+from fastapi import Depends
+from firm.ui.contrib.fastapi import router
+
+app.include_router(router(dash, host_auth=True), prefix="/firm",
+                   dependencies=[Depends(require_admin)])
+```
+
+Runnable: [examples/mounted_dashboard_fastapi.py](../examples/mounted_dashboard_fastapi.py).
+
+Every mount has to say **who authenticates it**, and neither answer is a default: pass
+`host_auth=True` when your application guards the route (the decorator, dependency, or middleware
+above), or `authenticator=` to have firm-ui check the request itself with any of the backends
+below. Setting neither raises `ValueError` at mount time, so a mount can't silently mean "no auth
+at all" — the same rule as the standalone server's refusal to bind a public address unguarded.
+
+Everything else keeps working as it does standalone: links and form actions carry the mount prefix,
+the destructive actions stay behind the same-origin `Origin`/`Referer` guard, and the preference
+cookies are scoped to the mount path. The dashboard renders its own forms and carries no framework
+CSRF token, so the adapters exempt these routes from a host's token check (Django's) — the
+same-origin guard is what protects them.
+
+The stylesheet is served by the mount at `<prefix>/static/style.css`. To publish it through your
+own static pipeline instead, add `firm.ui.static_dir()` to that pipeline (Django's
+`STATICFILES_DIRS`, an nginx `alias`, …) and pass `static_url="/assets/firm.css"` — pages then link
+there and no request for it reaches your application.
+
+Under the adapters is a plain, transport-free `DashboardApp`: `handle(UIRequest) -> UIResponse`,
+where `UIRequest` carries the method, the mount-relative path, query, headers, body, peer, and the
+mount `prefix`. Writing a mount for a framework not listed here is that translation and nothing
+more.
+
+## Building your own
+
+Everything the dashboard reads comes from each part's own read-query module
+(`from firm.queue import queries`, and the same for `firm.cache` / `firm.channel` /
+`firm.audit`) — a supported `Connection`-in / dicts-out surface, so your own dashboard, exporter,
+or health check can use exactly what this one uses. The signatures are listed per part in the
+[API cheatsheet](api.md).
 
 ## Security
 
@@ -4032,8 +5310,8 @@ Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick wit
 | MySQL / MariaDB | `mysql+pymysql://user:pw@host/db`      | [PyMySQL](https://pymysql.readthedocs.io/) | `…[mysql]`    |
 
 ```bash
-pip install "firm[queue,postgres]"   # queue on PostgreSQL  (or [queue,mysql])
-pip install "firm[cache,postgres]"   # cache on PostgreSQL  (or [cache,mysql])
+pip install "firm-queue[postgres]"   # queue on PostgreSQL  (or [mysql])
+pip install "firm-cache[postgres]"   # cache on PostgreSQL  (or [mysql])
 ```
 
 **Bare URLs are normalized for you:** `postgresql://…` becomes `postgresql+psycopg://…` and
@@ -4058,7 +5336,7 @@ holds on all three.
 - **SQLite** — zero setup, perfect for development, tests, single-process apps, and low-to-moderate
   volume on one host. Its one writer at a time means write-heavy, multi-worker, multi-host
   deployments will serialize on the write lock. WAL + `busy_timeout` keep that smooth up to a point.
-  On Kubernetes/shared storage it needs special care — see [SQLite on Kubernetes](#sqlite-on-kubernetes-and-other-shared-network-storage).
+  On Kubernetes/shared storage it needs special care — see [SQLite on Kubernetes](#sqlite-on-kubernetes-and-other-sharednetwork-storage).
 - **PostgreSQL** — the recommended default for production and anything multi-host: real
   `SKIP LOCKED`, no global writer lock, scales horizontally.
 - **MySQL / MariaDB** — equally supported; same `SKIP LOCKED` path. MariaDB 10.6+ supports
@@ -4272,10 +5550,29 @@ task = RecurringTask(key="nightly", schedule="0 3 * * *", job=my_job, args=(), k
 Scheduler(rt, [task]).tick()   # manual: enqueue anything due this period
 ```
 
+Read queries (for custom dashboards) — each takes a live SQLAlchemy `Connection` and returns
+plain dicts; this is what the `firm-ui` dashboard is built on:
+
+```python
+from firm.queue import queries
+
+queries.STATES                                     # the valid `state` values, in display order
+queries.state_counts(conn, queue=None)             # -> dict[str, int]  (per state, plus total)
+queries.queue_rows(conn, now)                      # -> list[dict]  (name, size, latency, paused)
+queries.queue_names(conn)                          # -> list[str]  (queues with ready jobs)
+queries.queue_size(conn, queue)                    # -> int
+queries.queue_latency(conn, queue, now)            # -> float  (seconds, 0.0 if empty)
+queries.jobs_by_state(conn, state, limit=50, offset=0, queue=None)   # -> list[dict]
+queries.job_detail(conn, job_id)                   # -> dict | None
+queries.processes(conn, now, alive_threshold=300.0)  # -> list[dict]  (+ age, alive)
+queries.recurring(conn)                            # -> list[dict]
+# a negative limit/offset, or an unknown state, raises ValueError.
+```
+
 ## firm.cache
 
 ```python
-from firm.cache import Cache, JSONCoder, PickleCoder
+from firm.cache import Cache, JSONCoder, MsgpackCoder, PickleCoder
 
 # database_url is positional; everything after it is keyword-only (defaults shown):
 cache = Cache("sqlite:///cache.db", engine=None, coder=None, encrypt_key=None,
@@ -4294,8 +5591,20 @@ cache.increment(key, by=1)          # -> int
 cache.decrement(key, by=1)          # -> int
 cache.clear()
 cache.close()                       # or:  with Cache(...) as cache: ...
-# keys are str|bytes; values are arbitrary (pickle default; JSONCoder for interop).
+# keys are str|bytes; values go through the coder (JSONCoder by default; MsgpackCoder for
+# compact binary rows, PickleCoder for arbitrary Python objects — see cache/encryption-and-coders).
 # encrypt_key=<Fernet key> encrypts values at rest (needs the [encryption] extra).
+```
+
+Read queries (for custom dashboards), `Connection` in / dicts out:
+
+```python
+from firm.cache import queries
+
+queries.cache_stats(conn)                        # -> {"entries": int, "estimated_size": int}
+queries.cache_recent(conn, limit=50, offset=0)   # -> list[dict]  (id, key, byte_size, created_at)
+# `key` is raw bytes (a cache key is arbitrary bytes — decode it yourself for display);
+# a negative limit/offset raises ValueError.
 ```
 
 ## firm.channel
@@ -4312,6 +5621,18 @@ channel.subscribe(name, callback)   # callback(payload: bytes); only future mess
 channel.unsubscribe(name, callback)
 channel.trim()                      # -> int
 channel.close()                     # or:  with Channel(...) as channel: ...
+```
+
+Read queries (for custom dashboards), `Connection` in / dicts out:
+
+```python
+from firm.channel import queries
+
+queries.channel_stats(conn)                       # -> {"messages": int, "channels": int}
+queries.channel_top(conn, limit=25, offset=0)     # -> list[dict]  (channel, count, last)
+queries.channel_recent(conn, limit=50, offset=0)  # -> list[dict]  (id, channel, payload, created_at)
+# `channel` and `payload` are raw bytes (decode them yourself for display);
+# a negative limit/offset raises ValueError.
 ```
 
 ## firm.audit
@@ -4348,19 +5669,72 @@ record(conn, action, subject=None, actor=None, data=None, changes=None,
 # data/changes/context: dicts stored as JSON text (not native JSON/JSONB).
 ```
 
-## firm.contrib (optional — `[flask]` / `[fastapi]` extras)
+Read queries (for custom dashboards), `Connection` in / dicts out — paginated search where
+`history()` is a plain filtered read, plus the tamper-evidence status:
+
+```python
+from firm.audit import queries
+
+queries.audit_stats(conn)            # -> {"events": int, "actions": int, "last_event_at": dt|None}
+queries.audit_count(conn, action=None, subject=None, subject_type=None, subject_id=None,
+                    actor=None, actor_type=None, actor_id=None, correlation_id=None)   # -> int
+queries.audit_search(conn, **same_filters, sort="created_at", dir="desc",
+                     limit=25, offset=0)   # -> list[dict]  (the history() shape + row_mac)
+queries.audit_detail(conn, event_id)       # -> dict | None
+queries.SORT_COLUMNS, queries.DEFAULT_SORT # the sortable columns and the default
+# filters behave exactly as in history() (a bare string filters by type only, and passing both
+# forms for one field raises ValueError); an unknown sort/dir falls back to the default, and a
+# negative limit/offset raises ValueError.
+
+# tamper-evidence (only meaningful when a key is configured; see audit/tamper-evidence):
+queries.verify_status_row(conn)                       # -> dict | None  (the verifier's status row)
+queries.integrity_config(conn, key_configured=True)   # -> IntegrityConfig
+queries.integrity_state(status, config, now=None,
+                        verify_max_age=..., anchor_max_age=...)   # -> IntegrityState (pure)
+queries.row_integrity_context(conn)   # -> dict  (the per-row signals, gathered once)
+queries.row_status(row, ctx)          # -> "sealed"|"unsealed"|"unprotected"|"tampered"|... | None
+# IntegrityState carries state, tone (ok/warn/danger/neutral), escalate, and cause tokens.
+```
+
+## firm.queue.contrib (optional — `[flask]` / `[fastapi]` extras)
 
 ```python
 # FastAPI: app = FastAPI(lifespan=lifespan(database_url=..., embed_workers=False,
 #                                          queues=("*",), threads=3))
-from firm.contrib.fastapi import lifespan
+from firm.queue.contrib.fastapi import lifespan
 
-# Flask: Firm(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
-#   reads app.config["FIRM_DATABASE_URL"]; registers `flask firm worker`
-from firm.contrib.flask import Firm
+# Flask: FirmQueue(app, database_url=None, embed_workers=False, queues=("*",), threads=3)
+#   reads app.config/env FIRM_QUEUE_DATABASE_URL, then FIRM_DATABASE_URL;
+#   registers `flask firm-queue worker`
+from firm.queue.contrib.flask import FirmQueue
 
-from firm.contrib.sqlalchemy import enqueue_after_commit
+from firm.queue.contrib.sqlalchemy import enqueue_after_commit
 enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
+```
+
+## firm.ui (optional — the `firm-ui` package)
+
+```python
+from firm.ui import BasicAuth, build_dashboard, serve, static_dir
+dash = build_dashboard(database_url=None, queue_url=None, cache_url=None,
+                       channel_url=None, audit_url=None)   # -> Dashboard (close() when done)
+serve(dash, host="127.0.0.1", port=8787, authenticator=None, channel_trim_retention=None)
+
+# the dashboard without a transport: handle(UIRequest) -> UIResponse
+from firm.ui import DashboardApp, Headers, UIRequest, UIResponse
+app = DashboardApp(dash, authenticator=None, channel_trim_retention=None, static_url=None)
+app.handle(UIRequest("GET", "/jobs", query="state=failed", headers=Headers(...),
+                     body=b"", peer="", prefix="/firm", host="app.example"))
+static_dir()   # -> Path  (the stylesheet's directory, to serve it from your own pipeline)
+```
+
+Mounts (each behind its own extra — `[django]` / `[flask]` / `[fastapi]`). Every one needs either
+`authenticator=` or `host_auth=True`; both unset raises `ValueError`:
+
+```python
+from firm.ui.contrib.django import dashboard_urls, dashboard_view   # decorator=…, host_auth=…
+from firm.ui.contrib.flask import blueprint                          # -> Blueprint
+from firm.ui.contrib.fastapi import router                           # -> APIRouter
 ```
 
 ## Command-line tools
@@ -4428,16 +5802,21 @@ reinterpretation. Where it differs, it's deliberate and documented.
 | Retry counting      | tracked by Active Job                   | a `jobs.attempts` column (we own retries)                                          |
 | Crash recovery      | orphaned claims are marked **failed**   | orphaned claims are **re-readied** (at-least-once; another worker finishes them)   |
 | SQLite concurrency  | row-level locking tests are skipped     | `BEGIN IMMEDIATE` gives the same guarantee, so concurrency is fully tested on SQLite |
-| Recurring schedules | Fugit (cron **and** natural language)   | cron only (`croniter`)                                                            |
+| Recurring schedules | Fugit (cron **and** natural language), timezone-aware | cron only (`croniter`), evaluated in **UTC**                          |
 | Job arguments       | Active Job + GlobalID (pass records)    | JSON + datetime/date/Decimal/UUID (pass IDs)                                       |
 | Pub/sub trimming    | inline `TrimJob` per broadcast          | async probabilistic trim on a background thread (+ manual `trim()` / CLI)          |
 | Pub/sub delivery    | Action Cable adapter                    | a standalone `Channel` with `broadcast`/`subscribe`/`unsubscribe` (no Action Cable) |
 | Cache value coder   | Marshal (arbitrary Ruby objects)        | **JSON by default** (safer against a writable cache table); `PickleCoder` is one import away |
-| Cache entry expiry  | per-entry `expires_in` / `expires_at`   | **global expiry only** — `max_age` + `max_size` FIFO trim; no per-entry TTL (planned, see `IMPROVEMENTS.md`) |
+| Cache entry expiry  | per-entry `expires_in` / `expires_at`   | **global expiry only** — `max_age` + `max_size` FIFO trim; no per-entry TTL (planned, see `ROADMAP.md`) |
 | Cache failure safety | a dead cache DB degrades **reads and writes** | **reads** degrade to a miss (routed to `on_error`); **writes still raise** — a silently dropped write is a worse surprise than an error |
 
 The at-least-once recovery choice means **jobs should be idempotent** — see
 [Retries & failures](queue/retries-and-failures.md).
+
+Recurring `schedule` cron expressions are evaluated in **UTC**: `croniter` runs over firm's
+naive-UTC clock, whereas solid_queue's fugit schedules honor the application's configured time
+zone. Porting a schedule like `0 9 * * *` therefore shifts its fire time by your UTC offset — it
+fires at 09:00 UTC, not 09:00 local. Adjust the cron fields to UTC when migrating.
 
 ## Beyond the port: firm-audit
 
@@ -4458,8 +5837,11 @@ reproduced, and a few pieces are still future work:
 - **Active Support / Notifications instrumentation** — replaced by lifecycle hooks + your own
   logging.
 - **Cache sharding** (multi-database consistent hashing) and the **Mission Control** dashboard.
+- **Continuations** (`ActiveJob::Continuable`) — checkpointing inside a job and resuming after an
+  interruption. A recovered job restarts from the top, which is why jobs must be idempotent.
 
-See the [roadmap](#) — `IMPROVEMENTS.md` in the repo root — for the full list of planned work.
+See `ROADMAP.md` in the repo root for the roadmap — the six things planned next. Everything
+else lives in the issue tracker.
 
 
 
@@ -4481,7 +5863,7 @@ firm/
 ├── pyproject.toml                 # virtual workspace root: members, dev tools, lint/type config
 ├── packages/
 │   ├── firm-core/    src/firm/_core/    # shared: engine, dialects, poller, clock, config, process
-│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + firm.contrib + migrations/
+│   ├── firm-queue/   src/firm/queue/     # firm.queue  (jobs)   + queue/contrib/ + migrations/
 │   ├── firm-cache/   src/firm/cache/     # firm.cache  (cache)  + migrations/
 │   ├── firm-channel/ src/firm/channel/   # firm.channel (pub/sub) + migrations/
 │   ├── firm-audit/   src/firm/audit/     # firm.audit  (audit log) + migrations/
@@ -4503,12 +5885,12 @@ uv sync    # venv + all workspace packages (editable) + all dev tools/drivers
 ## The gate
 
 ```bash
-uv run pytest                                  # tests
-uv run ruff check && uv run ruff format --check # lint + format
-uv run ty check packages                       # types
+uv run pytest                                    # tests
+uv run ruff check && uv run ruff format --check  # lint + format
+uv run ty check packages scripts examples        # types
 ```
 
-All three must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
+All must pass. The codebase is fully type-annotated (checked with Astral's `ty`) and formatted
 with `ruff`.
 
 ## Running against Postgres and MySQL
@@ -4537,12 +5919,123 @@ Notes:
 - **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
   render correctly for Postgres/MySQL with no live database.
 
+## Upstream test parity
+
+firm is a port of the Rails Solid stack (`solid_queue` / `solid_cache` / `solid_cable`), but it is
+its own project with its own suite — not a mirror of upstream. The porting rule is simple: **every
+upstream test case is handled as one of firm's own behavior tests**, living beside the functionality
+it exercises (a claim spec in `test_claim.py`, an eviction spec in `test_expiry.py`, and so on).
+Where firm deliberately behaves differently from Rails, that divergence is written up in
+[comparison-to-rails.md](comparison-to-rails.md) rather than left as a red test.
+
+Tests ported from upstream keep a short `# upstream: <file>.rb :: <case>` comment so the lineage is
+discoverable when reconciling against a newer Solid release — but they are ordinary firm tests: they
+assert firm's behavior and go green.
+
 ## Conventions
 
 - Tests are spec-style and grouped by behavior. New behavior gets a failing test first.
 - Keep the public API small; internal machinery lives under `_core/`.
 - Match the surrounding style — concise docstrings, explicit SQL via SQLAlchemy Core, no clever
   metaprogramming.
+
+## Releasing
+
+Every package under `packages/` is published to PyPI independently (they share the `firm.*`
+namespace but carry their own versions). Publishing is fully automated through
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) using
+[PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/) — there are no PyPI tokens
+to manage. The workflow checks the changelog, builds, runs the test suite, `twine check`s,
+uploads, and finishes by creating a GitHub Release for the tag — the changelog section for the
+released version is the entire body (no auto-generated PR list: it isn't path-aware and would
+pull in unrelated packages' PRs).
+
+### Changelogs
+
+Each package keeps a `packages/<name>/CHANGELOG.md` in
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format. PRs that make a user-visible
+change add a line under the affected package's `## [Unreleased]` section — a review convention,
+not CI-enforced. At release time it **is** enforced: the workflow runs
+`scripts/check_changelog.py` and refuses to publish a version that has no matching
+`## [<version>]` section. The changelog ships in the sdist, and PyPI links it in each package's
+sidebar via the `Changelog` project URL.
+
+### Releasing one package
+
+To release **one package** (the common case):
+
+1. In one PR: bump `version` in `packages/<name>/pyproject.toml` and retitle the package's
+   `## [Unreleased]` section to `## [<version>] - <YYYY-MM-DD>` (leave a fresh, empty
+   `## [Unreleased]` above it). If other packages should pick up the new version, adjust their
+   `~=` pins in the same PR.
+2. Tag the merged commit `<name>-v<version>` and push the tag:
+
+   ```bash
+   git tag firm-queue-v0.2.0 && git push origin firm-queue-v0.2.0
+   ```
+
+   The workflow refuses to publish if the tag version doesn't match the package's
+   `pyproject.toml`, or if the changelog has no section for it.
+
+### Releasing everything
+
+To release **everything at once** (e.g. a coordinated bump), tag `v<version>`. That builds all
+packages and uploads whatever isn't already on PyPI — previously published files are skipped, so
+the tag is safe even when some packages didn't change (their changelogs already carry the
+section for their current, released version).
+
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html): breaking changes bump
+the major version. Which *other* packages a release drags along is decided by the cross-package
+pins below.
+
+### Cross-package pins
+
+Workspace packages depend on each other with `~=<major>.<minor>` — `firm-cache~=1.1` resolves to
+`>=1.1, ==1.*`. The two bounds are separate decisions:
+
+- **The upper bound (`==1.*`) is compatibility.** It stays wide so a package never blocks someone
+  from upgrading a module. A narrow `~=1.1.0` (`==1.1.*`) makes `firm-ui` and the next `firm-cache`
+  minor uninstallable *together* — a resolver conflict, not merely a missed upgrade.
+- **The lower bound is distribution.** Raising it is how a package guarantees the capability that
+  shipped in that minor. Without it, `pip install -U firm-stack` leaves the existing `firm-cache`
+  in place: pip's default `--upgrade-strategy only-if-needed` moves a dependency only when the new
+  release *requires* it.
+
+So a pin-only change is versioned by which bound moved:
+
+| Change | Bump | Why |
+|---|---|---|
+| Upper bound widened | patch | Nothing new is promised; the package only stops blocking. |
+| Lower bound raised | minor | The package now guarantees something it didn't before. |
+
+After a module's minor release, decide per dependent whether its users should get the new
+functionality:
+
+- `firm` and `firm-stack` exist to deliver the suite, so their extras normally raise the floor.
+  Otherwise it matters whether you installed the meta-package or the modules separately, which is
+  the one thing a meta-package is for.
+- `firm-ui` raises its floor only when the dashboard actually needs the new module version;
+  widening its ceiling is enough otherwise.
+- A package that doesn't depend on the released module doesn't move at all.
+
+Tag the module first. A dependent that has already raised its floor isn't installable until the
+module it points at is on PyPI.
+
+The root `uv.lock` plays no part in any of this: it pins the *development* environment and resolves
+internal dependencies to local paths (`source = { editable = ... }`), and it ships in neither the
+wheels nor the sdists. What a consumer ends up with is decided by these pins plus their own lockfile
+— which is also why raising a floor is the only way to actively push a module version out, and why
+that deserves the minor bump.
+
+> **Meta-package status:** the PyPI name `firm` is held by a dormant, release-less project and a
+> [PEP 541 name-transfer request](https://github.com/pypi/support/issues/11384) is pending.
+> Until it's granted, the release workflow excludes the meta-package from `v*` all-package tags
+> (see the `rm dist/firm-[0-9]*` line in `release.yml`), docs use the per-package install form
+> (`pip install firm-queue`), and the extras form is provided by the interim
+> [`firm-stack`](https://pypi.org/project/firm-stack/) meta-package (`packages/firm-stack/` —
+> keep its extras/pins in lockstep with `packages/firm/`). Once the name is ours: remove that
+> `rm` line, publish the meta with a `firm-v<ver>` tag, and the `firm[queue]` extras form starts
+> working; `firm-stack` then stays as a compatible alias.
 
 ## Building the docs
 

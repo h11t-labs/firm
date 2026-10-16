@@ -17,7 +17,7 @@ import os
 
 from . import __version__, auth
 from .auth import Authenticator
-from .context import build_dashboard
+from .context import DashboardConnectionError, build_dashboard
 from .server import create_server
 
 
@@ -78,15 +78,18 @@ def main(argv: list[str] | None = None) -> None:
                 endpoint_url=args.audit_s3_endpoint,
             )
         )
-    dashboard = build_dashboard(
-        database_url=args.database_url,
-        queue_url=args.queue_url,
-        cache_url=args.cache_url,
-        channel_url=args.channel_url,
-        audit_url=args.audit_url,
-        audit_s3=audit_s3,
-        audit_archive=audit_archive,
-    )
+    try:
+        dashboard = build_dashboard(
+            database_url=args.database_url,
+            queue_url=args.queue_url,
+            cache_url=args.cache_url,
+            channel_url=args.channel_url,
+            audit_url=args.audit_url,
+            audit_s3=audit_s3,
+            audit_archive=audit_archive,
+        )
+    except DashboardConnectionError as exc:
+        parser.error(str(exc))
     if not dashboard.parts:
         parser.error("No firm tables found at the given URL(s); nothing to show.")
 

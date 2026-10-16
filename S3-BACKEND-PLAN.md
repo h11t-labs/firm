@@ -299,3 +299,9 @@ stale exporters retry exactly the same frozen bytes; leases/generations are unne
 this model. Receipts carry the full key locator (including stream/event identity), digest,
 and optional version ID. Errors surface as exceptions; backlog is available through
 `SQLArchiver.status()` and the CLI. No audit background exporter or callback subsystem is added.
+
+Integration update, 16 October 2026: the current released SQL table is `firm_audit_events`,
+with signing/sealing migration `0002`; archival follows in `0003`. Archive exports and native
+restores preserve signed row bytes/metadata, and aligned retention enforces both integrity
+and archive guards. See the usage guide for the distinction between event archives and
+backups of the original seals/anchors. S3 routes share the transport-free mounted dashboard.

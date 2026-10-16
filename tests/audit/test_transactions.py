@@ -32,7 +32,7 @@ def test_audit_row_commits_with_business_write(db_url: str) -> None:
 
         with engine.connect() as conn:
             assert conn.execute(select(_widgets)).all() == [(1,)]
-            assert len(conn.execute(select(schema.audits)).all()) == 1
+            assert len(conn.execute(select(schema.audit_events)).all()) == 1
     finally:
         engine.dispose()
 
@@ -49,7 +49,7 @@ def test_audit_row_rolls_back_with_business_write(db_url: str) -> None:
 
         with engine.connect() as conn:
             assert conn.execute(select(_widgets)).all() == []
-            assert conn.execute(select(schema.audits)).all() == []
+            assert conn.execute(select(schema.audit_events)).all() == []
     finally:
         engine.dispose()
 

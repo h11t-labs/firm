@@ -1,4 +1,4 @@
-"""Pub/sub schema — the single ``firm_messages`` table.
+"""Pub/sub schema — the single ``firm_channel_messages`` table.
 
 Broadcasting inserts a row; subscribers poll for rows newer than the last ``id`` they have seen on
 their channels. ``channel_hash`` (a signed 64-bit hash of the channel) is the indexed column the
@@ -38,7 +38,7 @@ _DT = dt_type()
 _CHANNEL_TYPE = LargeBinary(1024).with_variant(MYSQL_VARBINARY(1024), "mysql")
 
 messages = Table(
-    "firm_messages",
+    "firm_channel_messages",
     metadata,
     Column("id", pk_bigint(), primary_key=True),
     Column("channel", _CHANNEL_TYPE, nullable=False),
@@ -47,9 +47,9 @@ messages = Table(
     Column("created_at", _DT, nullable=False, default=now_utc),
     # The raw-channel index serves the dashboard's per-channel GROUP BY (channel_top);
     # message polling itself only ever filters on channel_hash.
-    Index("index_firm_messages_on_channel", "channel"),
-    Index("index_firm_messages_on_channel_hash", "channel_hash"),
-    Index("index_firm_messages_on_created_at", "created_at"),
+    Index("index_firm_channel_messages_on_channel", "channel"),
+    Index("index_firm_channel_messages_on_channel_hash", "channel_hash"),
+    Index("index_firm_channel_messages_on_created_at", "created_at"),
 )
 
 

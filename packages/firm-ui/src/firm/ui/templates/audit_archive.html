@@ -1,7 +1,7 @@
 {% extends "layout.html" %}
 {% block content %}
 <div class="pagehead"><h1>Audit archive</h1></div>
-<form class="filters" method="get" action="/audit/archive">
+<form class="filters" method="get" action="{{ urls.prefix }}/audit/archive">
 <label>Manifest key <input name="key" value="{{ key }}" required></label>
 <button class="primary" type="submit">Verify and read</button>
 </form>

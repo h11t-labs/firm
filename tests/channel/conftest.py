@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Iterator
 
 import pytest
+from sqlalchemy import func, select
 
 from firm._core.database import create_engine_for
 from firm.channel import Channel, schema
@@ -62,3 +63,17 @@ def wait_for() -> Callable[..., bool]:
         return predicate()
 
     return _wait_for
+
+
+@pytest.fixture
+def stored(channel: Channel) -> Callable[[], int]:
+    """How many messages are durably committed to the backing table right now. Delivery tests
+    that broadcast to an *unsubscribed* channel poll this instead of sleeping a fixed duration:
+    once the row is visible the write has committed, so a later subscription genuinely exercises
+    the "no replay of pre-subscribe messages" path rather than racing an uncommitted insert."""
+
+    def _count() -> int:
+        with channel.engine.connect() as conn:
+            return conn.execute(select(func.count()).select_from(schema.messages)).scalar() or 0
+
+    return _count

@@ -118,3 +118,65 @@ def test_immediate_flag_does_not_leak_to_later_transactions(tmp_path) -> None:
         engine.dispose()
 
     assert begins == ["BEGIN IMMEDIATE", "BEGIN"]
+
+
+def _claim_all(engine: Engine, queues: list[str], limit: int = 100) -> list[int]:
+    return claim_ready(engine, get_dialect(engine), queues, limit, None)
+
+
+def test_claim_using_both_exact_names_and_a_prefix(
+    engine: Engine, add_ready: Callable[..., int]
+) -> None:
+    # upstream: ready_execution_test.rb "claim jobs using both exact names and a prefix".
+    # An exact name AND a "prefix*" selector in one spec list claim from both.
+    backend = add_ready(queue="backend")
+    mailers_high = add_ready(queue="mailers_high")
+    mailers_low = add_ready(queue="mailers_low")
+    add_ready(queue="reports")  # not selected
+
+    claimed = _claim_all(engine, ["backend", "mailers*"])
+
+    assert set(claimed) == {backend, mailers_high, mailers_low}
+
+
+def test_queue_order_then_priority_with_list_of_queues(
+    engine: Engine, add_ready: Callable[..., int]
+) -> None:
+    # upstream: ready_execution_test.rb "queue order and then priority is respected when using a
+    # list of queues". Jobs in the earlier-listed queue are claimed before later ones, then by
+    # priority within a queue -- even when a later queue holds higher-priority work.
+    q1_high = add_ready(queue="queue1", priority=1)
+    q1_low = add_ready(queue="queue1", priority=5)
+    q2_high = add_ready(queue="queue2", priority=1)
+    q2_low = add_ready(queue="queue2", priority=5)
+
+    claimed = _claim_all(engine, ["queue2", "queue1"])
+
+    # queue2 first (by priority within), then queue1 (by priority within).
+    assert claimed == [q2_high, q2_low, q1_high, q1_low]
+
+
+def test_queue_order_respected_when_using_prefixes(
+    engine: Engine, add_ready: Callable[..., int]
+) -> None:
+    # upstream: ready_execution_test.rb "queue order is respected when using prefixes".
+    # With prefix selectors, queues are still polled in the order their selectors are listed.
+    alpha = add_ready(queue="alpha_one", priority=1)
+    beta = add_ready(queue="beta_one", priority=5)
+
+    claimed = _claim_all(engine, ["beta*", "alpha*"])
+
+    assert claimed == [beta, alpha]
+
+
+def test_queue_order_respected_when_mixing_names_and_prefixes(
+    engine: Engine, add_ready: Callable[..., int]
+) -> None:
+    # upstream: ready_execution_test.rb "queue order is respected when mixing exact names with
+    # prefixes". An exact name listed first is polled before a later prefix selector.
+    exact = add_ready(queue="urgent", priority=5)
+    prefixed = add_ready(queue="mailers_high", priority=1)
+
+    claimed = _claim_all(engine, ["urgent", "mailers*"])
+
+    assert claimed == [exact, prefixed]

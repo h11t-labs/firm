@@ -8,7 +8,7 @@ conventions below. (For *using* the library, see [`llms.txt`](llms.txt); this fi
 
 **firm** — pure-Python ports of the Rails Solid stack: `firm.queue` (background jobs),
 `firm.cache` (caching), `firm.channel` (pub/sub), and `firm.audit` (append-only audit log,
-original to firm), plus an optional `firm.ui` dashboard and `firm.contrib` (Flask/FastAPI
+original to firm), plus an optional `firm.ui` dashboard and `firm.queue.contrib` (Flask/FastAPI
 glue). No Redis; runs on SQLite/PostgreSQL/MySQL via SQLAlchemy.
 
 ## Commands
@@ -18,7 +18,7 @@ uv sync                                      # installs all workspace packages (
 uv run python -m pytest                       # full suite (must pass)
 uv run ruff check packages tests scripts examples # lint
 uv run ruff format                           # format
-uv run ty check packages                     # type check (must pass)
+uv run ty check packages scripts examples    # type check (must pass)
 uv run pre-commit run --all-files            # ruff + ty + llms-full + hygiene
 ```
 
@@ -43,19 +43,24 @@ module carries its own.
   `config` (`Settings`/`Runtime` — engine+dialect ownership, **no global state**), `database`
   (`create_engine_for`, `transaction`, `immediate_transaction`), `dialects/` (per-DB seam: claim
   locking + native upsert/insert-ignore), `poller.InterruptiblePoller`, `process` + `schema`
-  (the `firm_processes` table — copied into the queue's metadata via `to_metadata`),
+  (the `firm_queue_processes` table — copied into the queue's metadata via `to_metadata`),
   `tagged_json` (the queue/audit JSON envelope), `alembic_env` (shared migrations runner),
   `schema_setup` (create_all + version-table stamping). **Core never imports a feature module.**
 - `packages/firm-ui/src/firm/ui/` — optional dashboard (`firm-ui`; depends on all four modules).
-  `packages/firm-queue/src/firm/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships **inside
-  firm-queue** (it only depends on queue). **Nothing in core imports `ui` or `contrib`.**
+  Transport-free core in `app.py` (`DashboardApp.handle(UIRequest) -> UIResponse`), with `server.py`
+  (stdlib) and `ui/contrib/` (Django/Flask/FastAPI mounts, behind extras) as its only transports.
+  `packages/firm-queue/src/firm/queue/contrib/` — optional Flask/FastAPI/SQLAlchemy glue, ships
+  **inside firm-queue** (it only configures the queue). `packages/firm-queue/src/firm/contrib/`
+  is the deprecated pre-1.1 location, now only aliases, removed in 2.0. **Nothing in core imports
+  `ui` or `contrib`.**
 - `packages/firm/` — meta-package (no code; installs the four modules; `firm[ui]`/`firm[all]`).
 - `tests/<module>/`, `docs/`, `examples/`, `scripts/` stay at the repo root.
 
 ## Conventions
 
 - **Lineage:** name `solid_queue`/`solid_cache`/`solid_cable` ONLY in `README.md`,
-  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`, and the packages'
+  `docs/index.md` (the lineage table), `docs/comparison-to-rails.md`,
+  `docs/testing-and-contributing.md` (the upstream-parity discussion), and the packages'
   PyPI `keywords`/`description` metadata (discoverability). Elsewhere — code, comments,
   every other doc — use firm's own voice. All tables/indexes are `firm_*`.
 - **Independence:** queue/cache/channel never import each other; importing `firm.queue` pulls no
@@ -72,8 +77,8 @@ module carries its own.
   write; audit prunes only on explicit opt-in (never delete audit data silently). Concurrent
   delete sweeps select victims with the skip-locked seam (see `channel/trim.py`,
   `audit/retention.py`).
-- **Style:** ruff (`E,F,I,UP,B,SIM,C4,RUF`, line-length 100) + ruff format; full type hints; a
-  module docstring per file. `migrations/*` are ruff-excluded.
+- **Style:** ruff (`E,F,I,UP,B,SIM,C4,RUF,S` with `S101`/`S311` ignored, line-length 100) +
+  ruff format; full type hints; a module docstring per file. `migrations/*` are ruff-excluded.
 - **New sibling module:** create `packages/firm-<m>/` mirroring `firm-cache` (its `pyproject.toml`
   with the namespaced `[tool.uv.build-backend]` block, `src/firm/<m>/` + `py.typed`), add it to the
   root `[tool.uv.sources]`, then wire into `zensical.toml` nav, a new `alembic.<m>.ini` (its

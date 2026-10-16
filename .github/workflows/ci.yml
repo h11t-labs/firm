@@ -16,8 +16,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      # setup-uv publishes no floating major/minor tags since v8 (supply-chain hardening),
+      # so this is pinned to an exact immutable tag and bumped deliberately.
+      - uses: astral-sh/setup-uv@v10.0.0
       - name: Check lockfile is current
         run: uv lock --check
       - name: Sync workspace
@@ -32,8 +34,8 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.0
       - name: Sync workspace
         run: uv sync --locked
       - name: Run tests with coverage (SQLite)
@@ -46,10 +48,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13"]
+        python: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.0
         with:
           python-version: ${{ matrix.python }}
       - name: Sync workspace
@@ -91,9 +93,22 @@ jobs:
       FIRM_TEST_PG_URL: postgresql://firm:firm@127.0.0.1:5432/firm
       FIRM_TEST_MYSQL_URL: mysql://firm:firm@127.0.0.1:3306/firm
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.0
       - name: Sync workspace
         run: uv sync --locked
       - name: Run tests (SQLite + PostgreSQL + MySQL)
         run: uv run pytest
+
+  test-s3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.0
+      - name: Sync optional S3 SDK
+        run: uv sync --locked --all-extras
+      - name: Test S3 contracts, SQL archives, and mounted dashboard
+        run: >-
+          uv run pytest tests/audit/test_s3.py tests/audit/test_archives.py
+          tests/audit/test_archive_integrity.py tests/audit/test_storage_cli.py
+          tests/ui/test_s3_audit.py

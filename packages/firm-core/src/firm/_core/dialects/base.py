@@ -46,6 +46,14 @@ class Dialect(ABC):
         ``begin_claim_tx`` already holds the write lock."""
 
     @abstractmethod
+    def with_row_lock(self, stmt: Select) -> Select:
+        """Lock selected coordination rows until transaction end.
+
+        PostgreSQL/MySQL use ``FOR UPDATE``; SQLite is a no-op because callers pair it with
+        ``BEGIN IMMEDIATE``.
+        """
+
+    @abstractmethod
     def upsert(
         self,
         table: Table,
@@ -66,4 +74,13 @@ class Dialect(ABC):
         """Build an insert-if-absent: on a conflict against the unique index over
         ``index_elements``, do nothing. Pass the executed result to :func:`inserted_count` to
         learn whether the row was inserted (1) or the conflict ignored (0) on every backend —
-        the raw ``rowcount`` is *not* reliable for these statements on Postgres."""
+        the raw ``rowcount`` is *not* reliable for these statements on Postgres.
+
+        Backend divergence: PostgreSQL/SQLite scope the no-op to the named unique index
+        (``ON CONFLICT ... DO NOTHING``), so only a duplicate-key conflict is swallowed and any
+        other constraint violation still raises. MySQL uses ``INSERT ... IGNORE`` — the only
+        form that meets the 1/0 rowcount contract there (a no-op ``ON DUPLICATE KEY UPDATE``
+        reports 1 on conflict under the ``CLIENT.FOUND_ROWS`` flag SQLAlchemy always sets) —
+        which also downgrades unrelated errors (NOT NULL, FK, truncation) to warnings. So on
+        MySQL a row that violates such a constraint is silently skipped and
+        :func:`inserted_count` reads 0, indistinguishable from a benign key conflict."""

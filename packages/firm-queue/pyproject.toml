@@ -1,13 +1,15 @@
 [project]
 name = "firm-queue"
-version = "0.1.0"
+version = "1.0.0"
 description = "Database-backed background jobs (a pure-Python port of Rails' Solid Queue). No Redis required — runs on SQLite, PostgreSQL, or MySQL."
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "firm contributors" }]
 keywords = ["jobs", "queue", "background", "tasks", "sqlite", "postgresql", "mysql", "solid_queue"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Database",
@@ -15,14 +17,14 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "firm-core~=0.1.0",
-    "croniter>=2.0",
+    "firm-core~=1.0",
+    "croniter>=6.2.4",
     "click>=8.1",
 ]
 
 [project.optional-dependencies]
-flask = ["flask>=3.0"]                 # firm.contrib.flask integration
-fastapi = ["fastapi>=0.110"]           # firm.contrib.fastapi integration
+flask = ["flask>=3.0"]                 # firm.queue.contrib.flask integration
+fastapi = ["fastapi>=0.141.1"]           # firm.queue.contrib.fastapi integration
 postgres = ["firm-core[postgres]"]     # PostgreSQL driver (via firm-core)
 mysql = ["firm-core[mysql]"]           # MySQL / MariaDB driver (via firm-core)
 
@@ -31,15 +33,19 @@ firm-queue = "firm.queue.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/h11t-labs/firm"
+Documentation = "https://h11t-labs.github.io/firm/"
 Repository = "https://github.com/h11t-labs/firm"
 Issues = "https://github.com/h11t-labs/firm/issues"
+Changelog = "https://github.com/h11t-labs/firm/blob/main/packages/firm-queue/CHANGELOG.md"
 
 [build-system]
-requires = ["uv_build>=0.11,<0.12"]
+requires = ["uv_build>=0.12.0,<0.13"]
 build-backend = "uv_build"
 
-# firm-queue ships two namespace sub-packages: firm.queue and firm.contrib
-# (contrib only depends on queue, so it lives here rather than in its own dist).
+# firm-queue ships two namespace sub-packages. firm.queue holds everything, including the
+# framework integrations under firm.queue.contrib; firm.contrib is left carrying only the
+# deprecated aliases for the pre-move import paths, and goes away in 2.0.
 [tool.uv.build-backend]
+source-include = ["CHANGELOG.md"]
 namespace = true
 module-name = ["firm.queue", "firm.contrib"]

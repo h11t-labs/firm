@@ -17,8 +17,8 @@ def require_click(extra: str) -> Any:
         import click
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise ImportError(
-            f'The firm-{extra} CLI requires "click". Install the {extra} extra: '
-            f'pip install "firm[{extra}]"'
+            f'The firm-{extra} CLI requires "click". Reinstall the module package: '
+            f'pip install "firm-{extra}"'
         ) from exc
     return click
 

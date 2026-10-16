@@ -60,11 +60,11 @@ def test_sql_restore_keeps_identity_timestamp_and_tagged_data(audit, archive, tm
 
 def test_discovery_does_not_skip_later_visible_lower_id(audit, archive):
     with transaction(audit.engine) as conn:
-        conn.execute(schema.audits.insert().values(id=20, action="high", created_at=NOW))
+        conn.execute(schema.audit_events.insert().values(id=20, action="high", created_at=NOW))
     worker = archiver(audit, archive)
     assert worker.run_once() is not None
     with transaction(audit.engine) as conn:
-        conn.execute(schema.audits.insert().values(id=10, action="late-low", created_at=NOW))
+        conn.execute(schema.audit_events.insert().values(id=10, action="late-low", created_at=NOW))
     receipt = worker.run_once()
     assert [entry["original_id"] for entry in archive.read(receipt)] == [10]
 
@@ -94,7 +94,10 @@ def test_reused_sqlite_id_does_not_inherit_acknowledgement(audit, archive, is_sq
     worker.run_once()
     audit.max_age = -1
     assert audit.retention.run_once() == 1
-    audit.record("second")
+    # Current schemas use AUTOINCREMENT; explicitly recreate an old identity to cover
+    # imported/legacy sources that might reuse it.
+    with transaction(audit.engine) as conn:
+        conn.execute(schema.audit_events.insert().values(id=1, action="second", created_at=NOW))
     assert audit.history()[0]["id"] == 1
     assert audit.retention.run_once() == 0
     assert worker.run_once() is not None
@@ -202,7 +205,8 @@ def test_pruning_passes_blocked_rows_without_skipping_eligible_rows(audit, archi
 def test_copy_only_pagination_and_overlap_read(audit, archive):
     with transaction(audit.engine) as conn:
         conn.execute(
-            schema.audits.insert(), [{"action": "same-time", "created_at": NOW} for _ in range(7)]
+            schema.audit_events.insert(),
+            [{"action": "same-time", "created_at": NOW} for _ in range(7)],
         )
     token = None
     receipts = []

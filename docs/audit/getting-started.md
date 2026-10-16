@@ -3,9 +3,9 @@
 ## Install
 
 ```bash
-pip install "firm[audit]"              # or: uv add "firm[audit]"
-pip install "firm[audit,postgres]"     # psycopg, for PostgreSQL
-pip install "firm[audit,mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install firm-audit              # or: uv add firm-audit
+pip install "firm-audit[postgres]"     # psycopg, for PostgreSQL
+pip install "firm-audit[mysql]"        # PyMySQL, for MySQL/MariaDB
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -18,7 +18,7 @@ from firm.audit import AuditLog
 audit = AuditLog(database_url="sqlite:///audit.db")
 ```
 
-By default `AuditLog(...)` creates the `firm_audits` table if it's missing
+By default `AuditLog(...)` creates the `firm_audit_events` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and
 pass `create_schema=False` — see [Database backends](../database-backends.md#migrations).
 

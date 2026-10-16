@@ -25,6 +25,7 @@ from .config import current_runtime
 from .serialization import serialize
 
 if TYPE_CHECKING:
+    from .concurrency import ConcurrencySpec
     from .job import Job
 
 _jobs = schema.jobs
@@ -55,6 +56,42 @@ def _insert_ready(conn: Connection, job_id: int, job: Job) -> None:
     conn.execute(
         insert(_ready).values(job_id=job_id, queue_name=job.queue_name, priority=job.priority)
     )
+
+
+def route_concurrent(
+    conn: Connection,
+    job: Job,
+    args_blob: str,
+    scheduled_at: datetime,
+    spec: ConcurrencySpec,
+    key: str,
+    now: datetime,
+) -> int | None:
+    """Insert a concurrency-limited job and route its immediate execution.
+
+    Acquires ``key``'s semaphore, inserts the job row (stamped with ``concurrency_key``), then
+    either makes it ready (slot acquired) or blocks it — or discards it when the key is full and
+    ``on_conflict="discard"`` (returns ``None``). The caller must supply a serialized transaction
+    (``immediate_transaction`` / ``begin_claim_tx``), since the semaphore ops require it. Shared by
+    the immediate-enqueue path and the recurring scheduler so both honor concurrency controls.
+    """
+    acquired = semaphore.acquire(conn, key, spec.limit, spec.duration)
+    if not acquired and spec.on_conflict == "discard":
+        return None
+    job_id = _insert_job(conn, job, args_blob, scheduled_at, key)
+    if acquired:
+        _insert_ready(conn, job_id, job)
+    else:
+        conn.execute(
+            insert(_blocked).values(
+                job_id=job_id,
+                queue_name=job.queue_name,
+                priority=job.priority,
+                concurrency_key=key,
+                expires_at=now + timedelta(seconds=spec.duration),
+            )
+        )
+    return job_id
 
 
 def enqueue(
@@ -100,20 +137,4 @@ def enqueue(
 
     key = spec.key_for(args, kwargs)
     with immediate_transaction(rt.engine) as conn:
-        acquired = semaphore.acquire(conn, key, spec.limit, spec.duration)
-        if not acquired and spec.on_conflict == "discard":
-            return None
-        job_id = _insert_job(conn, job, args_blob, effective_scheduled, key)
-        if acquired:
-            _insert_ready(conn, job_id, job)
-        else:
-            conn.execute(
-                insert(_blocked).values(
-                    job_id=job_id,
-                    queue_name=job.queue_name,
-                    priority=job.priority,
-                    concurrency_key=key,
-                    expires_at=now + timedelta(seconds=spec.duration),
-                )
-            )
-    return job_id
+        return route_concurrent(conn, job, args_blob, effective_scheduled, spec, key, now)

@@ -2,7 +2,7 @@
 
 ## Schema
 
-One table, `firm_messages`:
+One table, `firm_channel_messages`:
 
 ```
 id            autoincrement PK, the delivery cursor
@@ -58,14 +58,14 @@ than waiting out the poll interval.
 
 ## Trimming
 
-`firm_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
+`firm_channel_messages` is an ephemeral buffer, not a log, so old rows are deleted. Each broadcast has
 a ~`2 / trim_batch_size` chance (≈ 2% at the default batch of 100) of submitting a **trim** to a
 single background thread — the same probabilistic trigger the cache uses for eviction. A trim is:
 
 ```sql
-SELECT id FROM firm_messages WHERE created_at < :cutoff
+SELECT id FROM firm_channel_messages WHERE created_at < :cutoff
   FOR UPDATE SKIP LOCKED LIMIT :batch_size;   -- SKIP LOCKED on PG/MySQL; BEGIN IMMEDIATE on SQLite
-DELETE FROM firm_messages WHERE id IN (...);
+DELETE FROM firm_channel_messages WHERE id IN (...);
 ```
 
 `SKIP LOCKED` (via the shared dialect seam) means several processes can trim concurrently without

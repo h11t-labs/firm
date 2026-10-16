@@ -10,17 +10,17 @@ from firm._core.database import immediate_transaction
 from firm.queue import schema
 
 EXPECTED_TABLES = {
-    "firm_jobs",
-    "firm_ready_executions",
-    "firm_claimed_executions",
-    "firm_scheduled_executions",
-    "firm_blocked_executions",
-    "firm_failed_executions",
-    "firm_semaphores",
-    "firm_pauses",
-    "firm_processes",
-    "firm_recurring_tasks",
-    "firm_recurring_executions",
+    "firm_queue_jobs",
+    "firm_queue_ready_executions",
+    "firm_queue_claimed_executions",
+    "firm_queue_scheduled_executions",
+    "firm_queue_blocked_executions",
+    "firm_queue_failed_executions",
+    "firm_queue_semaphores",
+    "firm_queue_pauses",
+    "firm_queue_processes",
+    "firm_queue_recurring_tasks",
+    "firm_queue_recurring_executions",
 }
 
 
@@ -38,22 +38,22 @@ def test_sqlite_pragmas_applied(engine: Engine, is_sqlite: bool) -> None:
 
 
 def test_ready_execution_job_id_is_unique(engine: Engine) -> None:
-    indexes = inspect(engine).get_indexes("firm_ready_executions")
+    indexes = inspect(engine).get_indexes("firm_queue_ready_executions")
     unique = {ix["name"] for ix in indexes if ix["unique"]}
-    assert "index_firm_ready_executions_on_job_id" in unique
+    assert "index_firm_queue_ready_executions_on_job_id" in unique
 
 
 def test_recurring_executions_dedupe_index(engine: Engine) -> None:
-    rows = inspect(engine).get_indexes("firm_recurring_executions")
+    rows = inspect(engine).get_indexes("firm_queue_recurring_executions")
     indexes = {ix["name"]: ix for ix in rows}
-    idx = indexes["index_firm_recurring_executions_on_task_key_and_run_at"]
+    idx = indexes["index_firm_queue_recurring_executions_on_task_key_and_run_at"]
     assert idx["unique"]
     assert idx["column_names"] == ["task_key", "run_at"]
 
 
 def test_execution_tables_reference_jobs(engine: Engine) -> None:
-    fks = inspect(engine).get_foreign_keys("firm_ready_executions")
-    assert any(fk["referred_table"] == "firm_jobs" for fk in fks)
+    fks = inspect(engine).get_foreign_keys("firm_queue_ready_executions")
+    assert any(fk["referred_table"] == "firm_queue_jobs" for fk in fks)
 
 
 def test_foreign_key_cascade_deletes_executions(engine: Engine) -> None:
@@ -79,5 +79,5 @@ def test_immediate_transaction_commits(engine: Engine) -> None:
     with immediate_transaction(engine) as conn:
         conn.execute(insert(schema.semaphores).values(key="k", value=1, expires_at=now_utc()))
     with engine.connect() as conn:
-        count = conn.execute(text("SELECT COUNT(*) FROM firm_semaphores")).scalar()
+        count = conn.execute(text("SELECT COUNT(*) FROM firm_queue_semaphores")).scalar()
     assert count == 1

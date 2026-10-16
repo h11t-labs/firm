@@ -1,0 +1,67 @@
+# Changelog — firm-cache
+
+All notable changes to `firm-cache` are documented here.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- The `encryption` extra now requires `cryptography>=50.0.0`, incorporating the latest
+  cryptography fixes and dropping older cryptography releases from the supported install set.
+
+### Added
+
+- `firm.cache.queries`: the read-query layer the dashboard used to keep to itself, now a supported
+  surface for your own dashboards, exporters, and health checks — `cache_stats` and `cache_recent`,
+  `Connection` in / dicts out. Keys come back as raw `bytes` (a cache key is arbitrary bytes), so
+  decoding for display is the caller's decision. A negative `limit`/`offset` raises `ValueError`.
+- `firm-cache trim` accepts `--max-age`, `--max-size`, `--max-entries`, and `--batch-size` so a
+  one-shot eviction can target specific limits instead of only the process defaults.
+
+### Fixed
+
+- `increment` (and `decrement`, which delegates to it) now triggers auto-expiry after committing,
+  matching every other write path. An increment-only workload (rate limiters, counters) previously
+  grew the table unbounded because no eviction pass was ever scheduled.
+
+## [1.1.0] - 2026-07-28
+
+### Added
+
+- `MsgpackCoder`: the value coder the `firm-cache[msgpack]` extra was already advertising, now
+  shipped. Same value shapes as the JSON default in a compact binary form, and just as safe to
+  decode (no code execution on load). `from firm.cache import MsgpackCoder`.
+  Payloads carry a one-byte `0xc1` tag so that rows written by another coder read as misses
+  instead of being misdecoded — without it, a JSON-written int `1` (the byte `b"1"`) is a valid
+  msgpack fixint and would read back as `49`. Readers outside firm must strip that byte.
+
+## [1.0.0] - 2026-07-23
+
+First stable release: the PyPI classifier moves to **Production/Stable** and the
+inter-package pins to `~=1.0.0`.
+
+### Changed
+
+- **Breaking:** the cache table is renamed `firm_entries` → `firm_cache_entries` to match the
+  workspace `firm_<module>_<entity>` table convention, and its secondary indexes are renamed to
+  match (`index_firm_entries_*` → `index_firm_cache_entries_*`). Migration `0002` renames the table
+  and its indexes in place (existing rows preserved). Direct-SQL consumers, least-privilege `GRANT`
+  recipes, and anything referencing these names must be updated. A database migrated from 0.1.0
+  keeps its original Postgres sequence name `firm_entries_id_seq`.
+
+## [0.1.0] - 2026-07-07
+
+### Added
+
+- Initial release: database-backed cache store, a pure-Python port of Rails'
+  [Solid Cache](https://github.com/rails/solid_cache) running on SQLite, PostgreSQL, or
+  MySQL/MariaDB.
+- FIFO eviction by age, size, and entry count; pluggable coders; optional at-rest encryption
+  (`firm-cache[encryption]`).
+- `fetch` with `force`/`skip_nil`, failure-safe reads, and a `firm-cache` CLI.
+
+[Unreleased]: https://github.com/h11t-labs/firm/compare/firm-cache-v1.0.0...HEAD
+[1.0.0]: https://github.com/h11t-labs/firm/compare/firm-cache-v0.1.0...firm-cache-v1.0.0
+[0.1.0]: https://github.com/h11t-labs/firm/releases/tag/firm-cache-v0.1.0

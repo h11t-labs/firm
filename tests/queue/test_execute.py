@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
 from sqlalchemy import Engine, insert, select
+from sqlalchemy.exc import IntegrityError
 
 import firm.queue as bq
 from firm._core.config import Runtime
 from firm.queue import schema
+from firm.queue.results import execute_claimed
+from firm.queue.serialization import serialize
 from firm.queue.worker import run_ready
 
 _SINK: list[int] = []
@@ -257,3 +261,90 @@ def test_worker_surfaces_every_infra_failure_in_a_batch(runtime: Runtime, monkey
 
     infra = sorted(str(e) for e in errors if str(e).startswith("infra-"))
     assert len(infra) == 2, f"expected both failures surfaced, got {errors!r}"
+
+
+@bq.job(attempts=1)
+def parity_always_fails() -> None:
+    raise ValueError("kaboom")
+
+
+def test_fail_with_existing_failed_execution_updates_not_inserts(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: claimed_execution_test.rb "fail with error when a failed execution already exists
+    # updates the existing one". A second failure of an already-failed job updates the existing
+    # failed_executions row in place rather than inserting a duplicate (UNIQUE(job_id) intact).
+    parity_always_fails.enqueue()
+    run_ready(runtime)
+    assert count(schema.failed_executions) == 1
+
+    with engine.connect() as conn:
+        job_id = conn.execute(select(schema.failed_executions.c.job_id)).scalar()
+
+    # Re-claim the same job and run it through the failure path a second time.
+    with engine.begin() as conn:
+        conn.execute(insert(schema.claimed_executions).values(job_id=job_id, process_id=None))
+
+    raised: Exception | None = None
+    try:
+        execute_claimed(runtime, job_id)
+    except IntegrityError as exc:
+        raised = exc
+
+    assert raised is None, (
+        "failing an already-failed job should update the existing "
+        f"failed_executions row, but firm raised: {raised!r}"
+    )
+    assert count(schema.failed_executions) == 1
+
+
+@bq.job(attempts=1)
+def parity_recurses_to_death() -> None:
+    def _recurse(n: int) -> int:
+        return _recurse(n + 1)
+
+    _recurse(0)
+
+
+def test_run_job_that_fails_with_recursion_error(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: failed_execution_test.rb "run job that fails with a SystemStackError". A job
+    # raising a deep recursion error (Python's analogue) is recorded as failed without blowing up
+    # serialization of the error.
+    assert sys.getrecursionlimit() > 0  # the test relies on Python actually raising RecursionError
+    parity_recurses_to_death.enqueue()
+
+    assert run_ready(runtime) == 1
+    assert count(schema.failed_executions) == 1
+    assert count(schema.claimed_executions) == 0
+
+    with engine.connect() as conn:
+        error = conn.execute(select(schema.failed_executions.c.error)).scalar()
+    assert error is not None
+    assert "RecursionError" in error
+
+
+def test_perform_missing_class_with_concurrency_key_fails_gracefully(
+    runtime: Runtime, engine: Engine, count: Callable[..., int]
+) -> None:
+    # upstream: claimed_execution_test.rb "perform concurrency-controlled job with missing class
+    # fails gracefully". An unregistered class -- even with a concurrency_key on the job row -- is
+    # recorded as failed without deadlocking or leaking the semaphore.
+    with engine.begin() as conn:
+        job_id = conn.execute(
+            insert(schema.jobs).values(
+                queue_name="default",
+                class_name="nope.MissingPerform",
+                arguments=serialize((), {}),
+                concurrency_key="MissingPerform/abc",
+            )
+        ).inserted_primary_key[0]
+        conn.execute(
+            insert(schema.ready_executions).values(job_id=job_id, queue_name="default", priority=0)
+        )
+
+    assert run_ready(runtime) == 1
+    assert count(schema.failed_executions) == 1
+    assert count(schema.claimed_executions) == 0
+    assert count(schema.semaphores) == 0

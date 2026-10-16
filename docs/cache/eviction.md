@@ -14,6 +14,11 @@ Set any to `None` to disable it:
 Cache(database_url=..., max_age=3600, max_size=None, max_entries=100_000)
 ```
 
+`max_size` counts *serialized* bytes, so your [coder](encryption-and-coders.md) sets how much fits:
+`MsgpackCoder` writes typical values about a third smaller than the JSON default, and at-rest
+encryption adds ~170 bytes per entry. If the cache is trimming sooner than you'd like, that's a
+cheaper lever than raising the limit.
+
 `max_age` is also enforced at **read time**: an entry older than `max_age` reads as a miss
 (`get` returns `None`, `fetch` recomputes) even if eviction hasn't physically deleted the row
 yet — eviction is opportunistic, so an idle or read-heavy cache would otherwise keep serving

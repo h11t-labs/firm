@@ -9,7 +9,7 @@ from firm.audit import AuditLog, events
 
 
 def test_public_api_has_no_update_or_delete() -> None:
-    assert audit_pkg.__all__ == ["AuditLog", "Ref", "__version__", "record"]
+    assert audit_pkg.__all__ == ["AuditLog", "IntegrityAlert", "Ref", "__version__", "record"]
     assert not hasattr(audit_pkg, "update")
     assert not hasattr(audit_pkg, "delete")
     assert not hasattr(AuditLog, "update")
