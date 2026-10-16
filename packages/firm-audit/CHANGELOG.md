@@ -14,7 +14,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   and isolated restores with source provenance. Native SQL restores retain row signatures and
   their exact JSON bytes; event archives do not recreate seals or external anchors.
 - Migration `0003` adds an opt-in persisted archive-before-prune policy. Both plain and
-  seal-aligned retention keep unarchived rows, including the pre-activation prefix.
+  seal-aligned retention keep unarchived rows, including the pre-activation prefix. Eligibility
+  is one query per batch or seal range; `Retention.last_blocked_unarchived` counts the expired
+  rows a run kept for the guard, with an "archiver looks stalled" `on_error` alert past 1,000.
 
 - `firm.audit.queries`: the read-query layer the dashboard used to keep to itself, now a supported
   surface for your own dashboards, exporters, and health checks. Paginated, sortable

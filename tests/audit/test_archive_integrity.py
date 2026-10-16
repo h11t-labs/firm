@@ -19,9 +19,13 @@ STREAM = str(UUID(int=1))
 SECRET = "archive-integration-row-secret-0123456789"  # noqa: S105
 
 
-def test_signed_range_waits_for_every_archive_member(db_url, archive, at_time):
+def test_signed_range_waits_for_every_archive_member(db_url, archive, at_time, monkeypatch):
     old = now_utc() - timedelta(hours=2)
-    with AuditLog(db_url, mac_key=SECRET, max_age=3600, grace=0) as protected:
+    alerts = []
+    monkeypatch.setattr("firm.audit.retention._SKIP_ALERT_THRESHOLD", 1)
+    with AuditLog(
+        db_url, mac_key=SECRET, max_age=3600, grace=0, on_error=alerts.append
+    ) as protected:
         # Activation's legacy prefix is deleted with the range, so it needs archival too.
         with at_time(old), transaction(protected.engine) as conn:
             events.append(conn, action="legacy")
@@ -34,6 +38,13 @@ def test_signed_range_waits_for_every_archive_member(db_url, archive, at_time):
         worker.enable()
         worker.run_once(batch_size=1)
         assert protected.retention.run_once() == 0
+        # The whole expired range is held back, and the run says so rather than silently
+        # returning 0 like a run with nothing to prune.
+        assert protected.retention.last_blocked_unarchived == 2
+        assert [str(alert) for alert in alerts] == [
+            "audit retention kept 2 expired rows that are not yet in a verified archive batch; "
+            "the archiver looks stalled"
+        ]
         assert len(protected.history()) == 2
         with transaction(protected.engine) as conn:
             assert not conn.execute(
@@ -41,6 +52,8 @@ def test_signed_range_waits_for_every_archive_member(db_url, archive, at_time):
             ).all()
         worker.run_once(batch_size=1)
         assert protected.retention.run_once() == 2
+        assert protected.retention.last_blocked_unarchived == 0
+        assert len(alerts) == 1
         assert worker.status()["unarchived"] == 0
         with transaction(protected.engine) as conn:
             assert not conn.execute(select(schema.archive_members)).all()
@@ -115,3 +128,29 @@ def test_restore_refuses_existing_integrity_state(audit, archive, tmp_path):
         assert target.sealer.run_once() == 0
         with pytest.raises(ValueError, match="integrity"):
             restore_sql(archive, [receipt], target)
+
+
+def test_aligned_prune_eligibility_is_one_query_per_range(db_url, archive, at_time):
+    from tests.audit.test_archives import _statements
+
+    old = now_utc() - timedelta(hours=2)
+    with AuditLog(db_url, mac_key=SECRET, max_age=3600, grace=0) as protected:
+        assert protected.sealer.run_once() == 0  # activation on an empty log
+        worker = SQLArchiver(protected, archive, stream=STREAM)
+        worker.enable()
+
+        def cycle(n):
+            with at_time(old):
+                for i in range(n):
+                    protected.record(f"signed-{i}")
+            with patch("firm.audit.sealing.now_utc", lambda: old):
+                assert protected.sealer.run_once() == n
+            assert worker.run_once(batch_size=n) is not None
+            pruned, statements = _statements(protected.engine, protected.retention.run_once)
+            assert pruned == n
+            return statements
+
+        small, large = cycle(10), cycle(50)
+        # A per-row eligibility read would add two statements per extra row (80 here); the
+        # second cycle differs only by the floor checks an earlier prune leaves behind.
+        assert large - small <= 2

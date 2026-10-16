@@ -230,8 +230,12 @@ with idempotent publication, not a distributed transaction.
 Acknowledgement clears frozen payloads from SQL while retaining receipts. Pruning deletes only
 verified eligible rows older than `max_age`, and removes their live membership references.
 Unexported/failed rows remain. Monitor backlog and SQL capacity during S3 outages; there is no
-silent dropping. Independent deletion/expiry of the archive invalidates the guard's storage
-assumption. Archive retention must cover your total required retention period.
+silent dropping: after each run `audit.retention.last_blocked_unarchived` reports how many expired
+rows were kept because they are not yet in a verified archive batch, and above 1,000 the run
+routes an "archiver looks stalled" alert through `on_error`, like the unsealed-row alert.
+Eligibility costs one query per pruning batch or seal range. Independent deletion/expiry of the
+archive invalidates the guard's storage assumption. Archive retention must cover your total
+required retention period.
 
 ## CLI and dashboard
 

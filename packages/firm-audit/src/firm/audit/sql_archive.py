@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy import Connection, func, inspect, select, update
+from sqlalchemy import Connection, and_, func, inspect, select, update
 
 from .._core.database import transaction
 from .._core.dialects import get_dialect
@@ -17,9 +18,15 @@ from .log import AuditLog
 from .object_store import ObjectConflict, Receipt, digest
 
 
-def lock_policy(conn: Connection) -> Any:
-    """Serialize policy activation, selection, and pruning on one tiny coordination row."""
-    if not inspect(conn).has_table(schema.archive_policy.name):
+def lock_policy(conn: Connection, *, schema_present: bool | None = None) -> Any:
+    """Serialize policy activation, selection, and pruning on one tiny coordination row.
+
+    ``schema_present`` lets a caller that opens one transaction per batch inspect the schema
+    once instead of on every iteration; ``None`` inspects here.
+    """
+    if schema_present is None:
+        schema_present = inspect(conn).has_table(schema.archive_policy.name)
+    if not schema_present:
         return None  # An existing pre-archive deployment remains supported.
     policy = conn.execute(
         select(schema.archive_policy).where(schema.archive_policy.c.id == "1").with_for_update()
@@ -43,12 +50,11 @@ def import_provenance(conn: Connection, event_id: int) -> dict[str, Any] | None:
     return json.loads(value) if value is not None else None
 
 
-def source_entry(
-    conn: Connection, stream: str, row: Any, *, include_import_metadata: bool = True
-) -> dict[str, Any]:
+def entry_for(stream: str, row: Any, provenance: dict[str, Any] | None) -> dict[str, Any]:
+    """Build a stored row's archive entry; ``provenance`` is its import record, if any."""
     event = events._row_to_dict(row)
-    if include_import_metadata:
-        event["provenance"] = import_provenance(conn, row.id)
+    if provenance is not None:
+        event["provenance"] = provenance
     entry = sql_entry(stream, event)
     # MACs cover the stored JSON strings, including their whitespace/order. Never re-encode
     # these bytes when copying a SQL row, even if they decode to the same Python payload.
@@ -61,19 +67,53 @@ def source_entry(
     return entry
 
 
-def eligible(conn: Connection, row: Any, stream: str) -> bool:
-    """Match content, not just a potentially reused SQLite integer ID."""
-    fp = fingerprint(source_entry(conn, stream, row))
-    member = schema.archive_members
-    batches = schema.archive_batches
-    return (
-        conn.execute(
-            select(member.c.fingerprint)
-            .join(batches, member.c.batch_id == batches.c.id)
-            .where(member.c.fingerprint == fp, batches.c.receipt.is_not(None))
-        ).first()
-        is not None
+def source_entry(
+    conn: Connection, stream: str, row: Any, *, include_import_metadata: bool = True
+) -> dict[str, Any]:
+    provenance = import_provenance(conn, row.id) if include_import_metadata else None
+    return entry_for(stream, row, provenance)
+
+
+def verified_ids(
+    conn: Connection, stream: str, rows: Sequence[Any], *, span: tuple[int, int] | None = None
+) -> set[int]:
+    """IDs among ``rows`` whose exact content sits in a verified archive batch, in one query.
+
+    Matches content, not just a potentially reused SQLite integer ID: the stored fingerprint
+    covers the row bytes, its signature columns, and any import provenance, so it is recomputed
+    here from the same inputs. ``span`` selects the members in ``(low, high]`` by range (a whole
+    seal range); otherwise the rows' IDs are listed.
+    """
+    if not rows:
+        return set()
+    member, batches, imports = (
+        schema.archive_members,
+        schema.archive_batches,
+        schema.archive_imports,
     )
+    predicate = (
+        and_(member.c.event_id > span[0], member.c.event_id <= span[1])
+        if span is not None
+        else member.c.event_id.in_([row.id for row in rows])
+    )
+    archived = {
+        event_id: (stored, json.loads(raw) if raw is not None else None)
+        for event_id, stored, raw in conn.execute(
+            select(member.c.event_id, member.c.fingerprint, imports.c.provenance)
+            .select_from(
+                member.join(batches, member.c.batch_id == batches.c.id).outerjoin(
+                    imports, imports.c.event_id == member.c.event_id
+                )
+            )
+            .where(predicate, batches.c.receipt.is_not(None))
+        )
+    }
+    return {
+        row.id
+        for row in rows
+        if row.id in archived
+        and fingerprint(entry_for(stream, row, archived[row.id][1])) == archived[row.id][0]
+    }
 
 
 class SQLArchiver:

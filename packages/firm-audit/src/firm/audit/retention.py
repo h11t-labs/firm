@@ -15,6 +15,13 @@ between leaves the anchor floor leading the database — with the rows and their
 still fully present. Both retention and verify recognize that state as an interrupted prune
 (rather than tampering): retention resumes it from the database floor after re-validating the
 ranges, and verify reports a warning until it does.
+
+With a persisted archive policy (``firm.audit.sql_archive.SQLArchiver.enable``), both paths keep
+every expired row whose exact content is not yet in a verified archive batch; the aligned path
+stops at the first range holding such a row. Eligibility is one query per batch or range.
+``last_blocked_unarchived`` reports how many expired rows a run kept for that reason, and past
+``_SKIP_ALERT_THRESHOLD`` the run routes an "archiver looks stalled" alert through ``on_error``,
+like the unsealed-row alert — so a stalled archiver never silently halts pruning.
 """
 
 from __future__ import annotations
@@ -59,12 +66,14 @@ class Retention:
     def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
         self.last_skipped_unsealed = 0
+        self.last_blocked_unarchived = 0
         self.last_refused_tampered = 0
         self.last_refused_no_seal_key = False
         self.last_refused_no_activation = False
 
     def run_once(self) -> int:
         self.last_skipped_unsealed = 0
+        self.last_blocked_unarchived = 0
         self.last_refused_tampered = 0
         self.last_refused_no_seal_key = False
         self.last_refused_no_activation = False
@@ -93,15 +102,17 @@ class Retention:
             )
 
     def _run_plain(self, cutoff: datetime) -> int:
+        from .sql_archive import lock_policy, verified_ids
+
         engine = self.audit.engine
         dialect = get_dialect(engine)
         total = 0
         offset = 0
+        schema_present: bool | None = None  # inspected once, on the first batch
         while True:
             with dialect.begin_claim_tx(engine) as conn:
-                from .sql_archive import eligible, lock_policy
-
-                policy = lock_policy(conn)
+                policy = lock_policy(conn, schema_present=schema_present)
+                schema_present = policy is not None
                 stmt = dialect.with_skip_locked(
                     select(_audits)
                     .where(_audits.c.created_at < cutoff)
@@ -110,12 +121,16 @@ class Retention:
                     .limit(_BATCH_SIZE)
                 )
                 rows = conn.execute(stmt).all()
-                ids = [
-                    row.id
-                    for row in rows
-                    if not policy or not policy.stream or eligible(conn, row, policy.stream)
-                ]
+                if policy is not None and policy.stream:
+                    # One unlocked eligibility read per batch; the archive tables never join the
+                    # SKIP LOCKED select (PostgreSQL rejects FOR UPDATE on an outer join's
+                    # nullable side).
+                    archived = verified_ids(conn, policy.stream, rows)
+                    ids = [row.id for row in rows if row.id in archived]
+                else:
+                    ids = [row.id for row in rows]
                 offset += len(rows) - len(ids)
+                self.last_blocked_unarchived += len(rows) - len(ids)
                 if ids:
                     conn.execute(delete(_audits).where(_audits.c.id.in_(ids)))
                     if policy is not None:
@@ -131,6 +146,7 @@ class Retention:
                         )
             total += len(ids)
             if len(rows) < _BATCH_SIZE:
+                self._alert_if_blocked_over_threshold()
                 return total
 
     def _run_aligned(self, cutoff: datetime) -> int:
@@ -154,7 +170,7 @@ class Retention:
 
         deleted = 0
         with snapshot_transaction(self.audit.engine, write=True) as conn:
-            from .sql_archive import eligible, lock_policy
+            from .sql_archive import lock_policy, verified_ids
 
             policy = lock_policy(conn)
             dialect = get_dialect(self.audit.engine)
@@ -278,6 +294,7 @@ class Retention:
 
             through = floor
             archive_checked_through = 0
+            blocked_by_archive = False
             for record in covering:
                 assert record.sealed_at is not None
                 if record.sealed_at >= cutoff:
@@ -289,16 +306,30 @@ class Retention:
                 if policy is not None and policy.stream:
                     # Include the pre-activation prefix too: the eventual delete covers every
                     # row through the new floor, not just rows belonging to the newest seal.
+                    span = (archive_checked_through, record.to_id)
                     candidates = conn.execute(
-                        select(_audits).where(
-                            _audits.c.id > archive_checked_through,
-                            _audits.c.id <= record.to_id,
-                        )
-                    )
-                    if any(not eligible(conn, row, policy.stream) for row in candidates):
+                        select(_audits).where(_audits.c.id > span[0], _audits.c.id <= span[1])
+                    ).all()
+                    if len(verified_ids(conn, policy.stream, candidates, span=span)) != len(
+                        candidates
+                    ):
+                        blocked_by_archive = True
                         break
                     archive_checked_through = record.to_id
                 through = record.to_id
+            if blocked_by_archive:
+                # Everything expired between the stop point and the sealed high-water mark is
+                # held back by the guard — the counterpart of ``last_skipped_unsealed`` above.
+                self.last_blocked_unarchived = conn.execute(
+                    select(func.count())
+                    .select_from(_audits)
+                    .where(
+                        _audits.c.id > through,
+                        _audits.c.id <= max_sealed,
+                        _audits.c.created_at < cutoff,
+                    )
+                ).scalar_one()
+                self._alert_if_blocked_over_threshold()
             if through <= floor:
                 return 0
 
@@ -398,6 +429,15 @@ class Retention:
                 RuntimeError(
                     f"audit retention skipped {self.last_skipped_unsealed} expired but UNSEALED "
                     "rows; the sealer looks stalled"
+                )
+            )
+
+    def _alert_if_blocked_over_threshold(self) -> None:
+        if self.last_blocked_unarchived > _SKIP_ALERT_THRESHOLD:
+            self.audit.on_error(
+                RuntimeError(
+                    f"audit retention kept {self.last_blocked_unarchived} expired rows that are "
+                    "not yet in a verified archive batch; the archiver looks stalled"
                 )
             )
 

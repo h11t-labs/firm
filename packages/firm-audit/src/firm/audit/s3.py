@@ -176,6 +176,40 @@ class S3AuditLog:
         Filters never change scan budgets. A fresh scan may be needed for concurrent/backdated
         insertions. Changing budgets/limit when resuming is allowed; changing filters is not.
         """
+        page, _ = self._scan(
+            start=start,
+            end=end,
+            limit=limit,
+            max_objects=max_objects,
+            max_requests=max_requests,
+            continuation=continuation,
+            action=action,
+            subject_type=subject_type,
+            subject_id=subject_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            correlation_id=correlation_id,
+        )
+        return page
+
+    def _scan(
+        self,
+        *,
+        start: date,
+        end: date,
+        limit: int,
+        max_objects: int,
+        max_requests: int,
+        continuation: str | None,
+        action: str | None = None,
+        subject_type: str | None = None,
+        subject_id: str | None = None,
+        actor_type: str | None = None,
+        actor_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> tuple[ScanPage, dict[str, tuple[bytes, str | None]]]:
+        """``scan`` plus each returned item's stored bytes and version, keyed by object key, so
+        an exporter can copy exactly what it already read instead of fetching it again."""
         if start >= end or (end - start).days > 366:
             raise ValueError("scan requires a nonempty date range of at most 366 days")
         if (
@@ -205,6 +239,7 @@ class S3AuditLog:
             except (TypeError, IndexError) as exc:
                 raise ValueError("invalid continuation position") from exc
         items: list[dict[str, Any]] = []
+        stored: dict[str, tuple[bytes, str | None]] = {}
         scanned = requests = 0
         while day < end and scanned < max_objects and requests + 2 <= max_requests:
             prefix = f"{self.event_prefix}{day.isoformat()}/"
@@ -216,7 +251,8 @@ class S3AuditLog:
             for key in keys:
                 if requests >= max_requests or scanned >= max_objects or len(items) >= limit:
                     break
-                event = self.get(key)
+                body, version = self.store.read(key)
+                event = self._decode(key, body)
                 scanned += 1
                 requests += 1
                 consumed += 1
@@ -225,13 +261,14 @@ class S3AuditLog:
                     value is None or event[field] == str(value) for field, value in filters.items()
                 ):
                     items.append(event)
+                    stored[key] = (body, version)
             if consumed == len(keys) and complete:
                 day, after = day + timedelta(days=1), ""
             if len(items) >= limit:
                 break
         exhausted = day >= end
         token = None if exhausted else token_encode(query, [day.isoformat(), after])
-        return ScanPage(items, token, exhausted, scanned, requests)
+        return ScanPage(items, token, exhausted, scanned, requests), stored
 
     def close(self) -> None:
         self.store.close()

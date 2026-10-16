@@ -270,3 +270,88 @@ def test_overlap_rejects_conflicting_original_provenance(audit, archive):
     second = archive.publish([conflicting])
     with pytest.raises(ObjectConflict, match="identity"):
         archive.read_many([first, second])
+
+
+def _statements(engine, action):
+    """Count the SQL statements ``engine`` executes while ``action`` runs."""
+    from sqlalchemy import event
+
+    count = 0
+
+    def hook(*args):
+        nonlocal count
+        count += 1
+
+    event.listen(engine, "before_cursor_execute", hook)
+    try:
+        return action(), count
+    finally:
+        event.remove(engine, "before_cursor_execute", hook)
+
+
+def test_plain_prune_eligibility_is_one_query_per_batch(audit, archive):
+    worker = archiver(audit, archive)
+    audit.max_age = -1
+
+    def cycle(n):
+        for i in range(n):
+            audit.record(f"event-{i}")
+        assert worker.run_once(batch_size=n) is not None
+        pruned, statements = _statements(audit.engine, audit.retention.run_once)
+        assert pruned == n
+        return statements
+
+    # A per-row eligibility read would add two statements per extra row (80 here).
+    assert cycle(50) == cycle(10)
+
+
+def test_plain_prune_reports_rows_blocked_by_archive_guard(audit, archive, monkeypatch):
+    alerts = []
+    audit.on_error = alerts.append
+    monkeypatch.setattr("firm.audit.retention._SKIP_ALERT_THRESHOLD", 2)
+    for i in range(6):
+        audit.record(f"event-{i}")
+    worker = archiver(audit, archive)
+    worker.run_once(batch_size=2)
+    audit.max_age = -1
+    assert audit.retention.run_once() == 2
+    assert audit.retention.last_blocked_unarchived == 4
+    assert [str(alert) for alert in alerts] == [
+        "audit retention kept 4 expired rows that are not yet in a verified archive batch; "
+        "the archiver looks stalled"
+    ]
+    worker.run_once(batch_size=4)
+    assert audit.retention.run_once() == 4
+    assert audit.retention.last_blocked_unarchived == 0
+    assert len(alerts) == 1
+
+
+def test_restored_rows_with_import_provenance_archive_and_prune(audit, archive, s3_log):
+    from firm.audit.sql_archive import import_provenance
+
+    s3_log.record("origin", created_at=NOW)
+    exported = archive.export_s3(
+        s3_log, start=date(2020, 1, 1), end=date(2020, 1, 2), batch_id=str(uuid4())
+    )
+    assert restore_sql(archive, [exported], audit) == 1
+    with transaction(audit.engine) as conn:
+        assert import_provenance(conn, audit.history()[0]["id"])["source"] == "s3"
+    worker = archiver(audit, archive)
+    # The stored fingerprint covers the import provenance; pruning recomputes it the same way.
+    assert archive.read(worker.run_once())[0]["provenance"]["source"] == "s3"
+    audit.max_age = -1
+    assert audit.retention.run_once() == 1
+    assert audit.retention.last_blocked_unarchived == 0
+
+
+def test_export_s3_reads_each_source_object_once(s3_log, archive, object_client):
+    for _ in range(10):
+        s3_log.record("copied", created_at=NOW)
+    before = object_client.request_count
+    receipt = archive.export_s3(
+        s3_log, start=date(2020, 1, 1), end=date(2020, 1, 2), batch_id=str(uuid4())
+    )
+    # 1 LIST + 10 GET observe the source once. Publication then costs 8: PUT input, GET input
+    # (resume), PUT data, GET data (verify), PUT manifest, and the read-back of manifest + data.
+    assert object_client.request_count - before == 1 + 10 + 8
+    assert len(archive.read(receipt)) == 10

@@ -303,7 +303,7 @@ class Archive:
             if json.loads(frozen)["scope"]["query"] != query:
                 raise ObjectConflict("batch belongs to another export query")
             return self.resume(batch_id)
-        page = source.scan(
+        page, stored = source._scan(
             start=start,
             end=end,
             limit=1000,
@@ -313,15 +313,17 @@ class Archive:
         )
         entries = []
         for row in page.items:
-            raw, version = source.store.read(row["key"])
-            source._decode(row["key"], raw)
+            # The scan already read and decoded each object; its decoder proved the stored body
+            # is canonical and matches its key, so these bytes are the envelope to copy.
+            raw, version = stored[row["key"]]
+            envelope = json.loads(raw)
             entries.append(
                 {
                     "source": "s3",
                     "stream": source.stream,
                     "identity": row["key"],
-                    "event": json.loads(raw)["event"],
-                    "envelope": {k: v for k, v in json.loads(raw).items() if k != "event"},
+                    "event": envelope.pop("event"),
+                    "envelope": envelope,
                     "receipt": asdict(Receipt(row["key"], digest(raw), version)),
                 }
             )
