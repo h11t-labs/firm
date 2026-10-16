@@ -18,8 +18,11 @@ schema upgrade, and mounted/authenticated routes. Ruff, formatting, full type ch
 pre-commit, eight package builds, and a clean SQL wheel install without boto3 passed.
 Independent Standards and Spec reviews found no remaining integration findings.
 
-The complete integrated workspace suite is running; its final result will be recorded here
-before this PR is marked ready. The PR remains open and unmerged for the user.
+The full integrated workspace results and the current CI state are recorded in
+[PR #78](https://github.com/h11t-labs/firm/pull/78). The original full-suite numbers below
+belong to October 11 and must not be treated as current-main evidence. The PR is left open
+and unmerged for the user. The SDK is installed only in development/CI or by the optional
+product extra, so type checking and SDK tests run under the default development sync too.
 
 ## Original implementation validation — 11 October 2026
 

@@ -75,25 +75,29 @@ def test_signed_archive_restores_stored_bytes_and_row_mac(db_url, archive, at_ti
             assert row_mac(target._key, **fields) == signature
 
 
-def test_copy_export_and_migration_from_released_schema(tmp_path, archive):
-    url = f"sqlite:///{tmp_path / 'released.db'}"
+def test_copy_export_and_migration_from_released_schema(db_url, archive):
+    url = db_url
     from firm._core.database import create_engine_for
 
     engine = create_engine_for(url)
     try:
         # Materialize the released schema, not current metadata through the old baseline.
+        schema.drop_all(engine)
         for table in (schema.audit_events, schema.seals, schema.verify_status):
             table.create(engine)
         command.stamp(_config(url), "0002")
         assert not inspect(engine).has_table(schema.archive_imports.name)
-        with AuditLog(engine=engine, create_schema=False) as source:
+        with AuditLog(engine=engine, create_schema=False, mac_key=SECRET) as source:
             source.record("released")
+            with engine.connect() as conn:
+                original = dict(conn.execute(select(schema.audit_events)).one()._mapping)
             receipt = archive.export_sql(source, stream=STREAM, batch_id=str(uuid4()))
             assert archive.read(receipt)[0]["event"]["action"] == "released"
         command.upgrade(_config(url), "head")
         assert inspect(engine).has_table(schema.archive_imports.name)
         with transaction(engine) as conn:
             assert conn.execute(select(schema.archive_policy.c.stream)).scalar_one() is None
+            assert dict(conn.execute(select(schema.audit_events)).one()._mapping) == original
             assert (
                 conn.exec_driver_sql(
                     "SELECT version_num FROM firm_audit_alembic_version"
