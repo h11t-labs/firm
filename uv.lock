@@ -20,6 +20,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
+    { name = "boto3", specifier = ">=1.36" },
     { name = "click", specifier = ">=8.1" },
     { name = "croniter", specifier = ">=6.2.4" },
     { name = "cryptography", specifier = ">=50.0.0" },
