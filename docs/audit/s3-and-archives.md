@@ -286,7 +286,7 @@ application request state, never only on the pod filesystem.
 The provider must support general-purpose-bucket style lexicographic LIST/StartAfter, conditional
 creation, and compatible error handling. Directory-bucket/Express traversal is not supported.
 Version IDs, Object Lock, credentials, and checksums must be verified per provider. AWS S3
-capabilities are documented in the primary sources linked in the repository research note;
+capabilities are documented in the primary sources linked in the [research note](s3-research.md);
 compatibility of another endpoint must be tested, not inferred from its URL.
 
 Opt-in tests use `FIRM_TEST_S3_BUCKET` and optionally `FIRM_TEST_S3_ENDPOINT`, SDK credentials,

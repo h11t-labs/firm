@@ -51,6 +51,7 @@ nav = [
     { "Tamper-evidence" = "audit/tamper-evidence.md" },
     { "Configuration" = "audit/configuration.md" },
     { "S3 & archives" = "audit/s3-and-archives.md" },
+    { "S3 provider research" = "audit/s3-research.md" },
     { "CLI" = "audit/cli.md" },
     { "Internals" = "audit/internals.md" },
   ] },

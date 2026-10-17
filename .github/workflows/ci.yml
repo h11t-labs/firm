@@ -1,6 +1,6 @@
-# Full CI: lint + types, the test suite on SQLite across supported Pythons, and the same
-# suite against live PostgreSQL and MySQL (the conftests pick up FIRM_TEST_*_URL and run
-# every database-touching test against each backend).
+# Full CI: lint + types, the test suite on SQLite across supported Pythons, the same suite
+# against live PostgreSQL and MySQL (the conftests pick up FIRM_TEST_*_URL and run every
+# database-touching test against each backend), and the opt-in S3 tests against live MinIO.
 name: CI
 
 on:
@@ -100,15 +100,51 @@ jobs:
       - name: Run tests (SQLite + PostgreSQL + MySQL)
         run: uv run pytest
 
+  # The fake-backed S3 tests already run in every job above (boto3 is a dev dependency). This
+  # job adds the real-provider round-trip: audit immutability rests on the provider rejecting
+  # a second `If-None-Match: *` PUT, which only a live server can show.
   test-s3:
     runs-on: ubuntu-latest
+    services:
+      minio:
+        # minio/minio was removed from Docker Hub (Sept 2026) and quay.io refuses anonymous
+        # pulls, so this is a from-source build of the last community release, pinned by digest.
+        image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
+        command: server /data
+        env:
+          MINIO_ROOT_USER: firm
+          MINIO_ROOT_PASSWORD: firm-test-secret
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "mc ready local"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      FIRM_TEST_S3_BUCKET: firm-test
+      FIRM_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      AWS_ACCESS_KEY_ID: firm
+      AWS_SECRET_ACCESS_KEY: firm-test-secret
+      AWS_REGION: us-east-1
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.0
-      - name: Sync optional S3 SDK
-        run: uv sync --locked --all-extras
-      - name: Test S3 contracts, SQL archives, and mounted dashboard
-        run: >-
-          uv run pytest tests/audit/test_s3.py tests/audit/test_archives.py
-          tests/audit/test_archive_integrity.py tests/audit/test_storage_cli.py
-          tests/ui/test_s3_audit.py
+      - name: Sync workspace
+        run: uv sync --locked
+      - name: Create versioned test bucket
+        # The library never provisions buckets, and receipts carry a VersionId only when the
+        # bucket is versioned.
+        run: |
+          uv run python - <<'EOF'
+          import os
+
+          import boto3
+
+          s3 = boto3.client("s3", endpoint_url=os.environ["FIRM_TEST_S3_ENDPOINT"])
+          bucket = os.environ["FIRM_TEST_S3_BUCKET"]
+          s3.create_bucket(Bucket=bucket)
+          s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+          EOF
+      - name: Run live S3 tests (MinIO)
+        run: uv run pytest tests/audit/test_s3_integration.py -rs

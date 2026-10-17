@@ -4,11 +4,11 @@ Researched 10 October 2026. Scope: Amazon S3 general-purpose buckets unless stat
 
 ## Assessment
 
-Scope update, 11 October 2026: the implementation is now limited to **firm-audit**, with
-both an optional S3 primary backend alongside SQL and archival storage. The consolidated
-[S3-BACKEND-PLAN.md](S3-BACKEND-PLAN.md) governs API scope, sequencing, and acceptance criteria.
-The original recommendations and other-module comparison below are historical research context;
-they do not expand implementation scope. The AWS capability findings remain supporting evidence.
+The implementation is limited to **firm-audit**, with both an optional S3 primary backend
+alongside SQL and archival storage; [S3 & archives](s3-and-archives.md) documents its supported
+contract. The original recommendations and other-module comparison below are historical research
+context; they do not expand implementation scope. The AWS capability findings remain supporting
+evidence.
 
 S3 is a reasonable destination for immutable audit archives. A database-free audit writer is also possible, but would need a deliberately narrower contract for queries, ordering, transactions, and retention. A transparent replacement for the SQL backend across audit, queue, cache, and channel would require building substantial database and coordination machinery. Start with audit archival and keep SQL as the operational source of truth.
 
