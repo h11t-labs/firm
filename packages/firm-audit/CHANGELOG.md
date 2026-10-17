@@ -13,6 +13,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 - Verified S3 archives for SQL/S3 sources, resumable publication, deduplicated multi-batch reads,
   and isolated restores with source provenance. Native SQL restores retain row signatures and
   their exact JSON bytes; event archives do not recreate seals or external anchors.
+- S3 events can be signed: with `mac_key=`/`FIRM_AUDIT_KEY` each envelope carries an
+  HMAC-SHA256 and its `key_id`, verified on every read (retired keys included). Decoded events
+  report `signature` (`valid`/`unverified`/`unsigned`); a bad signature raises
+  `EventSignatureError`, and `require_signatures=True` also rejects unsigned or unknown-key
+  events. Archives keep the signature and count signed S3 events. Deletion is not detected
+  (use Object Lock).
 - `Archive.batches()` pages through an archive's batches with unverified manifest summaries
   (count, time range, signed rows) and flags staged-but-unpublished (`pending`) batches.
   Manifests record `signed`/`sources`, and `read()` rejects a summary that disagrees with the data.

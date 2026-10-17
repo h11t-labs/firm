@@ -10,6 +10,10 @@ It is off until you configure a key. **Without `FIRM_AUDIT_KEY`, the runtime beh
 is inert**: writes leave the evidence columns NULL and reads behave as before. The nullable columns
 and two side tables are always part of the migrated schema, independent of key configuration.
 
+This page covers the SQL log. The [S3 backend](s3-and-archives.md#signing-events) uses the same
+key to sign each event (the per-row layer only): no seals or anchors, so a deleted S3 event is
+not detected.
+
 ## Threat model
 
 The attacker has **full read/write access to the database** — a SQL console, leaked credentials,

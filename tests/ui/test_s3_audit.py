@@ -141,7 +141,7 @@ def test_sql_and_s3_audit_side_by_side(tmp_path):
         assert status == 200 and "invoice.paid" in s3 and "order.shipped" not in s3
         assert 'aria-current="page">S3<' in s3
         assert "firm-audit/" in s3 and "…0001" in s3  # prefix and stream in the source strip
-        assert "SHA-256 per object, not signed" in s3
+        assert "SHA-256 per object; signatures not checked" in s3  # no key in this reader
         # Type:id filters mean the same as on the SQL page, and row links build them.
         assert 'href="/audit/s3?start=2026-01-01&end=2026-01-01&subject=Invoice%3A42"' in s3
         status, filtered = _get(
@@ -264,5 +264,48 @@ def test_archive_shows_recorded_row_signatures(tmp_path):
         _, listing = _get(app, "/audit/archive")
         assert '<span class="sig-all">1 / 1</span>' in listing
         assert '<span class="muted">0 / 1</span>' in listing
+    finally:
+        dash.close()
+
+
+def test_signed_s3_events_show_their_check_in_list_detail_and_archive(monkeypatch):
+    key = "dashboard-s3-signing-key-0123456789abcdef"
+    client = MemoryS3()
+    writer = S3AuditLog("events", stream=str(UUID(int=1)), client=client, mac_key=key)
+    receipt = writer.record("signed.event", created_at=DAY)
+    S3AuditLog("events", stream=str(UUID(int=1)), client=client).record("plain", created_at=DAY)
+    archive = Archive(ObjectStore("archives", client=client))
+    batch = archive.export_s3(
+        writer, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
+    )
+    window = "start=2026-01-01&end=2026-01-01"
+
+    # A dashboard holding the key verifies on read.
+    monkeypatch.setenv("FIRM_AUDIT_KEY", key)
+    reader = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
+    dash = build_dashboard(audit_s3=reader, audit_archive=archive)
+    try:
+        app = DashboardApp(dash)
+        _, body = _get(app, "/audit/s3", window)
+        assert "HMAC-signed events, verified on read" in body
+        assert '<span class="sig signed"' in body and f"signed · key {writer.key_id}" in body
+        assert '<span class="sig unsigned"' in body  # the event written without a key
+        _, detail = _get(app, "/audit/object", urlencode({"key": receipt.key}))
+        assert ">signature<" in detail and f"signed · key {writer.key_id}" in detail
+        _, archived = _get(app, "/audit/archive", urlencode({"key": batch.key}))
+        assert archived.count('<span class="sig signed"') == 1  # the plain event stays a receipt
+        _, listing = _get(app, "/audit/archive")
+        assert '<span class="text-warn">1 / 2</span>' in listing
+    finally:
+        dash.close()
+
+    # Without the key the same signature is visibly "not checked", distinct from unsigned.
+    monkeypatch.delenv("FIRM_AUDIT_KEY")
+    keyless = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
+    dash = build_dashboard(audit_s3=keyless)
+    try:
+        _, body = _get(DashboardApp(dash), "/audit/s3", window)
+        assert "SHA-256 per object; signatures not checked" in body
+        assert '<span class="sig unverified"' in body and "not checked" in body
     finally:
         dash.close()

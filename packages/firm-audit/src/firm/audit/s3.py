@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -19,7 +20,10 @@ from .event_format import (
     wire_event,
 )
 from .events import Reference, _ref
-from .object_store import ObjectStore, Receipt, UnknownWriteOutcome
+from .integrity import HmacSigner, Key, add_key, load_key, parse_keyring, s3_event_mac
+from .object_store import ObjectConflict, ObjectStore, Receipt, UnknownWriteOutcome
+
+_MAC_HEX_LENGTH = 64
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,10 @@ class PreparedEvent:
 
     key: str
     body: str
+
+
+class EventSignatureError(ObjectConflict):
+    """An S3 event's signature does not verify or is malformed, or a required one is missing."""
 
 
 class UnknownEventOutcome(UnknownWriteOutcome):
@@ -59,12 +67,34 @@ class S3AuditLog:
         region: str | None = None,
         endpoint_url: str | None = None,
         client: Any = None,
+        mac_key: str | None = None,
+        require_signatures: bool = False,
     ) -> None:
         self.stream = uuid_text(stream)
+        # The same key rules as AuditLog: ``mac_key`` wins, else FIRM_AUDIT_KEY signs new events;
+        # it and FIRM_AUDIT_RETIRED_KEYS verify what is read. Loaded before the client exists so
+        # a bad key fails construction without leaking one.
+        self._key = load_key(mac_key if mac_key is not None else os.environ.get("FIRM_AUDIT_KEY"))
+        self._keyring: dict[str, Key] = {}
+        if self._key is not None:
+            add_key(self._keyring, self._key, source="FIRM_AUDIT_KEY")
+        for retired in parse_keyring(os.environ.get("FIRM_AUDIT_RETIRED_KEYS")).values():
+            add_key(self._keyring, retired, source="FIRM_AUDIT_RETIRED_KEYS")
+        self.require_signatures = require_signatures
         self.store = ObjectStore(
             bucket, prefix=prefix, region=region, endpoint_url=endpoint_url, client=client
         )
         self.event_prefix = f"{self.store.prefix}events/v1/{self.stream}/"
+
+    @property
+    def key_id(self) -> str | None:
+        """The ``key_id`` that signs new events, or ``None`` when writes are unsigned."""
+        return self._key.id if self._key is not None else None
+
+    @property
+    def verifies_signatures(self) -> bool:
+        """Whether this log holds any key to check signatures with (current or retired)."""
+        return bool(self._keyring)
 
     def prepare(
         self,
@@ -110,9 +140,13 @@ class S3AuditLog:
                 raise ValueError("invalid source provenance")
             uuid_text(provenance["stream"])
             envelope["provenance"] = provenance
+        body = canonical(envelope)
+        if self._key is not None:
+            # Signed once here, so every retry of this prepared event writes identical bytes.
+            envelope["sig"] = {"key_id": self._key.id, "mac": s3_event_mac(self._key, body)}
+            body = canonical(envelope)
         return PreparedEvent(
-            f"{self.event_prefix}{timestamp.date().isoformat()}/{ident}.json",
-            canonical(envelope).decode(),
+            f"{self.event_prefix}{timestamp.date().isoformat()}/{ident}.json", body.decode()
         )
 
     def _decode(self, key: str, body: bytes) -> dict[str, Any]:
@@ -121,6 +155,7 @@ class S3AuditLog:
             raise ValueError("event body must retain the canonical format produced by prepare()")
         if value.get("v") != 1 or value.get("stream") != self.stream:
             raise ValueError("unsupported event format or stream")
+        signature = self._check_signature(key, value)
         event = read_event(value["event"])
         ident = uuid_text(value["id"])
         expected = f"{self.event_prefix}{event['created_at'].date().isoformat()}/{ident}.json"
@@ -132,7 +167,43 @@ class S3AuditLog:
             "key": key,
             "stream": self.stream,
             "provenance": value.get("provenance"),
+            "signature": signature,
         }
+
+    def _check_signature(self, key: str, envelope: dict[str, Any]) -> dict[str, str | None]:
+        """Classify an envelope's signature: ``valid`` (verified with a configured key),
+        ``unverified`` (signed by a key this log does not hold), or ``unsigned``. A signature
+        that fails to verify, or is malformed, raises; so does anything but ``valid`` under
+        ``require_signatures``. The stored value is attacker-writable, so its shape is checked
+        before it reaches the MAC comparison."""
+        sig = envelope.get("sig")
+        signer: str | None = None
+        if sig is None:
+            state = "unsigned"
+        else:
+            if (
+                not isinstance(sig, dict)
+                or set(sig) != {"key_id", "mac"}
+                or not isinstance(sig["key_id"], str)
+                or not isinstance(sig["mac"], str)
+                or len(sig["mac"]) != _MAC_HEX_LENGTH
+            ):
+                raise EventSignatureError(f"malformed event signature at {key}")
+            signer = sig["key_id"]
+            signing_key = self._keyring.get(signer)
+            if signing_key is None:
+                state = "unverified"
+            else:
+                unsigned = canonical({k: v for k, v in envelope.items() if k != "sig"})
+                if not HmacSigner.tags_match(s3_event_mac(signing_key, unsigned), sig["mac"]):
+                    raise EventSignatureError(f"event signature does not verify at {key}")
+                state = "valid"
+        if self.require_signatures and state != "valid":
+            raise EventSignatureError(
+                f"event at {key} is {state}; require_signatures accepts only events "
+                "signed by a configured key"
+            )
+        return {"status": state, "key_id": signer}
 
     def write(self, prepared: PreparedEvent) -> Receipt:
         self._decode(prepared.key, prepared.body.encode())

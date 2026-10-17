@@ -20,6 +20,14 @@ from firm.queue.config import configure, set_runtime
 from firm.ui.context import Dashboard, build_dashboard
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_audit_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a developer's shell FIRM_AUDIT_KEY / retired keys out of every test; a test that
+    wants a key sets it explicitly (AuditLog and S3AuditLog both read them from the env)."""
+    monkeypatch.delenv("FIRM_AUDIT_KEY", raising=False)
+    monkeypatch.delenv("FIRM_AUDIT_RETIRED_KEYS", raising=False)
+
+
 @pytest.fixture
 def db_url(tmp_path) -> str:
     return f"sqlite:///{tmp_path / 'app.db'}"

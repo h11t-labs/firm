@@ -57,8 +57,12 @@ def entry_key(entry: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def signed_count(entries: list[dict[str, Any]]) -> int:
-    """Entries carrying a SQL row signature (the MAC recorded when the row was written)."""
-    return sum(1 for entry in entries if (entry.get("integrity") or {}).get("row_mac"))
+    """Entries carrying a signature: a SQL row MAC or an S3 event envelope's ``sig``."""
+    return sum(
+        1
+        for entry in entries
+        if (entry.get("integrity") or {}).get("row_mac") or (entry.get("envelope") or {}).get("sig")
+    )
 
 
 def _signing_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:

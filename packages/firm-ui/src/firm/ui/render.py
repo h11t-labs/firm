@@ -1174,6 +1174,9 @@ def audit_detail_page(
         ("correlation id", event["correlation_id"] if event["correlation_id"] else _dash()),
         ("recorded", _when(event["created_at"])),
     ]
+    # S3 events carry their read-time signature check; SQL rows use the integrity cell below.
+    if (sig := _event_signature(event.get("signature"))) is not None:
+        cells.append(("signature", _signature_markup(sig)))
     # The integrity cell only appears when tamper-evidence is in use (same gate as the table).
     if row_ctx is not None and row_ctx["active"]:
         status = row_status(event, row_ctx)
@@ -1275,6 +1278,7 @@ def s3_audit_page(
         {
             **_event_row(item),
             "href": urls.path("/audit/object") + "?" + urlencode({"key": item["key"]}),
+            "sig": _event_signature(item.get("signature")),
         }
         for item in page.items
     ]
@@ -1282,10 +1286,16 @@ def s3_audit_page(
     source = _source_view(
         "cloud",
         "S3",
-        "SHA-256 per object, not signed",
+        ("HMAC-signed events, verified on read" if log.key_id else "signatures verified on read")
+        if log.verifies_signatures
+        else "SHA-256 per object; signatures not checked",
         log.store,
         ("stream", f"…{stream[-4:]}"),
-        hint="Bounded scans in object-key order: no totals, sorting, or SQL-style row signatures",
+        *((("key", log.key_id),) if log.key_id else ()),
+        hint="Bounded scans in object-key order: no totals or sorting"
+        if log.verifies_signatures
+        else "No FIRM_AUDIT_KEY here: signed events show as not checked, and a forged unsigned "
+        "event cannot be told apart",
     )
     return _render(
         "audit_s3.html",
@@ -1376,12 +1386,52 @@ def archive_page(
     )
 
 
+def _event_signature(signature: dict[str, Any] | None) -> dict[str, Any] | None:
+    """How a live S3 event's signature checked out on read (see S3AuditLog._check_signature):
+    verified, signed by a key this dashboard does not hold, or unsigned."""
+    if signature is None:
+        return None
+    key_id = signature.get("key_id")
+    if signature["status"] == "valid":
+        return {
+            "kind": "signed",
+            "icon": Markup(_ICONS["shield-check"]),
+            "label": f"signed · key {key_id}",
+            "title": "HMAC verified with a configured key",
+        }
+    if signature["status"] == "unverified":
+        return {
+            "kind": "unverified",
+            "icon": Markup(_ICONS["shield-alert"]),
+            "label": f"key {key_id} · not checked",
+            "title": "Signed by a key this dashboard does not hold; set FIRM_AUDIT_KEY or "
+            "FIRM_AUDIT_RETIRED_KEYS to check it",
+        }
+    return {"kind": "unsigned", "icon": None, "label": "unsigned", "title": "No signature"}
+
+
+def _signature_markup(sig: dict[str, Any]) -> Markup:
+    """One signature as a ready-made ``.sig`` fragment for a detail-page cell."""
+    return Markup('<span class="sig {}" title="{}">{}{}</span>').format(
+        sig["kind"], sig["title"], sig["icon"] or "", sig["label"]
+    )
+
+
 def _signature(entry: dict[str, Any]) -> dict[str, Any]:
     """How an archived event is protected: a SQL row signature as recorded (shown, not
     re-checked here), no signature, or the S3 object's SHA-256 receipt."""
     if entry["source"] == "s3":
         receipt = entry.get("receipt") or {}
         version = receipt.get("version_id")
+        sig = (entry.get("envelope") or {}).get("sig") or {}
+        if sig.get("mac"):
+            return {
+                "kind": "signed",
+                "icon": Markup(_ICONS["shield-check"]),
+                "label": f"signed · key {sig.get('key_id')}",
+                "title": "Event HMAC recorded when it was written; the S3 log verifies it on "
+                "read with the same key",
+            }
         return {
             "kind": "receipt",
             "icon": Markup(_ICONS["shield"]),
@@ -1411,7 +1461,7 @@ def _signature(entry: dict[str, Any]) -> dict[str, Any]:
 def _batch_signing(batch: dict[str, Any]) -> dict[str, str] | None:
     """The batch list's Signed cell: S3 receipts, or signed rows out of the batch's events."""
     sources, signed, count = batch.get("sources"), batch.get("signed"), batch.get("count")
-    if sources == ["s3"]:
+    if sources == ["s3"] and not signed:
         return {"cls": "secondary", "text": "S3 receipts"}
     if signed is None or count is None:
         return None  # pending, unreadable, or a manifest written before signing summaries

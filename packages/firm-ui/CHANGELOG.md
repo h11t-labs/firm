@@ -16,6 +16,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `--audit-archive-prefix` defaults to `firm-audit`, matching `ObjectStore`.
 - The archive view lists the archive's batches (status, event count, time range, paged) and
   opens each as a verified batch, so no manifest key needs to be pasted.
+- The S3 view verifies event signatures when the dashboard has `FIRM_AUDIT_KEY`: a Signature
+  column (signed / not checked / unsigned), a signature cell on the event page, and a source
+  strip that says whether signatures are checked.
 - Signing is visible outside the database view: archived events show a recorded SQL row
   signature (with key ID), unsigned, or an S3 SHA-256 receipt; the batch list shows signed rows
   per batch; the S3 source strip says objects carry a SHA-256 digest, not a signature.

@@ -162,3 +162,21 @@ log.close()
     receipts = [json.loads(p.stdout) for p in completed]
     assert receipts[0] == receipts[1]
     assert log.get(receipts[0]["key"])["action"] == "survives-process-loss"
+
+
+def test_live_signed_events_verify_and_archive(live_storage):
+    log, archive = live_storage
+    signed = S3AuditLog(
+        log.store.bucket,
+        stream=log.stream,
+        prefix=log.store.prefix,
+        client=log.store.client,
+        mac_key="live-provider-signing-key-0123456789abcdef",
+    )
+    receipt = signed.record("signed", created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    assert signed.get(receipt)["signature"] == {"status": "valid", "key_id": signed.key_id}
+    assert log.get(receipt)["signature"]["status"] == "unverified"  # reader without the key
+    batch = archive.export_s3(
+        signed, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
+    )
+    assert archive.read(batch)[0]["envelope"]["sig"]["key_id"] == signed.key_id

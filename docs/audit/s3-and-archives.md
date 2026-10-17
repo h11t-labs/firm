@@ -39,6 +39,40 @@ S3 writes cannot join a SQL transaction: passing `conn=` fails explicitly. The e
 `AuditLog` and module-level `record(conn, ...)` retain their SQL transaction guarantees, integer
 IDs, and indexed history. A standalone S3 write can succeed independently of application work.
 
+### Signing events
+
+With a key, every event is signed. Pass `mac_key=` or set `FIRM_AUDIT_KEY` (at least 32
+characters), the same key rules as the SQL `AuditLog`. `prepare()` adds an HMAC-SHA256 over the
+whole envelope (stream, ID, every event field, provenance) together with its `key_id`, so a retry
+writes the same signed bytes. Every read checks the signature: `get()`, `scan()`, `write()` and
+`export_s3`. The signing key and `FIRM_AUDIT_RETIRED_KEYS` verify, and each decoded event reports
+`event["signature"]` as `valid`, `unverified` (signed by a key this log does not hold), or
+`unsigned`.
+
+```python
+from firm.audit.s3 import S3AuditLog
+
+log = S3AuditLog(
+    "my-audit-bucket",
+    stream="00000000-0000-0000-0000-000000000001",
+    mac_key="a-32+char-secret-shared-by-all-writers",  # or FIRM_AUDIT_KEY
+    require_signatures=True,  # once every writer signs
+)
+event = log.get(log.record("invoice.paid", subject=("Invoice", 42)))
+assert event["signature"]["status"] == "valid"
+log.close()
+```
+
+A signature that fails to verify, or a malformed one, raises `EventSignatureError` (an
+`ObjectConflict`). Scans and exports fail closed: the one bad object stops the whole page instead
+of being skipped. This catches a modified or forged event written by anyone without the key.
+Without `require_signatures`, someone with write access can still downgrade: write an unsigned
+event, or one claiming an unknown `key_id`. Those read as `unsigned`/`unverified`, which the
+dashboard shows per row. Turn on `require_signatures=True` once every writer signs; older
+unsigned history then has to be read with it off. Signing does not detect a *deleted* event:
+stateless concurrent writers have no ordered ID range to seal the way SQL does. Use bucket
+versioning and Object Lock for that.
+
 ### Durable retries
 
 Prepare an event once and retain **both its key and body** before writing. Reuse the same
@@ -193,8 +227,9 @@ retries are idempotent, and conflicts fail rather than overwrite.
 
 Object Lock/versioning, legal holds, encryption, and lifecycle rules are optional deployment
 policies. Protect manifests as well as data. Batch together only events with compatible hold
-and deletion requirements; one event cannot be removed from an immutable batch. Hashes detect
-corruption but are not signatures. Lifecycle expiry is asynchronous; do not treat it as an
+and deletion requirements; one event cannot be removed from an immutable batch. Checksums detect
+corruption but are not signatures; signed SQL rows and signed S3 events keep their signatures
+inside the archive. Lifecycle expiry is asynchronous; do not treat it as an
 exact TTL or a substitute for verified archival. Same-account/bucket copies are not independent
 backups, and asynchronous archives do not protect unexported events lost with the primary.
 
@@ -281,10 +316,11 @@ continuation and scan counts, under a source strip naming the bucket, prefix, an
 does not display misleading global counts or unsupported sorting. `--audit-archive-bucket cold`
 adds the archive view: it lists the archive's batches (with pending and unreadable ones
 flagged, and signed rows per batch) and verifies a batch when you open it or paste its manifest
-key. Each archived event shows its protection: a SQL row signature with its key ID (shown as
-recorded; restore into SQL with the original key to re-check it), unsigned, or an S3 SHA-256
-receipt. The S3 view's source strip states that S3 objects carry a SHA-256 digest, not a
-signature. `--audit-archive-prefix`
+key. Each archived event shows its protection: a signature with its key ID (SQL row MAC or S3
+event HMAC, shown as recorded), unsigned, or an S3 SHA-256 receipt. The S3 view checks each
+event's signature on read when the dashboard process has `FIRM_AUDIT_KEY` (or retired keys). Each
+row shows signed, "not checked" (signed by a key the dashboard lacks), or unsigned, and the source
+strip says which mode it runs in. `--audit-archive-prefix`
 defaults to `firm-audit`, the same as `ObjectStore` and `firm-audit archive`.
 
 SQL and S3 audit logs can be shown together: pass `--database-url` (or `--audit-url`) next to
@@ -297,7 +333,9 @@ same as for existing dashboards.
 
 ## Kubernetes and provider validation
 
-Application replicas need only SDK credentials and the bucket/stream/prefix configuration.
+Application replicas need only SDK credentials and the bucket/stream/prefix configuration,
+plus `FIRM_AUDIT_KEY` from a secret store when events are signed. Readers that verify need the
+same key or the retired keys.
 Use workload identity and least-privilege prefix-scoped permissions: primary writers need
 conditional PUT and reconciliation GET; readers need GET/GET-version and LIST; exporters need
 read access to the source plus PUT/GET to their archive destination. No delete or provisioning
@@ -331,5 +369,6 @@ Use a separate database/anchor backup when that evidence must be recovered.
 With SQL sealing active, archive-before-prune applies to complete verified seal ranges,
 including any pre-activation rows covered by deletion. One unarchived row blocks retirement
 of its whole range. This keeps both the archive policy and signed-floor invariants intact.
-S3 primary storage does not implement SQL row signing, sealing, or external anchor verification.
-Its receipt digests detect corruption; they are not authentication signatures.
+S3 primary storage signs events (see [Signing events](#signing-events)) but has no sealing or
+external anchors. A signature catches modification and forgery, not deletion or truncation.
+Receipt digests detect corruption; they are not authentication signatures.

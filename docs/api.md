@@ -309,7 +309,7 @@ Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. 
 
 Install `firm-audit[s3]`. These APIs live in optional submodules and leave SQL `AuditLog` unchanged:
 
-- `firm.audit.s3.S3AuditLog(bucket, *, stream, prefix="firm-audit", region=None, endpoint_url=None, client=None)`
+- `firm.audit.s3.S3AuditLog(bucket, *, stream, prefix="firm-audit", region=None, endpoint_url=None, client=None, mac_key=None, require_signatures=False)`; signs with `mac_key`/`FIRM_AUDIT_KEY`, verifies with it plus `FIRM_AUDIT_RETIRED_KEYS`; properties `key_id`, `verifies_signatures`. Decoded events carry `signature` (`status` `valid`/`unverified`/`unsigned`, `key_id`); a bad or malformed signature (or a non-valid one under `require_signatures`) raises `EventSignatureError`.
 - `S3AuditLog.prepare(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, event_id=None, created_at=None, provenance=None) -> PreparedEvent`
 - `S3AuditLog.write(prepared) -> Receipt`; `record(action, **event_fields) -> Receipt` rejects SQL `conn=`.
 - `S3AuditLog.get(receipt_or_key) -> dict`; `scan(*, start, end, limit=100, max_objects=1000, max_requests=1100, continuation=None, action=None, subject_type=None, subject_id=None, actor_type=None, actor_id=None, correlation_id=None) -> ScanPage`
