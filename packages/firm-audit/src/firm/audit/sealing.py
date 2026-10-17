@@ -28,7 +28,7 @@ from .._core.clock import now_utc
 from .._core.poller import InterruptiblePoller
 from . import integrity
 from .integrity import HmacSigner, Key
-from .storage import ACTIVATION_FROM_ID, SealConflict
+from .storage import ACTIVATION_FROM_ID, SealConflict, StorageBusy
 from .verify import (
     _format_anchor_event,
     _format_checkpoint,
@@ -86,8 +86,8 @@ class Sealer:
 
         try:
             activation = self._ensure_activation(key)
-        except SealConflict:
-            return 0
+        except (SealConflict, StorageBusy):
+            return 0  # another process is activating or doing maintenance; try next round
         if activation is not None:
             boundary, mac, at = activation
             self._emit_anchor(kind="activation", from_id=None, to_id=boundary, mac=mac, at=at)
@@ -96,7 +96,7 @@ class Sealer:
         while True:
             try:
                 sealed = self._seal_next_batch(key)
-            except SealConflict:
+            except (SealConflict, StorageBusy):
                 return total
             if sealed is None:
                 return total

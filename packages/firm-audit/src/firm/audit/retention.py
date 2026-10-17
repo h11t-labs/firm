@@ -38,6 +38,7 @@ from .._core.clock import now_utc
 from .._core.poller import InterruptiblePoller
 from . import integrity
 from .integrity import HmacSigner
+from .storage import StorageBusy
 from .verify import (
     _read_anchor,
     load_seal_records,
@@ -74,12 +75,15 @@ class Retention:
         if self.audit.max_age is None:
             return 0
         cutoff = now_utc() - timedelta(seconds=self.audit.max_age)
-        if self._sealing_active():
-            return self._run_aligned(cutoff)
-        if self.audit._seal_key is not None and self._has_expired_events(cutoff):
-            self._refuse_no_activation()
-            return 0
-        return self._run_plain(cutoff)
+        try:
+            if self._sealing_active():
+                return self._run_aligned(cutoff)
+            if self.audit._seal_key is not None and self._has_expired_events(cutoff):
+                self._refuse_no_activation()
+                return 0
+            return self._run_plain(cutoff)
+        except StorageBusy:
+            return 0  # another process holds the maintenance lease; the next run retries
 
     def _sealing_active(self) -> bool:
         """Any activation/seal/floor record makes plain pruning unsafe."""

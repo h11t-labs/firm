@@ -51,8 +51,9 @@ def sealed_at(delta: timedelta):
 class SqlSide:
     name = "sql"
 
-    def __init__(self, tmp_path, **kwargs):
-        self.log = AuditLog(f"sqlite:///{tmp_path / 'parity.db'}", **kwargs)
+    def __init__(self, db_url, **kwargs):
+        # ``db_url`` is SQLite, or live PostgreSQL/MySQL when FIRM_TEST_*_URL is set.
+        self.log = AuditLog(db_url, **kwargs)
         self.engine = self.log.engine
 
     def set_field(self, event_id, field, value):
@@ -96,7 +97,7 @@ class SqlSide:
 class S3Side:
     name = "s3"
 
-    def __init__(self, tmp_path, **kwargs):
+    def __init__(self, _db_url=None, **kwargs):
         self.client = MemoryS3()
         self.log = S3AuditLog("events", stream=STREAM, client=self.client, **kwargs)
         self.layout = self.log.storage.layout
@@ -143,15 +144,9 @@ class S3Side:
             self._put(key, {**record, field: value})
 
 
-@pytest.fixture(params=[SqlSide, S3Side], ids=["sql", "s3"])
-def side_cls(request):
-    return request.param
-
-
-def _both(tmp_path, **kwargs):
+def _both(db_url, **kwargs):
     kwargs = {"mac_key": KEY, "grace": 0.0, "seal_batch_size": 3, **kwargs}
-    (tmp_path / "sql").mkdir()
-    return SqlSide(tmp_path / "sql", **kwargs), S3Side(tmp_path, **kwargs)
+    return SqlSide(db_url, **kwargs), S3Side(**kwargs)
 
 
 def _verdict(side, **kwargs):
@@ -165,8 +160,8 @@ def _verdict(side, **kwargs):
     )
 
 
-def _seeded(tmp_path, *, events=7, **kwargs):
-    sides = _both(tmp_path, **kwargs)
+def _seeded(db_url, *, events=7, **kwargs):
+    sides = _both(db_url, **kwargs)
     for side in sides:
         with written_at(OLD):
             for index in range(events):
@@ -176,8 +171,8 @@ def _seeded(tmp_path, *, events=7, **kwargs):
     return sides
 
 
-def _assert_same(tmp_path, tamper, **kwargs):
-    sql, s3 = _seeded(tmp_path, **kwargs)
+def _assert_same(db_url, tamper, **kwargs):
+    sql, s3 = _seeded(db_url, **kwargs)
     for side in (sql, s3):
         tamper(side)
     verdicts = {side.name: _verdict(side) for side in (sql, s3)}
@@ -187,8 +182,8 @@ def _assert_same(tmp_path, tamper, **kwargs):
     return verdicts["sql"]
 
 
-def test_clean_history_verifies_ok_on_both(tmp_path):
-    outcome, ok, *_ = _assert_same(tmp_path, lambda side: None)
+def test_clean_history_verifies_ok_on_both(db_url):
+    outcome, ok, *_ = _assert_same(db_url, lambda side: None)
     assert outcome == "ok" and ok == 7
 
 
@@ -222,15 +217,20 @@ def test_clean_history_verifies_ok_on_both(tmp_path):
         ),
     ],
 )
-def test_tampering_is_reported_identically(tmp_path, name, tamper, expected):
-    outcome, *_ = _assert_same(tmp_path, tamper)
+def test_tampering_is_reported_identically(db_url, name, tamper, expected):
+    outcome, *_ = _assert_same(db_url, tamper)
     assert outcome == expected, name
 
 
-def test_s3_reports_a_replayed_entry_id(tmp_path):
+def test_s3_reports_a_replayed_entry_id():
     """SQL's unique index stops a replayed ``entry_id`` at insert time; S3 has no such index,
     so the verifier's duplicate check (shared with SQL) is what reports it."""
-    _, s3 = _seeded(tmp_path)
+    s3 = S3Side(mac_key=KEY, grace=0.0, seal_batch_size=3)
+    with written_at(OLD):
+        for index in range(7):
+            s3.log.record(f"event.{index}")
+    with sealed_at(timedelta(hours=2)):
+        s3.log.sealer.run_once()
     entry = json.loads(s3.client.objects[("events", s3._event_key(3))][-1])["entry_id"]
     s3.copy_row(3, 50, entry_id=entry)
     report = s3.log.verify(full=True)
@@ -239,32 +239,30 @@ def test_s3_reports_a_replayed_entry_id(tmp_path):
     s3.log.close()
 
 
-def test_retention_retires_and_refuses_identically(tmp_path):
-    sql, s3 = _seeded(tmp_path, max_age=3600)
+def test_retention_retires_identically(db_url):
+    sql, s3 = _seeded(db_url, max_age=3600)
     pruned = {side.name: side.log.retention.run_once() for side in (sql, s3)}
     assert pruned["s3"] == pruned["sql"] == 7  # every settled seal range, the short tail's too
     assert _verdict(s3) == _verdict(sql)
     assert s3.log.history() == sql.log.history() == []
-    # A tampered range is refused, not deleted, on both.
-    (tmp_path / "again").mkdir()
-    sql2, s32 = _seeded(tmp_path / "again", max_age=3600)
-    for side in (sql2, s32):
-        side.set_field(2, "action", "forged")
-        assert side.log.retention.run_once() == 0
-        assert side.log.retention.last_refused_tampered == 1
-    for side in (sql, s3, sql2, s32):
+    for side in (sql, s3):
         side.log.close()
 
 
-def test_anchor_detects_seal_deletion_identically(tmp_path):
-    anchors = {}
+def test_retention_refuses_a_tampered_range_identically(db_url):
+    sql, s3 = _seeded(db_url, max_age=3600)
+    for side in (sql, s3):
+        side.set_field(2, "action", "forged")
+        assert side.log.retention.run_once() == 0
+        assert side.log.retention.last_refused_tampered == 1
+        side.log.close()
+
+
+def test_anchor_detects_seal_deletion_identically(db_url, tmp_path):
     sides = []
     for side_cls in (SqlSide, S3Side):
-        root = tmp_path / side_cls.name
-        root.mkdir()
-        anchor = root / "audit.anchor"
-        anchors[side_cls.name] = anchor
-        side = side_cls(root, mac_key=KEY, grace=0.0, seal_batch_size=3, anchor_path=str(anchor))
+        anchor = tmp_path / f"{side_cls.name}.anchor"
+        side = side_cls(db_url, mac_key=KEY, grace=0.0, seal_batch_size=3, anchor_path=str(anchor))
         with written_at(OLD):
             for index in range(6):
                 side.log.record(f"event.{index}")
@@ -281,8 +279,8 @@ def test_anchor_detects_seal_deletion_identically(tmp_path):
         side.log.close()
 
 
-def test_rotated_keys_verify_identically(tmp_path, monkeypatch):
-    sql, s3 = _seeded(tmp_path)
+def test_rotated_keys_verify_identically(db_url, monkeypatch):
+    sql, s3 = _seeded(db_url)
     for side in (sql, s3):
         side.log.close()
     monkeypatch.setenv("FIRM_AUDIT_RETIRED_KEYS", f"old={KEY}")
@@ -301,11 +299,102 @@ def test_rotated_keys_verify_identically(tmp_path, monkeypatch):
         log.close()
 
 
-def test_a_missing_key_is_an_error_on_both(tmp_path, side_cls):
-    side = side_cls(tmp_path)
+@pytest.mark.parametrize("side_cls", [SqlSide, S3Side], ids=["sql", "s3"])
+def test_a_missing_key_is_an_error_on_both(db_url, side_cls):
+    side = side_cls(db_url)
     side.log.record("unsigned")
     from firm.audit.verify import VerifyError
 
     with pytest.raises(VerifyError, match="row key"):
         side.log.verify()
     side.log.close()
+
+
+def _archiver(side, archive):
+    from firm.audit.sql_archive import Archiver
+
+    worker = Archiver(side.log, archive, stream=STREAM)
+    worker.enable()
+    return worker
+
+
+def test_archive_before_prune_guards_identically(db_url):
+    from firm.audit.archive import Archive
+    from firm.audit.object_store import ObjectStore
+
+    sides = _both(db_url, mac_key=None)
+    results = {}
+    for side in sides:
+        archive = Archive(ObjectStore("cold", prefix=side.name, client=MemoryS3()))
+        worker = _archiver(side, archive)
+        for index in range(5):
+            side.log.record(f"event.{index}")
+        side.log.max_age = -1
+        blocked = side.log.retention.run_once()
+        kept = side.log.retention.last_blocked_unarchived
+        first = worker.run_once(batch_size=3)
+        status = worker.status()
+        pruned = side.log.retention.run_once()
+        rest = worker.run_once(batch_size=3)
+        pruned_rest = side.log.retention.run_once()
+        results[side.name] = (
+            blocked,
+            kept,
+            len(archive.read(first)),
+            status,
+            pruned,
+            len(archive.read(rest)),
+            pruned_rest,
+            worker.run_once(),
+            side.log.history(),
+        )
+        side.log.close()
+    assert results["s3"] == results["sql"]
+    assert results["sql"][:8] == (
+        0,
+        5,
+        3,
+        {"events": 5, "unarchived": 2, "pending_batches": 0},
+        3,
+        2,
+        2,
+        None,
+    )
+
+
+def test_sealed_ranges_wait_for_their_archive_identically(db_url):
+    from firm.audit.archive import Archive
+    from firm.audit.object_store import ObjectStore
+
+    sides = _seeded(db_url, max_age=3600)
+    outcome = {}
+    for side in sides:
+        archive = Archive(ObjectStore("cold", prefix=side.name, client=MemoryS3()))
+        worker = _archiver(side, archive)
+        held = side.log.retention.run_once()
+        worker.run_once(batch_size=4)  # covers the first seal range (1-3) and part of the next
+        partial = side.log.retention.run_once()
+        worker.run_once(batch_size=4)
+        full = side.log.retention.run_once()
+        outcome[side.name] = (held, partial, full, _verdict(side)[0], side.log.history())
+        side.log.close()
+    assert outcome["s3"] == outcome["sql"]
+    assert outcome["sql"][:3] == (0, 3, 4)
+
+
+def test_an_s3_log_archives_under_its_own_stream():
+    from firm.audit.archive import Archive
+    from firm.audit.object_store import ObjectStore
+    from firm.audit.sql_archive import Archiver
+
+    s3 = S3Side()
+    archive = Archive(ObjectStore("cold", client=MemoryS3()))
+    assert Archiver(s3.log, archive).stream == STREAM
+    with pytest.raises(ValueError, match="own stream"):
+        Archiver(s3.log, archive, stream=str(UUID(int=9)))
+    worker = Archiver(s3.log, archive)
+    worker.enable()
+    other = Archive(ObjectStore("elsewhere", client=MemoryS3()))
+    with pytest.raises(ValueError, match="another stream/destination"):
+        Archiver(s3.log, other).enable()
+    s3.log.close()

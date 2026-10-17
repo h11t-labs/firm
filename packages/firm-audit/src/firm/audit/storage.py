@@ -18,11 +18,11 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Connection, delete, func, or_, select
+from sqlalchemy import Connection, delete, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from .._core.database import snapshot_transaction
+from .._core.database import snapshot_transaction, transaction
 from .._core.dialects import get_dialect
 from . import schema
 
@@ -41,6 +41,10 @@ STATUS_ID = 1
 
 class SealConflict(Exception):
     """Another sealer already wrote a record at this coordinate (the portable race arbiter)."""
+
+
+class StorageBusy(RuntimeError):
+    """Another process holds the storage's maintenance lease (S3); SQL never raises it."""
 
 
 class SqlView:
@@ -198,6 +202,54 @@ class SqlView:
 
         return verified_ids(self.conn, stream, rows, span=span)
 
+    def set_archive_policy(self, stream: str, destination: str) -> None:
+        self.conn.execute(
+            update(schema.archive_policy).values(stream=stream, destination=destination)
+        )
+
+    def pending_archive_batch(self) -> tuple[str, str | None] | None:
+        """The oldest frozen-but-unpublished batch (locked), as ``(id, body)``."""
+        batches = schema.archive_batches
+        pending = self.conn.execute(
+            select(batches)
+            .where(batches.c.receipt.is_(None))
+            .order_by(batches.c.id)
+            .limit(1)
+            .with_for_update()
+        ).first()
+        return None if pending is None else (pending.id, pending.body)
+
+    def unreserved_rows(self, limit: int) -> list[Any]:
+        """Committed rows no batch has reserved yet, oldest id first, skipping locked rows."""
+        member = schema.archive_members
+        dialect = get_dialect(self.conn.engine)
+        # Locking reads see current reservations even under MySQL REPEATABLE READ.
+        # Skip locked source rows so a delayed writer cannot stall discovery.
+        unreserved = (
+            ~select(member.c.event_id)
+            .where(member.c.event_id == _audits.c.id)
+            .with_for_update()
+            .exists()
+        )
+        return list(
+            self.conn.execute(
+                dialect.with_skip_locked(
+                    select(_audits).where(unreserved).order_by(_audits.c.id).limit(limit)
+                )
+            )
+        )
+
+    def archive_entry(self, stream: str, row: Any) -> dict[str, Any]:
+        from .sql_archive import source_entry
+
+        return source_entry(self.conn, stream, row)
+
+    def reserve_archive_batch(
+        self, batch_id: str, body: str, members: Sequence[dict[str, Any]]
+    ) -> None:
+        self.conn.execute(schema.archive_batches.insert().values(id=batch_id, body=body))
+        self.conn.execute(schema.archive_members.insert(), list(members))
+
     # -- pruning ----------------------------------------------------------------------------------
 
     def expired_batch(self, cutoff: datetime, offset: int, limit: int) -> list[Any]:
@@ -275,6 +327,34 @@ class SqlStorage:
         """A plain connection for an unlocked read."""
         with self.engine.connect() as conn:
             yield SqlView(conn)
+
+    def acknowledge_archive_batch(self, batch_id: str, receipt: str) -> None:
+        """Record a verified publication and drop the frozen input, in its own transaction."""
+        batches = schema.archive_batches
+        with transaction(self.engine) as conn:
+            conn.execute(
+                update(batches).where(batches.c.id == batch_id).values(receipt=receipt, body=None)
+            )
+
+    def archive_status(self) -> dict[str, int]:
+        with transaction(self.engine) as conn:
+            total = conn.execute(select(func.count()).select_from(_audits)).scalar_one()
+            pending = conn.execute(
+                select(func.count())
+                .select_from(schema.archive_batches)
+                .where(schema.archive_batches.c.receipt.is_(None))
+            ).scalar_one()
+            member, batches = schema.archive_members, schema.archive_batches
+            archived = conn.execute(
+                select(func.count())
+                .select_from(
+                    _audits.join(member, _audits.c.id == member.c.event_id).join(
+                        batches, member.c.batch_id == batches.c.id
+                    )
+                )
+                .where(batches.c.receipt.is_not(None))
+            ).scalar_one()
+        return {"events": total, "unarchived": total - archived, "pending_batches": pending}
 
     def prior_sealing_observed(self) -> bool:
         with self.engine.connect() as conn:

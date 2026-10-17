@@ -224,6 +224,38 @@ def run_sql(
         output({"receipt": asdict(receipt) if receipt else None, "status": worker.status()})
 
 
+@archive.command("run-s3", help="Publish one durable batch of an S3 audit log's events.")
+@click.option("--source-bucket", required=True)
+@click.option("--source-prefix", default="firm-audit")
+@click.option("--stream", required=True)
+@click.option("--batch-size", default=100, type=int)
+@click.option(
+    "--enable-prune-guard",
+    is_flag=True,
+    help="Persist policy; all future pruning requires verified archival. Upgrade pruners first.",
+)
+@click.pass_obj
+def run_s3(
+    storage: Any,
+    source_bucket: str,
+    source_prefix: str,
+    stream: str,
+    batch_size: int,
+    enable_prune_guard: bool,
+) -> None:
+    from .s3 import S3AuditLog
+    from .sql_archive import Archiver
+
+    with S3AuditLog(
+        source_bucket, stream=stream, prefix=source_prefix, client=storage.store.client
+    ) as source:
+        worker = Archiver(source, storage)
+        if enable_prune_guard:
+            worker.enable()
+        receipt = worker.run_once(batch_size=batch_size)
+        output({"receipt": asdict(receipt) if receipt else None, "status": worker.status()})
+
+
 @archive.command("export-s3", help="Copy a bounded S3 selection by id; original events remain.")
 @click.option("--source-bucket", required=True)
 @click.option("--source-prefix", default="firm-audit")

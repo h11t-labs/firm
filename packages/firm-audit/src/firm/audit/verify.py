@@ -36,6 +36,7 @@ from .._core.database import snapshot_transaction
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
 from .integrity import HmacSigner, Key, parse_keyring
+from .storage import StorageBusy
 
 if TYPE_CHECKING:
     from .log import TamperEvidentLog
@@ -716,7 +717,10 @@ class Verifier:
     def run(self, *, anchor_path: str | None = None, full: bool = False) -> VerifyReport:
         started = time.monotonic()
         try:
-            report = self._verify(anchor_path=anchor_path, full=full)
+            try:
+                report = self._verify(anchor_path=anchor_path, full=full)
+            except StorageBusy as exc:
+                raise VerifyError(f"verification could not start: {exc}") from exc
         except VerifyError as exc:
             self._persist_error(str(exc))
             self.audit.on_error(exc)

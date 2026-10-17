@@ -7,9 +7,8 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
 
-from sqlalchemy import Connection, and_, func, inspect, select, update
+from sqlalchemy import Connection, and_, inspect, select
 
-from .._core.database import transaction
 from .._core.dialects import get_dialect
 from . import events, schema
 from .archive import Archive, provenance, sql_entry
@@ -116,34 +115,37 @@ def verified_ids(
     }
 
 
-class SQLArchiver:
-    """Persisted policy covers module-level and instance writes, including delayed commits.
+class Archiver:
+    """Continuous archive-before-prune for any audit log, SQL or S3.
 
-    Upgrade every pruner and pause pruning during policy activation/backfill. No callbacks
-    are needed on the record path: committed rows themselves are the durable source.
+    The persisted policy covers module-level and instance writes, including delayed commits.
+    Upgrade every pruner and pause pruning during policy activation/backfill. No callbacks are
+    needed on the record path: stored rows themselves are the durable source. An S3 log archives
+    under its own stream; a SQL log names one.
     """
 
-    def __init__(self, audit: AuditLog, archive: Archive, *, stream: str) -> None:
+    def __init__(self, audit: Any, archive: Archive, *, stream: str | None = None) -> None:
+        own = getattr(audit, "stream", None)
+        if stream is None and own is None:
+            raise ValueError("a SQL audit log needs an archive stream")
+        chosen = uuid_text(str(stream if stream is not None else own))
+        if own is not None and chosen != own:
+            raise ValueError("an S3 audit log archives under its own stream")
         self.audit = audit
         self.archive = archive
-        self.stream = uuid_text(stream)
+        self.stream = chosen
 
     def enable(self) -> None:
         """Opt in to archive-before-prune; binds permanently to one stream/destination."""
-        dialect = get_dialect(self.audit.engine)
-        with dialect.begin_claim_tx(self.audit.engine) as conn:
-            policy = lock_policy(conn)
+        with self.audit.storage.claim() as conn:
+            policy = conn.archive_policy()
             if policy is None:
                 raise ValueError("Upgrade the audit schema before enabling archives")
             if policy.stream and (
                 policy.stream != self.stream or policy.destination != self.archive.store.identity
             ):
                 raise ValueError("archive policy already belongs to another stream/destination")
-            conn.execute(
-                update(schema.archive_policy).values(
-                    stream=self.stream, destination=self.archive.store.identity
-                )
-            )
+            conn.set_archive_policy(self.stream, self.archive.store.identity)
 
     def _require_policy(self, policy: Any) -> None:
         if (
@@ -157,47 +159,23 @@ class SQLArchiver:
         """Publish one frozen batch; concurrent workers may safely retry identical work.
 
         Immutable batch membership never changes, so competing workers publish the same
-        bytes. Discovery excludes reserved IDs via an index, without a commit-order cursor.
+        bytes. Discovery excludes reserved IDs without a commit-order cursor.
         """
         from uuid import uuid4
 
         if not 1 <= batch_size <= 1000:
             raise ValueError("invalid batch/discovery limits")
-        batches = schema.archive_batches
-        dialect = get_dialect(self.audit.engine)
-        with dialect.begin_claim_tx(self.audit.engine) as conn:
-            self._require_policy(lock_policy(conn))
-            # Locking reads see current reservations even under MySQL REPEATABLE READ.
-            # Skip locked source rows so a delayed writer cannot stall discovery.
-            pending = conn.execute(
-                select(batches)
-                .where(batches.c.receipt.is_(None))
-                .order_by(batches.c.id)
-                .limit(1)
-                .with_for_update()
-            ).first()
+        with self.audit.storage.claim() as conn:
+            self._require_policy(conn.archive_policy())
+            pending = conn.pending_archive_batch()
             if pending is not None:
-                batch_id, body = pending.id, pending.body
+                batch_id, body = pending
                 if body is None:
                     raise ValueError("pending archive batch has no frozen input")
             else:
-                entries = []
-                member = schema.archive_members
-                unreserved = (
-                    ~select(member.c.event_id)
-                    .where(member.c.event_id == schema.audit_events.c.id)
-                    .with_for_update()
-                    .exists()
-                )
-                for row in conn.execute(
-                    dialect.with_skip_locked(
-                        select(schema.audit_events)
-                        .where(unreserved)
-                        .order_by(schema.audit_events.c.id)
-                        .limit(batch_size)
-                    )
-                ):
-                    entries.append(source_entry(conn, self.stream, row))
+                entries = [
+                    conn.archive_entry(self.stream, row) for row in conn.unreserved_rows(batch_size)
+                ]
                 if not entries:
                     return None
                 batch_id = str(uuid4())
@@ -205,9 +183,9 @@ class SQLArchiver:
                 # Reject oversized input before committing an unrecoverable pending batch.
                 if len(body.encode()) > 8 * 1024 * 1024:
                     raise ValueError("batch exceeds 8 MiB; reduce batch_size")
-                conn.execute(batches.insert().values(id=batch_id, body=body))
-                conn.execute(
-                    schema.archive_members.insert(),
+                conn.reserve_archive_batch(
+                    batch_id,
+                    body,
                     [
                         {
                             "fingerprint": fingerprint(entry),
@@ -225,37 +203,16 @@ class SQLArchiver:
         )
         verified = self.archive.read(receipt)
         if canonical(verified) != canonical(entries):
-            raise ObjectConflict("verified archive does not match reserved SQL batch")
-        with transaction(self.audit.engine) as conn:
-            conn.execute(
-                update(batches)
-                .where(batches.c.id == batch_id)
-                .values(receipt=canonical(asdict(receipt)).decode(), body=None)
-            )
+            raise ObjectConflict("verified archive does not match reserved batch")
+        self.audit.storage.acknowledge_archive_batch(batch_id, canonical(asdict(receipt)).decode())
         return receipt
 
     def status(self) -> dict[str, int]:
-        with transaction(self.audit.engine) as conn:
-            total = conn.execute(select(func.count()).select_from(schema.audit_events)).scalar_one()
-            # Locking reads see current reservations even under MySQL REPEATABLE READ.
-            # Skip locked source rows so a delayed writer cannot stall discovery.
-            pending = conn.execute(
-                select(func.count())
-                .select_from(schema.archive_batches)
-                .where(schema.archive_batches.c.receipt.is_(None))
-            ).scalar_one()
-            member, batches = schema.archive_members, schema.archive_batches
-            archived = conn.execute(
-                select(func.count())
-                .select_from(
-                    schema.audit_events.join(
-                        member, schema.audit_events.c.id == member.c.event_id
-                    ).join(batches, member.c.batch_id == batches.c.id)
-                )
-                .where(batches.c.receipt.is_not(None))
-            ).scalar_one()
-            unarchived = total - archived
-        return {"events": total, "unarchived": unarchived, "pending_batches": pending}
+        return self.audit.storage.archive_status()
+
+
+#: The original name; it archives S3 logs too.
+SQLArchiver = Archiver
 
 
 def restore_sql(archive: Archive, receipts: list[Receipt | str], target: AuditLog) -> int:

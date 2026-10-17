@@ -29,13 +29,13 @@ from .object_store import ObjectStore, Receipt, UnknownWriteOutcome, digest, err
 from .s3_store import (
     ROW_FIELDS,
     S3Storage,
-    StorageBusy,
     decode_row,
     encode_row,
     index_values,
     row_dict,
 )
 from .serialization import dump_json
+from .storage import StorageBusy
 
 __all__ = ["PreparedEvent", "S3AuditLog", "StorageBusy", "UnknownEventOutcome"]
 
@@ -102,7 +102,7 @@ class S3AuditLog(TamperEvidentLog):
         create_outbox: bool = True,
         workers: int = 16,
         lease_ttl: float = 300.0,
-        lease_wait: float = 30.0,
+        lease_wait: float = 5.0,
     ) -> None:
         self.stream = uuid_text(stream)
         # Keys first: a bad key fails construction before any client or thread pool exists.

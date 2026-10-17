@@ -43,7 +43,7 @@ from .._core.clock import now_utc
 from .event_format import canonical
 from .integrity import canonical_created_at
 from .object_store import ObjectStore
-from .storage import ACTIVATION_FROM_ID, SealConflict
+from .storage import ACTIVATION_FROM_ID, SealConflict, StorageBusy
 
 if TYPE_CHECKING:
     from .verify import SealRecords
@@ -76,10 +76,6 @@ INDEXED_FILTERS = (
 _ID_DIGITS = 20
 _ID_SPAN = 10**_ID_DIGITS - 1
 _SEQ_ATTEMPTS = 50
-
-
-class StorageBusy(RuntimeError):
-    """Another process holds the maintenance lease (or the id counter is overloaded)."""
 
 
 def inv(value: int) -> str:
@@ -154,6 +150,37 @@ class Layout:
         if len(digits) != _ID_DIGITS or not digits.isdigit() or not entry:
             return None
         return int(digits), entry
+
+    # The archive-before-prune ledger (the SQL archive_* tables). Membership lives entirely in
+    # its key, so the prune guard reads keys only.
+    @property
+    def archive_policy(self) -> str:
+        return f"{self.root}archive/policy.json"
+
+    def archive_batch(self, batch_id: str) -> str:
+        return f"{self.root}archive/batch/{batch_id}.json"
+
+    @property
+    def archive_pending(self) -> str:
+        return f"{self.root}archive/pending/"
+
+    @property
+    def archive_acked(self) -> str:
+        return f"{self.root}archive/acked/"
+
+    @property
+    def archive_members(self) -> str:
+        return f"{self.root}archive/member/"
+
+    def archive_member(self, event_id: int, fingerprint: str, batch_id: str) -> str:
+        return f"{self.archive_members}{event_id:0{_ID_DIGITS}d}-{fingerprint}-{batch_id}"
+
+    def parse_member(self, key: str) -> tuple[int, str, str] | None:
+        name = key[len(self.archive_members) :]
+        digits, fingerprint, batch_id = name[:_ID_DIGITS], name[21:85], name[86:]
+        if not digits.isdigit() or len(fingerprint) != 64 or not batch_id:
+            return None
+        return int(digits), fingerprint, batch_id
 
     def entry(self, entry_id: str) -> str:
         return f"{self.root}ix/entry/{entry_id}"
@@ -630,9 +657,19 @@ class S3View:
         return len(self._existing_ids(ids))
 
     def rows_between(self, low: int, high: int) -> list[Any]:
+        """Full rows with id in ``(low, high]`` (the archive guard's candidates)."""
+        keys = []
+        for event_id, _, key in self._event_keys(max(low, 0)):
+            if event_id <= low:
+                continue
+            if event_id > high:
+                break
+            keys.append(key)
         rows = []
-        for row in self.iter_rows(low, high):
-            rows.append(row)
+        for _, body in self.storage.fetch(keys):
+            row = decode_row(body) if body is not None else None
+            if row is not None:
+                rows.append(SimpleNamespace(**row))
         return rows
 
     def expired_batch(self, cutoff: datetime, offset: int, limit: int) -> list[Any]:
@@ -654,18 +691,115 @@ class S3View:
     # -- archive-before-prune ----------------------------------------------------------------------
 
     def archive_policy(self, *, schema_present: bool | None = None) -> Any:
-        return None  # the archive guard's ledger tables live in SQL only
+        """The persisted archive policy (stream/destination unset until ``enable()``)."""
+        current = self.store.read_tagged(self.layout.archive_policy)
+        value = json.loads(current[0]) if current is not None else {}
+        return SimpleNamespace(stream=value.get("stream"), destination=value.get("destination"))
+
+    def set_archive_policy(self, stream: str, destination: str) -> None:
+        current = self.store.read_tagged(self.layout.archive_policy)
+        body = canonical({"stream": stream, "destination": destination})
+        if not self.store.swap(
+            self.layout.archive_policy, body, etag=current[1] if current else None
+        ):
+            raise StorageBusy("the archive policy changed while enabling it")
+
+    def pending_archive_batch(self) -> tuple[str, str | None] | None:
+        for key in self.store.iter_keys(self.layout.archive_pending):
+            batch_id = key[len(self.layout.archive_pending) :]
+            current = self.store.read_tagged(self.layout.archive_batch(batch_id))
+            body = json.loads(current[0]).get("body") if current is not None else None
+            return batch_id, body
+        return None
+
+    def _members(self, low: int = 0, high: int | None = None) -> dict[int, tuple[str, str]]:
+        """``event_id → (fingerprint, batch_id)`` for members with id in ``(low, high]``."""
+        start = f"{self.layout.archive_members}{low:0{_ID_DIGITS}d}." if low > 0 else ""
+        found: dict[int, tuple[str, str]] = {}
+        for key in self.store.iter_keys(self.layout.archive_members, after=start):
+            parsed = self.layout.parse_member(key)
+            if parsed is None:
+                continue
+            event_id, fingerprint, batch_id = parsed
+            if high is not None and event_id > high:
+                break
+            found[event_id] = (fingerprint, batch_id)
+        return found
+
+    def unreserved_rows(self, limit: int) -> list[Any]:
+        reserved = self._members()
+        wanted: list[str] = []
+        for event_id, _, key in self._event_keys():
+            if event_id > 0 and event_id not in reserved:
+                wanted.append(key)
+                if len(wanted) >= limit:
+                    break
+        rows = []
+        for _, body in self.storage.fetch(wanted):
+            row = decode_row(body) if body is not None else None
+            if row is not None:
+                rows.append(row)
+        return rows
+
+    def archive_entry(self, stream: str, row: Any) -> dict[str, Any]:
+        from .archive import row_entry
+
+        return row_entry("s3", stream, row if isinstance(row, dict) else vars(row))
+
+    def reserve_archive_batch(
+        self, batch_id: str, body: str, members: Sequence[dict[str, Any]]
+    ) -> None:
+        batch = canonical({"id": batch_id, "body": body, "receipt": None})
+        if not self.store.swap(self.layout.archive_batch(batch_id), batch, etag=None):
+            raise StorageBusy("an archive batch with this id already exists")
+        self.storage._create_all(
+            [
+                f"{self.layout.archive_pending}{batch_id}",
+                *(
+                    self.layout.archive_member(m["event_id"], m["fingerprint"], m["batch_id"])
+                    for m in members
+                ),
+            ]
+        )
 
     def verified_ids(
         self, stream: str, rows: Sequence[Any], *, span: tuple[int, int] | None = None
     ) -> set[int]:
-        raise NotImplementedError("S3 storage has no archive-before-prune ledger")
+        """Ids among ``rows`` whose exact content sits in an acknowledged batch (keys only,
+        plus recomputing each row's fingerprint, as the SQL guard does)."""
+        from .archive import row_entry
+        from .sql_archive import fingerprint
+
+        if not rows:
+            return set()
+        by_id = {row.id: (row if isinstance(row, dict) else vars(row)) for row in rows}
+        low, high = span if span is not None else (min(by_id) - 1, max(by_id))
+        members = self._members(max(low, 0), high)
+        acked = {
+            key[len(self.layout.archive_acked) :]
+            for key in self.store.iter_keys(self.layout.archive_acked)
+        }
+        return {
+            event_id
+            for event_id, row in by_id.items()
+            if event_id in members
+            and members[event_id][1] in acked
+            and fingerprint(row_entry("s3", stream, row)) == members[event_id][0]
+        }
 
     # -- deletion ----------------------------------------------------------------------------------
 
     def delete_rows(self, ids: Sequence[int], *, archive_tables: bool) -> None:
         rows = [self._expired_rows[event_id] for event_id in ids if event_id in self._expired_rows]
         self.storage.delete_events(rows)
+        if archive_tables and ids:
+            gone = set(ids)
+            members = self._members(min(gone) - 1, max(gone))
+            self.store.delete_keys(
+                self.layout.archive_member(event_id, fingerprint, batch_id)
+                for event_id, (fingerprint, batch_id) in members.items()
+                if event_id in gone
+            )
 
     def advance_floor(self, floor: dict[str, Any], *, through: int, archive_tables: bool) -> int:
         """Record the floor advance as an intent, then complete it. Many objects change, so
@@ -688,6 +822,14 @@ class S3View:
         floor["sealed_at"] = datetime.fromisoformat(floor["sealed_at"])
         with suppress(SealConflict):  # already written by an interrupted attempt
             self.insert_seal(**floor)
+        # Covered seals go before their rows: a reader without the lease that looks mid-way then
+        # sees an honest unsealed tail, never seals over rows that are half gone.
+        covered = [
+            self.layout.seal("seal", record.from_id, record.to_id or 0)
+            for record in self.seal_records()
+            if record.kind == "seal" and record.to_id is not None and record.to_id <= through
+        ]
+        self.store.delete_keys(covered)
         deleted = 0
         page: list[str] = []
         for event_id, _, key in self._event_keys():
@@ -699,12 +841,10 @@ class S3View:
                 page = []
         if page:
             deleted += self._delete_event_keys(page)
-        covered = [
-            self.layout.seal("seal", record.from_id, record.to_id or 0)
-            for record in self.seal_records()
-            if record.kind == "seal" and record.to_id is not None and record.to_id <= through
-        ]
-        self.store.delete_keys(covered)
+        self.store.delete_keys(
+            self.layout.archive_member(event_id, fingerprint, batch_id)
+            for event_id, (fingerprint, batch_id) in self._members(0, through).items()
+        )
         self.store.delete_keys([self.layout.prune])
         return deleted
 
@@ -774,9 +914,9 @@ class S3Storage:
     # -- concurrency scopes ------------------------------------------------------------------------
 
     @contextmanager
-    def _maintenance(self) -> Iterator[S3View]:
+    def _maintenance(self, wait: float | None = None) -> Iterator[S3View]:
         lease = Lease(self.store, self.layout.lease, ttl=self.lease_ttl)
-        lease.acquire(self.lease_wait)
+        lease.acquire(self.lease_wait if wait is None else wait)
         try:
             view = S3View(self, lease)
             view.complete_pending_prune()
@@ -786,7 +926,9 @@ class S3Storage:
 
     @contextmanager
     def snapshot(self, *, write: bool = False) -> Iterator[S3View]:
-        with self._maintenance() as view:
+        # Verification (the read snapshot) waits out a whole lease rather than fail: sealing and
+        # retention skip a busy round instead (see Sealer/Retention), so verify gets its turn.
+        with self._maintenance(None if write else self.lease_ttl) as view:
             yield view
 
     @contextmanager
@@ -836,6 +978,33 @@ class S3Storage:
         except ValueError:
             return None
         return value if isinstance(value, dict) else None
+
+    def acknowledge_archive_batch(self, batch_id: str, receipt: str) -> None:
+        key = self.layout.archive_batch(batch_id)
+        current = self.store.read_tagged(key)
+        body = canonical({"id": batch_id, "body": None, "receipt": receipt})
+        self.store.swap(key, body, etag=current[1] if current else None)
+        self._create_all([f"{self.layout.archive_acked}{batch_id}"])
+        self.store.delete_keys([f"{self.layout.archive_pending}{batch_id}"])
+
+    def archive_status(self) -> dict[str, int]:
+        view = S3View(self, None)
+        present = {event_id for event_id, _, _ in view._event_keys() if event_id > 0}
+        acked = {
+            key[len(self.layout.archive_acked) :]
+            for key in self.store.iter_keys(self.layout.archive_acked)
+        }
+        archived = sum(
+            1
+            for event_id, (_, batch_id) in view._members().items()
+            if event_id in present and batch_id in acked
+        )
+        pending = sum(1 for _ in self.store.iter_keys(self.layout.archive_pending))
+        return {
+            "events": len(present),
+            "unarchived": len(present) - archived,
+            "pending_batches": pending,
+        }
 
     def prior_sealing_observed(self) -> bool:
         status = self.status()
