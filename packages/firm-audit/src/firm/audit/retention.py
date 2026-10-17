@@ -32,16 +32,12 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
 from sqlalchemy.exc import DBAPIError
 
 from .._core.clock import now_utc
-from .._core.database import snapshot_transaction
-from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
-from . import integrity, schema
+from . import integrity
 from .integrity import HmacSigner
-from .sealing import _ACTIVATION_FROM_ID
 from .verify import (
     _read_anchor,
     load_seal_records,
@@ -50,11 +46,9 @@ from .verify import (
 )
 
 if TYPE_CHECKING:
-    from .log import AuditLog
+    from .log import TamperEvidentLog
     from .verify import SealRecord
 
-_audits = schema.audit_events
-_seals = schema.seals
 _BATCH_SIZE = 1000
 _SKIP_ALERT_THRESHOLD = 1000
 _TRANSACTION_ATTEMPTS = 3
@@ -63,7 +57,7 @@ _TRANSACTION_ATTEMPTS = 3
 class Retention:
     """Delete expired history only when doing so preserves the tamper-evidence invariant."""
 
-    def __init__(self, audit: AuditLog) -> None:
+    def __init__(self, audit: TamperEvidentLog) -> None:
         self.audit = audit
         self.last_skipped_unsealed = 0
         self.last_blocked_unarchived = 0
@@ -89,61 +83,34 @@ class Retention:
 
     def _sealing_active(self) -> bool:
         """Any activation/seal/floor record makes plain pruning unsafe."""
-        with self.audit.engine.connect() as conn:
-            return conn.execute(select(func.count()).select_from(_seals)).scalar_one() > 0
+        with self.audit.storage.connect() as conn:
+            return conn.any_seal_record()
 
     def _has_expired_events(self, cutoff: datetime) -> bool:
-        with self.audit.engine.connect() as conn:
-            return (
-                conn.execute(
-                    select(_audits.c.id).where(_audits.c.created_at < cutoff).limit(1)
-                ).first()
-                is not None
-            )
+        with self.audit.storage.connect() as conn:
+            return conn.has_expired(cutoff)
 
     def _run_plain(self, cutoff: datetime) -> int:
-        from .sql_archive import lock_policy, verified_ids
-
-        engine = self.audit.engine
-        dialect = get_dialect(engine)
         total = 0
         offset = 0
         schema_present: bool | None = None  # inspected once, on the first batch
         while True:
-            with dialect.begin_claim_tx(engine) as conn:
-                policy = lock_policy(conn, schema_present=schema_present)
+            with self.audit.storage.claim() as conn:
+                policy = conn.archive_policy(schema_present=schema_present)
                 schema_present = policy is not None
-                stmt = dialect.with_skip_locked(
-                    select(_audits)
-                    .where(_audits.c.created_at < cutoff)
-                    .order_by(_audits.c.id)
-                    .offset(offset)
-                    .limit(_BATCH_SIZE)
-                )
-                rows = conn.execute(stmt).all()
+                rows = conn.expired_batch(cutoff, offset, _BATCH_SIZE)
                 if policy is not None and policy.stream:
                     # One unlocked eligibility read per batch; the archive tables never join the
                     # SKIP LOCKED select (PostgreSQL rejects FOR UPDATE on an outer join's
                     # nullable side).
-                    archived = verified_ids(conn, policy.stream, rows)
+                    archived = conn.verified_ids(policy.stream, rows)
                     ids = [row.id for row in rows if row.id in archived]
                 else:
                     ids = [row.id for row in rows]
                 offset += len(rows) - len(ids)
                 self.last_blocked_unarchived += len(rows) - len(ids)
                 if ids:
-                    conn.execute(delete(_audits).where(_audits.c.id.in_(ids)))
-                    if policy is not None:
-                        conn.execute(
-                            delete(schema.archive_imports).where(
-                                schema.archive_imports.c.event_id.in_(ids)
-                            )
-                        )
-                        conn.execute(
-                            delete(schema.archive_members).where(
-                                schema.archive_members.c.event_id.in_(ids)
-                            )
-                        )
+                    conn.delete_rows(ids, archive_tables=policy is not None)
             total += len(ids)
             if len(rows) < _BATCH_SIZE:
                 self._alert_if_blocked_over_threshold()
@@ -169,19 +136,11 @@ class Retention:
             return 0
 
         deleted = 0
-        with snapshot_transaction(self.audit.engine, write=True) as conn:
-            from .sql_archive import lock_policy, verified_ids
-
-            policy = lock_policy(conn)
-            dialect = get_dialect(self.audit.engine)
+        with self.audit.storage.snapshot(write=True) as conn:
+            policy = conn.archive_policy()
             # SQLite is serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL lock the never-deleted
             # activation row before either side computes a shared high-water mark / floor.
-            activation_lock = dialect.with_row_lock(
-                # Lock by the reserved, uniquely-indexed ``from_id`` (not the un-indexed ``kind``):
-                # on MySQL a FOR UPDATE over a non-indexed predicate escalates to a table/gap lock.
-                select(_seals.c.id).where(_seals.c.from_id == _ACTIVATION_FROM_ID).limit(1)
-            )
-            conn.execute(activation_lock).first()
+            conn.lock_activation()
             # The first database read fixes the snapshot before the external anchor is consumed.
             records = load_seal_records(conn)
             if records.capped:
@@ -240,22 +199,10 @@ class Retention:
                 if present_coverage < anchor.coverage_watermark:
                     self._refuse_tampered(floors[-1] if floors else None)
                     return 0
-            if (
-                database_floor > 0
-                and conn.execute(
-                    select(_audits.c.id).where(_audits.c.id <= database_floor).limit(1)
-                ).first()
-            ):
+            if database_floor > 0 and conn.rows_at_or_below(database_floor, 1):
                 self._refuse_tampered(floors[-1] if floors else None)
                 return 0
-            if (
-                floor > database_floor
-                and conn.execute(
-                    select(_audits.c.id)
-                    .where(_audits.c.id > database_floor, _audits.c.id <= floor)
-                    .limit(1)
-                ).first()
-            ):
+            if floor > database_floor and conn.any_row_between(database_floor, floor):
                 # An earlier prune appended its anchor FLOOR line but its database transaction
                 # never committed (crash, or the serialization rollback this method retries on):
                 # the rows *and their covering seals* in (database_floor, floor] are all still
@@ -285,11 +232,7 @@ class Retention:
                     return 0
 
             max_sealed = max([origin, *(record.to_id or origin for record in covering)])
-            self.last_skipped_unsealed = conn.execute(
-                select(func.count())
-                .select_from(_audits)
-                .where(_audits.c.id > max_sealed, _audits.c.created_at < cutoff)
-            ).scalar_one()
+            self.last_skipped_unsealed = conn.count_rows(after=max_sealed, before=cutoff)
             self._alert_if_over_threshold()
 
             through = floor
@@ -307,10 +250,8 @@ class Retention:
                     # Include the pre-activation prefix too: the eventual delete covers every
                     # row through the new floor, not just rows belonging to the newest seal.
                     span = (archive_checked_through, record.to_id)
-                    candidates = conn.execute(
-                        select(_audits).where(_audits.c.id > span[0], _audits.c.id <= span[1])
-                    ).all()
-                    if len(verified_ids(conn, policy.stream, candidates, span=span)) != len(
+                    candidates = conn.rows_between(span[0], span[1])
+                    if len(conn.verified_ids(policy.stream, candidates, span=span)) != len(
                         candidates
                     ):
                         blocked_by_archive = True
@@ -320,15 +261,9 @@ class Retention:
             if blocked_by_archive:
                 # Everything expired between the stop point and the sealed high-water mark is
                 # held back by the guard — the counterpart of ``last_skipped_unsealed`` above.
-                self.last_blocked_unarchived = conn.execute(
-                    select(func.count())
-                    .select_from(_audits)
-                    .where(
-                        _audits.c.id > through,
-                        _audits.c.id <= max_sealed,
-                        _audits.c.created_at < cutoff,
-                    )
-                ).scalar_one()
+                self.last_blocked_unarchived = conn.count_rows(
+                    after=through, through=max_sealed, before=cutoff
+                )
                 self._alert_if_blocked_over_threshold()
             if through <= floor:
                 return 0
@@ -347,31 +282,20 @@ class Retention:
             ):
                 return 0
 
-            conn.execute(
-                _seals.insert().values(
-                    kind="floor",
-                    from_id=None,
-                    to_id=through,
-                    row_count=None,
-                    rows_mac=None,
-                    seal_mac=mac,
-                    sealed_at=retired_at,
-                    key_id=seal_key.id,
-                )
+            deleted = conn.advance_floor(
+                {
+                    "kind": "floor",
+                    "from_id": None,
+                    "to_id": through,
+                    "row_count": None,
+                    "rows_mac": None,
+                    "seal_mac": mac,
+                    "sealed_at": retired_at,
+                    "key_id": seal_key.id,
+                },
+                through=through,
+                archive_tables=policy is not None,
             )
-            deleted = conn.execute(delete(_audits).where(_audits.c.id <= through)).rowcount
-            if policy is not None:
-                conn.execute(
-                    delete(schema.archive_imports).where(
-                        schema.archive_imports.c.event_id <= through
-                    )
-                )
-                conn.execute(
-                    delete(schema.archive_members).where(
-                        schema.archive_members.c.event_id <= through
-                    )
-                )
-            conn.execute(delete(_seals).where(_seals.c.kind == "seal", _seals.c.to_id <= through))
 
         return deleted
 

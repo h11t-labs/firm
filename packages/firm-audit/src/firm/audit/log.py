@@ -19,6 +19,7 @@ from .events import Reference
 from .integrity import Key, load_key
 from .retention import Retention, RetentionLoop
 from .sealing import Sealer, SealLoop
+from .storage import SqlStorage
 from .verify import IntegrityAlert, Verifier, VerifyLoop, VerifyReport, default_on_finding
 
 #: Anchor callback: ``(kind, from_id, to_id, mac, at)`` for a seal/floor/activation event.
@@ -76,42 +77,31 @@ def record(
     )
 
 
-class AuditLog:
-    def __init__(
-        self,
-        database_url: str | None = None,
-        *,
-        engine: Engine | None = None,
-        create_schema: bool = True,
-        max_age: float | None = None,
-        background_retention: bool = False,
-        retention_interval: float = 3600.0,
-        mac_key: str | None = None,
-        seal_key: str | None = None,
-        background_sealing: bool = False,
-        seal_interval: float = 60.0,
-        grace: float = 60.0,
-        seal_batch_size: int = 10_000,
-        anchor_path: str | None = None,
-        on_anchor: AnchorCallback | None = None,
-        verify_cycle: int = 7,
-        background_verification: bool = False,
-        verify_interval: float = 3600.0,
-        verify_full_every: int = 24,
-        anchor_max_age: float | None = None,
-        unsealed_tail_max_age: float | None = None,
-        on_error: Callable[[BaseException], None] | None = None,
-        on_finding: FindingCallback | None = None,
-    ) -> None:
-        if engine is not None:
-            self.engine = engine
-            self._owns_engine = False
-        elif database_url is not None:
-            self.engine = create_engine_for(database_url)
-            self._owns_engine = True
-        else:
-            raise ValueError("AuditLog requires either database_url or engine")
+class TamperEvidentLog:
+    """Keys, sealing, verification and retention shared by every audit-log storage.
 
+    :class:`AuditLog` (SQL tables) and :class:`~firm.audit.s3.S3AuditLog` (S3 objects) differ only
+    in ``self.storage``; both configure tamper-evidence through these methods, so the same
+    arguments mean the same thing and run the same Sealer, Verifier and Retention code.
+    """
+
+    storage: Any
+
+    def _configure_integrity(
+        self,
+        *,
+        max_age: float | None,
+        mac_key: str | None,
+        seal_key: str | None,
+        seal_interval: float,
+        grace: float,
+        seal_batch_size: int,
+        anchor_path: str | None,
+        on_anchor: AnchorCallback | None,
+        verify_cycle: int,
+        anchor_max_age: float | None,
+        unsealed_tail_max_age: float | None,
+    ) -> None:
         self.max_age = max_age
 
         # Tamper-evidence key: explicit ``mac_key=`` wins (pass "" to force it off and ignore
@@ -175,9 +165,20 @@ class AuditLog:
             if unsealed_tail_max_age is not None
             else max(10.0 * seal_interval, grace + seal_interval)
         )
-        if create_schema:
-            schema.create_all(self.engine)
 
+    def _start_maintenance(
+        self,
+        *,
+        background_retention: bool,
+        retention_interval: float,
+        background_sealing: bool,
+        seal_interval: float,
+        background_verification: bool,
+        verify_interval: float,
+        verify_full_every: int,
+        on_error: Callable[[BaseException], None] | None,
+        on_finding: FindingCallback | None,
+    ) -> None:
         # Background pruning / sealing failures are routed here (default: traceback to stderr).
         self.on_error = on_error if on_error is not None else default_on_error
         # Integrity alerts (a verify run that detected tampering/warning) are routed here — a
@@ -228,7 +229,7 @@ class AuditLog:
                 "defaults to the row key (FIRM_AUDIT_KEY / mac_key=) when unset — so this means no "
                 "key at all. Two-phase rollout: deploy the row key to every instance first "
                 "(phase 1), then enable sealing on a host that has a seal key (phase 2).",
-                stacklevel=3,
+                stacklevel=4,
             )
             return
         warnings.warn(
@@ -236,7 +237,96 @@ class AuditLog:
             "must exceed your longest audit-recording transaction plus inter-instance clock "
             "skew; a row that appears inside an already sealed range is TAMPERED. Record "
             "long-running jobs via the own-transaction path (omit conn=).",
-            stacklevel=3,
+            stacklevel=4,
+        )
+
+    def verify(self, *, anchor_path: str | None = None, full: bool = False) -> VerifyReport:
+        """Verify rows, independent seals, markers, and anchor; persist the outcome.
+
+        ``anchor_path`` defaults to the configured anchor (:data:`FIRM_AUDIT_ANCHOR_PATH`) so a
+        deployment that writes an anchor also checks it; pass a path to override, or ``full=True``
+        to recompute every sealed range. Only a full run guarantees complete range coverage.
+        The evidence scan is read-only; status persistence needs a write. Raises
+        :class:`~firm.audit.verify.VerifyError` for an unknown row ``key_id`` only when no tampered
+        finding exists, after writing the ``error`` outcome and routing through ``on_error``.
+        """
+        return self.verifier.run(
+            anchor_path=anchor_path if anchor_path is not None else self._anchor_path,
+            full=full,
+        )
+
+    def _stop_maintenance(self) -> None:
+        if self._loop is not None:
+            self._loop.stop()
+        if self._seal_loop is not None:
+            self._seal_loop.stop()
+        if self._verify_loop is not None:
+            self._verify_loop.stop()
+
+
+class AuditLog(TamperEvidentLog):
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        engine: Engine | None = None,
+        create_schema: bool = True,
+        max_age: float | None = None,
+        background_retention: bool = False,
+        retention_interval: float = 3600.0,
+        mac_key: str | None = None,
+        seal_key: str | None = None,
+        background_sealing: bool = False,
+        seal_interval: float = 60.0,
+        grace: float = 60.0,
+        seal_batch_size: int = 10_000,
+        anchor_path: str | None = None,
+        on_anchor: AnchorCallback | None = None,
+        verify_cycle: int = 7,
+        background_verification: bool = False,
+        verify_interval: float = 3600.0,
+        verify_full_every: int = 24,
+        anchor_max_age: float | None = None,
+        unsealed_tail_max_age: float | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+        on_finding: FindingCallback | None = None,
+    ) -> None:
+        if engine is not None:
+            self.engine = engine
+            self._owns_engine = False
+        elif database_url is not None:
+            self.engine = create_engine_for(database_url)
+            self._owns_engine = True
+        else:
+            raise ValueError("AuditLog requires either database_url or engine")
+        # Sealing, verification and retention reach the tables only through this seam.
+        self.storage = SqlStorage(self.engine)
+
+        self._configure_integrity(
+            max_age=max_age,
+            mac_key=mac_key,
+            seal_key=seal_key,
+            seal_interval=seal_interval,
+            grace=grace,
+            seal_batch_size=seal_batch_size,
+            anchor_path=anchor_path,
+            on_anchor=on_anchor,
+            verify_cycle=verify_cycle,
+            anchor_max_age=anchor_max_age,
+            unsealed_tail_max_age=unsealed_tail_max_age,
+        )
+        if create_schema:
+            schema.create_all(self.engine)
+        self._start_maintenance(
+            background_retention=background_retention,
+            retention_interval=retention_interval,
+            background_sealing=background_sealing,
+            seal_interval=seal_interval,
+            background_verification=background_verification,
+            verify_interval=verify_interval,
+            verify_full_every=verify_full_every,
+            on_error=on_error,
+            on_finding=on_finding,
         )
 
     def record(
@@ -309,28 +399,8 @@ class AuditLog:
                 limit=limit,
             )
 
-    def verify(self, *, anchor_path: str | None = None, full: bool = False) -> VerifyReport:
-        """Verify rows, independent seals, markers, and anchor; persist the outcome.
-
-        ``anchor_path`` defaults to the configured anchor (:data:`FIRM_AUDIT_ANCHOR_PATH`) so a
-        deployment that writes an anchor also checks it; pass a path to override, or ``full=True``
-        to recompute every sealed range. Only a full run guarantees complete range coverage.
-        The evidence scan is read-only; status persistence needs a write. Raises
-        :class:`~firm.audit.verify.VerifyError` for an unknown row ``key_id`` only when no tampered
-        finding exists, after writing the ``error`` outcome and routing through ``on_error``.
-        """
-        return self.verifier.run(
-            anchor_path=anchor_path if anchor_path is not None else self._anchor_path,
-            full=full,
-        )
-
     def close(self) -> None:
-        if self._loop is not None:
-            self._loop.stop()
-        if self._seal_loop is not None:
-            self._seal_loop.stop()
-        if self._verify_loop is not None:
-            self._verify_loop.stop()
+        self._stop_maintenance()
         if self._owns_engine:
             dispose_engine(self.engine)
 

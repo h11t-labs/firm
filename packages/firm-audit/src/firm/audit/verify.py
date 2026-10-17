@@ -22,6 +22,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import pairwise
@@ -32,13 +33,12 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .._core.clock import now_utc
 from .._core.database import snapshot_transaction
-from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
 from .integrity import HmacSigner, Key, parse_keyring
 
 if TYPE_CHECKING:
-    from .log import AuditLog
+    from .log import TamperEvidentLog
 
 _audits = schema.audit_events
 _seals = schema.seals
@@ -115,7 +115,12 @@ class SealRecords(list[SealRecord]):
     capped: bool = False
 
 
-def load_seal_records(conn: Connection) -> SealRecords:
+def load_seal_records(conn: Any) -> SealRecords:
+    """All seal-side records from a storage view (activation, seals, floors)."""
+    return conn.seal_records()
+
+
+def _sql_seal_records(conn: Connection) -> SealRecords:
     """Load side-table rows without invoking dialect datetime/integer result processors.
 
     Casting attacker-controlled typed fields to text lets verification classify malformed values
@@ -211,7 +216,12 @@ def _parse_seal_record(row: Any) -> SealRecord:
     )
 
 
-def _iter_rows(conn: Connection, low: int, high: int | None) -> Iterator[Any]:
+def _iter_rows(conn: Any, low: int, high: int | None) -> Iterator[Any]:
+    """Bounded event projections with id in ``(low, high]``, in id order, from a storage view."""
+    return conn.iter_rows(low, high)
+
+
+def _sql_iter_rows(conn: Connection, low: int, high: int | None) -> Iterator[Any]:
     """Yield bounded event projections in id order with keyset pagination."""
     text_limits = {
         "action": _MAX_SCALAR_CHARS,
@@ -300,7 +310,7 @@ RowCallback = Callable[[Any, str], None]
 
 
 def classify_range(
-    conn: Connection,
+    conn: Any,
     seal: SealRecord,
     boundary: int | None,
     keyring: dict[str, Key],
@@ -354,7 +364,7 @@ def classify_range(
 
 
 def range_is_prunable(
-    conn: Connection,
+    conn: Any,
     seal: SealRecord,
     boundary: int | None,
     keyring: dict[str, Key],
@@ -666,7 +676,7 @@ def _affected_json(findings: Sequence[Finding], total_tampered: int) -> str | No
 class Verifier:
     """Run the eight-point invariant for one :class:`~firm.audit.log.AuditLog`."""
 
-    def __init__(self, audit: AuditLog) -> None:
+    def __init__(self, audit: TamperEvidentLog) -> None:
         self.audit = audit
 
     @property
@@ -748,7 +758,7 @@ class Verifier:
         findings: list[Finding] = _Findings()
         unresolved_rows = _UnresolvedRows()
 
-        with snapshot_transaction(self.audit.engine) as conn:
+        with self._snapshot() as conn:
             # The first SQL read acquires the PG/MySQL snapshot. Read the external anchor only
             # afterward so both verify and retention compare it with an already-fixed DB view.
             records = load_seal_records(conn)
@@ -761,12 +771,7 @@ class Verifier:
                 if anchor_path is not None
                 else None
             )
-            prior = conn.execute(
-                select(
-                    _status.c.last_full_coverage_at,
-                    _status.c.sealing_observed,
-                ).where(_status.c.id == _STATUS_ID)
-            ).first()
+            prior = conn.status_prior()
             if records.capped:
                 findings.append(
                     Finding(
@@ -934,7 +939,7 @@ class Verifier:
 
     def _reconcile_pending_prune(
         self,
-        conn: Connection,
+        conn: Any,
         database_floor: int,
         floor: int,
         counters: _Counters,
@@ -957,12 +962,7 @@ class Verifier:
         """
         if floor <= database_floor:
             return floor
-        pending = conn.execute(
-            select(_audits.c.id)
-            .where(_audits.c.id > database_floor, _audits.c.id <= floor)
-            .limit(1)
-        ).first()
-        if pending is None:
+        if not conn.any_row_between(database_floor, floor):
             return floor
         findings.append(
             Finding(
@@ -1007,7 +1007,7 @@ class Verifier:
 
     def _check_missing_activation_guard(
         self,
-        conn: Connection,
+        conn: Any,
         records: Sequence[SealRecord],
         *,
         anchor_configured: bool,
@@ -1023,8 +1023,7 @@ class Verifier:
             or any(record.kind in {"activation", "seal"} for record in records)
         ):
             return
-        events_present = conn.execute(select(_audits.c.id).limit(1)).first() is not None
-        if not events_present:
+        if not conn.any_row():
             return
         findings.append(
             Finding(
@@ -1084,7 +1083,7 @@ class Verifier:
 
     def _verify_one_range(
         self,
-        conn: Connection,
+        conn: Any,
         record: SealRecord,
         boundary: int | None,
         keyring: dict[str, Key],
@@ -1116,7 +1115,7 @@ class Verifier:
 
     def _verify_legacy_prefix(
         self,
-        conn: Connection,
+        conn: Any,
         floor: int,
         boundary: int | None,
         keyring: dict[str, Key],
@@ -1137,7 +1136,7 @@ class Verifier:
 
     def _verify_tail(
         self,
-        conn: Connection,
+        conn: Any,
         max_covered: int,
         boundary: int | None,
         keyring: dict[str, Key],
@@ -1207,18 +1206,16 @@ class Verifier:
 
     def _check_pruned_region_empty(
         self,
-        conn: Connection,
+        conn: Any,
         floor: int,
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
         if floor <= 0:
             return
-        rows = conn.execute(
-            select(_audits.c.id).where(_audits.c.id <= floor).order_by(_audits.c.id).limit(5)
-        ).all()
-        if rows:
-            ids = ", ".join(str(row.id) for row in rows)
+        present = conn.rows_at_or_below(floor, 5)
+        if present:
+            ids = ", ".join(str(row_id) for row_id in present)
             findings.append(
                 Finding(
                     "tampered",
@@ -1228,22 +1225,13 @@ class Verifier:
             )
             counters.tampered += 1
 
-    def _check_duplicates(
-        self, conn: Connection, counters: _Counters, findings: list[Finding]
-    ) -> None:
-        rows = conn.execute(
-            select(_audits.c.entry_id)
-            .where(_audits.c.entry_id.is_not(None))
-            .group_by(_audits.c.entry_id)
-            .having(func.count() > 1)
-            .limit(_MAX_FINDINGS)
-        ).all()
-        for row in rows:
+    def _check_duplicates(self, conn: Any, counters: _Counters, findings: list[Finding]) -> None:
+        for entry_id in conn.duplicate_entry_ids(_MAX_FINDINGS):
             findings.append(
                 Finding(
                     "tampered",
-                    f"entry_id {row.entry_id!r} appears more than once (replay)",
-                    f"entry_id {row.entry_id}",
+                    f"entry_id {entry_id!r} appears more than once (replay)",
+                    f"entry_id {entry_id}",
                 )
             )
             counters.tampered += 1
@@ -1437,25 +1425,23 @@ class Verifier:
 
     def _prior_sealing_observed(self) -> bool:
         try:
-            with self.audit.engine.connect() as conn:
-                value = conn.execute(
-                    select(_status.c.sealing_observed).where(_status.c.id == _STATUS_ID)
-                ).scalar_one_or_none()
-            return bool(value)
+            return self.audit.storage.prior_sealing_observed()
         except Exception:
             return False
 
     def _upsert_status(self, **values: Any) -> None:
-        dialect = get_dialect(self.audit.engine)
-        payload = {"id": _STATUS_ID, **values}
-        stmt = dialect.upsert(
-            _status,
-            payload,
-            index_elements=["id"],
-            update_columns=[column for column in payload if column != "id"],
-        )
-        with dialect.begin_claim_tx(self.audit.engine) as conn:
-            conn.execute(stmt)
+        self.audit.storage.upsert_status(values)
+
+    @contextmanager
+    def _snapshot(self) -> Iterator[Any]:
+        """The run's consistent read view: a SQL snapshot transaction, or the storage's own."""
+        storage = self.audit.storage
+        if storage.sql:
+            with snapshot_transaction(storage.engine) as conn:
+                yield storage.view(conn)
+        else:
+            with storage.snapshot() as view:
+                yield view
 
 
 class VerifyLoop(InterruptiblePoller):
