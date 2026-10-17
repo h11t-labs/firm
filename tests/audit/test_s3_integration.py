@@ -18,9 +18,17 @@ from firm.audit.sql_archive import SQLArchiver
 @pytest.fixture
 def live_storage():
     bucket = os.getenv("FIRM_TEST_S3_BUCKET")
+    # CI's live job sets this so a misconfiguration fails the run instead of skipping it green.
+    required = bool(os.getenv("FIRM_TEST_S3_REQUIRED"))
     if not bucket:
-        pytest.skip("set FIRM_TEST_S3_BUCKET and SDK credentials for real provider tests")
-    boto3 = pytest.importorskip("boto3")
+        message = "set FIRM_TEST_S3_BUCKET and SDK credentials for real provider tests"
+        if required:
+            pytest.fail(message)
+        pytest.skip(message)
+    if required:
+        import boto3
+    else:
+        boto3 = pytest.importorskip("boto3")
     client = boto3.client(
         "s3",
         endpoint_url=os.getenv("FIRM_TEST_S3_ENDPOINT"),

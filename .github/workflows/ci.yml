@@ -122,6 +122,8 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     env:
+      # A skipped live run proves nothing about the provider, so make skips fail here.
+      FIRM_TEST_S3_REQUIRED: "1"
       FIRM_TEST_S3_BUCKET: firm-test
       FIRM_TEST_S3_ENDPOINT: http://127.0.0.1:9000
       AWS_ACCESS_KEY_ID: firm
