@@ -1312,10 +1312,14 @@ def archive_page(
     key: str,
     archive: Any,
     *,
+    batches: list[dict[str, Any]] | None = None,
+    batches_next: str | None = None,
     views: list[dict[str, Any]] | None = None,
     theme: str = "system",
     urls: Urls = ROOT_URLS,
 ) -> str:
+    """One verified batch when ``key`` is set; otherwise a page of the archive's batches (from
+    ``Archive.batches``), each linking to its verified view."""
     from firm.audit.event_format import read_event
 
     seen: set[tuple[str, str, str]] = set()
@@ -1359,7 +1363,32 @@ def archive_page(
         source=source,
         rows=rows,
         key=key,
+        batches=[_batch_row(urls, batch) for batch in batches or []],
+        batches_next=Markup(
+            urls.path("/audit/archive") + "?" + urlencode({"continuation": batches_next})
+        )
+        if batches_next
+        else None,
     )
+
+
+def _batch_row(urls: Urls, batch: dict[str, Any]) -> dict[str, Any]:
+    """A listed archive batch: short id, a link to verify it, and its manifest summary."""
+    manifest_key = batch["manifest_key"]
+
+    def when(field: str) -> Markup:
+        value = batch.get(field)
+        return _when(datetime.fromisoformat(value) if value else None)
+
+    return {
+        **batch,
+        "short_id": batch["batch_id"][:8],
+        "href": urls.path("/audit/archive") + "?" + urlencode({"key": manifest_key})
+        if manifest_key
+        else None,
+        "first": when("min_created_at"),
+        "last": when("max_created_at"),
+    }
 
 
 # -- misc --------------------------------------------------------------------------------------

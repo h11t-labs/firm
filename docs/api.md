@@ -315,7 +315,7 @@ Install `firm-audit[s3]`. These APIs live in optional submodules and leave SQL `
 - `S3AuditLog.get(receipt_or_key) -> dict`; `scan(*, start, end, limit=100, max_objects=1000, max_requests=1100, continuation=None, action=None, subject_type=None, subject_id=None, actor_type=None, actor_id=None, correlation_id=None) -> ScanPage`
 - `PreparedEvent(key, body)`; `UnknownEventOutcome.prepared` contains the retryable envelope.
 - `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
-- `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`.
+- `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`; `batches(*, limit=25, continuation=None) -> tuple[list, str | None]` (unverified summaries, batch-ID order).
 - `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
 - `Archive.export_s3(source, *, start, end, batch_id, continuation=None, max_objects=100) -> Receipt`.
 - `Archive.restore_s3(receipt_or_key, target) -> list[Receipt]`.

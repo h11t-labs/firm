@@ -13,6 +13,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 - Verified S3 archives for SQL/S3 sources, resumable publication, deduplicated multi-batch reads,
   and isolated restores with source provenance. Native SQL restores retain row signatures and
   their exact JSON bytes; event archives do not recreate seals or external anchors.
+- `Archive.batches()` pages through an archive's batches with unverified manifest summaries
+  (count, time range) and flags staged-but-unpublished (`pending`) batches.
 - Migration `0003` adds an opt-in persisted archive-before-prune policy. Both plain and
   seal-aligned retention keep unarchived rows, including the pre-activation prefix. Eligibility
   is one query per batch or seal range; `Retention.last_blocked_unarchived` counts the expired

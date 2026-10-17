@@ -160,6 +160,12 @@ verifies an archive. A receipt pins/verifies the manifest version; plain keys us
 manifest. Missing/corrupt data fails visibly. Cold storage requiring a provider restore operation
 raises `ObjectUnavailable` rather than silently returning an empty archive.
 
+`archive.batches(limit=25, continuation=None)` returns one page of batches as
+`(summaries, continuation)`: batch ID, manifest key, status (`complete`, `pending` for staged
+input without a manifest, or `unreadable`), event count, and event time range. It costs one LIST
+plus one manifest GET per published batch and verifies nothing; pages follow batch-ID order,
+not creation order. Open a batch with `read()` to verify it.
+
 ```python
 from firm.audit import AuditLog
 from firm.audit.archive import Archive
@@ -271,7 +277,8 @@ Optional `--audit-s3-prefix`, `--audit-s3-region`, and `--audit-s3-endpoint` sel
 The S3 view shows bounded date/filter scans (the "To" date is inclusive) and event details, with
 continuation and scan counts, under a source strip naming the bucket, prefix, and stream. It
 does not display misleading global counts or unsupported sorting. `--audit-archive-bucket cold`
-adds the archive view, which verifies a batch by manifest key; `--audit-archive-prefix`
+adds the archive view: it lists the archive's batches (with pending and unreadable ones
+flagged) and verifies a batch when you open it or paste its manifest key. `--audit-archive-prefix`
 defaults to `firm-audit`, the same as `ObjectStore` and `firm-audit archive`.
 
 SQL and S3 audit logs can be shown together: pass `--database-url` (or `--audit-url`) next to

@@ -11,7 +11,14 @@ from typing import Any
 from uuid import uuid4
 
 from .event_format import canonical, read_event, token_decode, token_encode, uuid_text, wire_event
-from .object_store import MAX_OBJECT_BYTES, ObjectConflict, ObjectStore, Receipt, digest
+from .object_store import (
+    MAX_OBJECT_BYTES,
+    ObjectConflict,
+    ObjectStore,
+    ObjectUnavailable,
+    Receipt,
+    digest,
+)
 from .s3 import S3AuditLog
 
 MAX_ARCHIVE_RECORDS = 1000
@@ -150,6 +157,51 @@ class Archive:
     def inspect(self, locator: Receipt | str) -> dict[str, Any]:
         """Verify and expose manifest scope/progress for the next bounded export."""
         return self._load(locator)[0]
+
+    def batches(
+        self, *, limit: int = 25, continuation: str | None = None
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """List batches in batch-id (key) order, not creation order, with manifest summaries.
+
+        Bounded: one LIST plus one manifest GET per published batch. Summaries are read, not
+        verified; ``read()`` verifies a batch. A batch with staged input but no manifest is
+        ``pending`` (``resume()`` completes it); a manifest that does not parse is
+        ``unreadable``. Returns the page and a continuation for the next one, or ``None``.
+        """
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be 1..100")
+        query = {"archive": self.prefix}
+        after = token_decode(continuation, query) if continuation else ""
+        keys, exhausted = self.store.list_keys(self.prefix, after=after, limit=limit * 3 + 3)
+        groups: dict[str, list[str]] = {}
+        for key in keys:
+            groups.setdefault(key[len(self.prefix) :].split("/", 1)[0], []).append(key)
+        batch_ids = list(groups)
+        if not exhausted and len(batch_ids) > 1:
+            batch_ids.pop()  # its keys may continue on the next LIST page
+        batch_ids = batch_ids[:limit]
+        items = [self._batch_summary(batch_id, groups[batch_id]) for batch_id in batch_ids]
+        more = not exhausted or len(groups) > len(batch_ids)
+        token = token_encode(query, groups[batch_ids[-1]][-1]) if more and batch_ids else None
+        return items, token
+
+    def _batch_summary(self, batch_id: str, keys: list[str]) -> dict[str, Any]:
+        manifest_key = f"{self.prefix}{batch_id}/manifest.json"
+        summary: dict[str, Any] = {"batch_id": batch_id, "manifest_key": None, "status": "pending"}
+        if manifest_key not in keys:
+            return summary
+        summary["manifest_key"] = manifest_key
+        try:
+            manifest = json.loads(self.store.read(manifest_key)[0])
+            summary.update(
+                status="complete",
+                count=int(manifest["count"]),
+                min_created_at=manifest["min_created_at"],
+                max_created_at=manifest["max_created_at"],
+            )
+        except (ValueError, KeyError, TypeError, FileNotFoundError, ObjectUnavailable):
+            summary["status"] = "unreadable"
+        return summary
 
     def read_many(
         self,

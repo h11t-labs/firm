@@ -4386,6 +4386,12 @@ verifies an archive. A receipt pins/verifies the manifest version; plain keys us
 manifest. Missing/corrupt data fails visibly. Cold storage requiring a provider restore operation
 raises `ObjectUnavailable` rather than silently returning an empty archive.
 
+`archive.batches(limit=25, continuation=None)` returns one page of batches as
+`(summaries, continuation)`: batch ID, manifest key, status (`complete`, `pending` for staged
+input without a manifest, or `unreadable`), event count, and event time range. It costs one LIST
+plus one manifest GET per published batch and verifies nothing; pages follow batch-ID order,
+not creation order. Open a batch with `read()` to verify it.
+
 ```python
 from firm.audit import AuditLog
 from firm.audit.archive import Archive
@@ -4497,7 +4503,8 @@ Optional `--audit-s3-prefix`, `--audit-s3-region`, and `--audit-s3-endpoint` sel
 The S3 view shows bounded date/filter scans (the "To" date is inclusive) and event details, with
 continuation and scan counts, under a source strip naming the bucket, prefix, and stream. It
 does not display misleading global counts or unsupported sorting. `--audit-archive-bucket cold`
-adds the archive view, which verifies a batch by manifest key; `--audit-archive-prefix`
+adds the archive view: it lists the archive's batches (with pending and unreadable ones
+flagged) and verifies a batch when you open it or paste its manifest key. `--audit-archive-prefix`
 defaults to `firm-audit`, the same as `ObjectStore` and `firm-audit archive`.
 
 SQL and S3 audit logs can be shown together: pass `--database-url` (or `--audit-url`) next to
@@ -5843,7 +5850,7 @@ Install `firm-audit[s3]`. These APIs live in optional submodules and leave SQL `
 - `S3AuditLog.get(receipt_or_key) -> dict`; `scan(*, start, end, limit=100, max_objects=1000, max_requests=1100, continuation=None, action=None, subject_type=None, subject_id=None, actor_type=None, actor_id=None, correlation_id=None) -> ScanPage`
 - `PreparedEvent(key, body)`; `UnknownEventOutcome.prepared` contains the retryable envelope.
 - `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
-- `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`.
+- `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`; `batches(*, limit=25, continuation=None) -> tuple[list, str | None]` (unverified summaries, batch-ID order).
 - `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
 - `Archive.export_s3(source, *, start, end, batch_id, continuation=None, max_objects=100) -> Receipt`.
 - `Archive.restore_s3(receipt_or_key, target) -> list[Receipt]`.

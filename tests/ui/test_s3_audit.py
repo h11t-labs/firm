@@ -85,14 +85,20 @@ def test_s3_only_audit_tab_lands_on_s3_history_with_its_query():
         dash.close()
 
 
-def test_archive_view_empty_state_and_bad_cursor(s3_dashboard_url):
+def test_archive_view_batch_list_and_bad_cursors(s3_dashboard_url):
     base, _, key = s3_dashboard_url
     with urlopen(base + "/audit/archive?" + urlencode({"key": key})) as response:
         body = response.read().decode()
         assert "1 verified event<" in body
         assert 'Source</span> <span class="source-word">Archive' in body
     with urlopen(base + "/audit/archive") as response:
-        assert "Paste a manifest key" in response.read().decode()
+        # Without a key the view lists batches, each linking to its verified view.
+        listing = response.read().decode()
+        assert 'href="/audit/archive?' + urlencode({"key": key}) + '"' in listing
+        assert "1 batch on this page" in listing and ">complete<" in listing
+    with pytest.raises(HTTPError) as caught:
+        urlopen(base + "/audit/archive?continuation=bogus")
+    assert caught.value.code == 400
     with pytest.raises(HTTPError) as caught:
         urlopen(base + "/audit/s3?start=2026-01-01&end=2026-01-01&continuation=invalid")
     assert caught.value.code == 400
@@ -209,5 +215,27 @@ def test_mounted_s3_routes_keep_prefix_theme_and_authentication():
         protected = DashboardApp(dash, authenticator=BasicAuth("ops", password="test-password"))
         for path in ("/audit", "/audit/s3", "/audit/object", "/audit/archive"):
             assert protected.handle(UIRequest("GET", path)).status == 401
+    finally:
+        dash.close()
+
+
+def test_archive_batch_list_pages_and_flags_pending_batches():
+    client = MemoryS3()
+    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
+    log.record("paged", created_at=DAY)
+    archive = Archive(ObjectStore("archives", client=client))
+    for _ in range(26):
+        archive.export_s3(log, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4()))
+    archive.store.put(f"{archive.prefix}{'f' * 8}-ffff-4fff-8fff-{'f' * 12}/input.json", b"{}")
+    dash = build_dashboard(audit_archive=archive)
+    try:
+        app = DashboardApp(dash)
+        status, first = _get(app, "/audit/archive")
+        assert status == 200 and "25 batches on this page" in first
+        match = re.search(r'href="(/audit/archive)\?(continuation=[^"]*)">Next', first)
+        assert match is not None
+        status, second = _get(app, match.group(1), html.unescape(match.group(2)))
+        assert status == 200 and "2 batches on this page" in second and "Next" not in second
+        assert ">pending<" in second  # the staged batch sorts last ("ffffffff…")
     finally:
         dash.close()

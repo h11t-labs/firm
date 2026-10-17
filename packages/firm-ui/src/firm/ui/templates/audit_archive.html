@@ -26,6 +26,20 @@
 <Empty text="This batch holds no events." />
 {% endif %}
 {% else %}
-<Empty text="Paste a manifest key from an archive receipt to verify and read that batch." />
+<Section title="Batches"><span class="secondary">batch-id order · open one to verify it</span></Section>
+{% if batches %}
+<div class="tw"><table><tr><th>Batch</th><th>Status</th><th class="right">Events</th><th>First event</th><th>Last event</th></tr>
+{% for b in batches %}
+<tr><td class="mono">{% if b.href %}<a href="{{ b.href }}" title="{{ b.batch_id }}">{{ b.short_id }}</a>{% else %}<span title="{{ b.batch_id }}">{{ b.short_id }}</span>{% endif %}</td>
+<td>{% if b.status == "complete" %}<span class="secondary">complete</span>{% elif b.status == "pending" %}<span class="text-warn" title="Input is staged but no manifest was published; resume the batch to finish it.">pending</span>{% else %}<span class="text-danger" title="The manifest could not be read.">unreadable</span>{% endif %}</td>
+<td class="right tnum">{% if b.count is defined %}{{ b.count | num }}{% else %}<Dash />{% endif %}</td>
+<td class="secondary">{{ b.first }}</td>
+<td class="secondary">{{ b.last }}</td></tr>
+{% endfor %}
+</table></div>
+{% else %}
+<Empty text="No batches in this archive yet." />
+{% endif %}
+<div class="pager"><span>{{ batches | length | num }} {{ "batch" if batches | length == 1 else "batches" }} on this page</span><div class="pg-nav">{% if batches_next %}<a href="{{ batches_next }}">Next →</a>{% endif %}</div></div>
 {% endif %}
 {% endblock %}

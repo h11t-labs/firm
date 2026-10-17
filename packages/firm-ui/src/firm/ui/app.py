@@ -783,8 +783,15 @@ class _Handler:
         dash = self.dash
         assert dash.audit_archive is not None
         key = params.get("key", [""])[0]
+        batches, batches_next = None, None
         try:
-            entries = dash.audit_archive.read(key) if key else []
+            if key:
+                entries = dash.audit_archive.read(key)
+            else:
+                entries = []
+                batches, batches_next = dash.audit_archive.batches(
+                    limit=25, continuation=params.get("continuation", [None])[0]
+                )
         except FileNotFoundError:
             return self._not_found()
         except ValueError as exc:
@@ -797,6 +804,8 @@ class _Handler:
                 entries,
                 key,
                 dash.audit_archive,
+                batches=batches,
+                batches_next=batches_next,
                 views=self._audit_views("archive"),
                 theme=self._theme(),
                 urls=self.urls,

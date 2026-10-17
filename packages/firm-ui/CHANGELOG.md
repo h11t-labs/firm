@@ -14,6 +14,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 - SQL and S3 audit logs can be shown side by side: the audit tab gets a Database / S3 / Archive
   switcher (`/audit`, `/audit/s3`, `/audit/archive`) when more than one view is configured.
   `--audit-archive-prefix` defaults to `firm-audit`, matching `ObjectStore`.
+- The archive view lists the archive's batches (status, event count, time range, paged) and
+  opens each as a verified batch, so no manifest key needs to be pasted.
 
 - The dashboard can be **mounted inside a host application** — on its domain, in its routing,
   behind its own permissions — instead of running as a second process. One adapter per framework,

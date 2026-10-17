@@ -355,3 +355,36 @@ def test_export_s3_reads_each_source_object_once(s3_log, archive, object_client)
     # (resume), PUT data, GET data (verify), PUT manifest, and the read-back of manifest + data.
     assert object_client.request_count - before == 1 + 10 + 8
     assert len(archive.read(receipt)) == 10
+
+
+def test_batches_page_through_summaries_in_key_order(s3_log, archive, object_client):
+    for _ in range(3):
+        s3_log.record("listed", created_at=NOW)
+    kwargs = {"start": date(2020, 1, 1), "end": date(2020, 1, 2)}
+    published = [archive.export_s3(s3_log, batch_id=str(uuid4()), **kwargs) for _ in range(3)]
+    staged = str(uuid4())  # input frozen, never published: resume() would complete it
+    archive.store.put(f"{archive.prefix}{staged}/input.json", b"{}")
+    pages, token = [], None
+    while True:
+        before = object_client.request_count
+        items, token = archive.batches(limit=2, continuation=token)
+        # One LIST plus one manifest GET per published batch on the page; nothing is verified.
+        assert object_client.request_count - before == 1 + sum(
+            i["manifest_key"] is not None for i in items
+        )
+        pages.append(items)
+        if token is None:
+            break
+    seen = [item for page in pages for item in page]
+    assert [len(page) for page in pages] == [2, 2]
+    assert [item["batch_id"] for item in seen] == sorted({item["batch_id"] for item in seen})
+    by_id = {item["batch_id"]: item for item in seen}
+    assert by_id[staged] == {"batch_id": staged, "manifest_key": None, "status": "pending"}
+    for receipt in published:
+        summary = by_id[receipt.key.split("/")[-2]]
+        assert summary["status"] == "complete" and summary["manifest_key"] == receipt.key
+        assert summary["count"] == 3 and summary["min_created_at"].startswith("2020-01-01")
+    with pytest.raises(ValueError):
+        archive.batches(continuation="bogus")
+    with pytest.raises(ValueError):
+        archive.batches(limit=0)
