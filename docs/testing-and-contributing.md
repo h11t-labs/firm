@@ -68,6 +68,39 @@ Notes:
 - **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
   render correctly for Postgres/MySQL with no live database.
 
+## Running against S3 (MinIO)
+
+The S3 tests run against an in-memory fake by default. `tests/audit/test_s3_integration.py` adds
+real round-trips (conditional writes, versions, pagination, export, restore) and skips unless
+`FIRM_TEST_S3_BUCKET` is set. CI runs it against MinIO; to do the same locally:
+
+```bash
+# the image CI uses (minio/minio is no longer published on Docker Hub)
+docker run -d --name bb_minio -e MINIO_ROOT_USER=firm -e MINIO_ROOT_PASSWORD=firm-test-secret \
+  -p 9000:9000 ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z server /data
+docker exec bb_minio mc ready local    # waits until the server accepts requests
+
+# the library never creates buckets, and receipts carry version IDs only on a versioned one
+docker exec bb_minio mc alias set local http://localhost:9000 firm firm-test-secret
+docker exec bb_minio mc mb local/firm-test
+docker exec bb_minio mc version enable local/firm-test
+
+export FIRM_TEST_S3_BUCKET=firm-test
+export FIRM_TEST_S3_ENDPOINT=http://localhost:9000
+export AWS_ACCESS_KEY_ID=firm AWS_SECRET_ACCESS_KEY=firm-test-secret AWS_REGION=us-east-1
+
+uv run pytest tests/audit/test_s3_integration.py -rs   # -rs reports a skip if the env is off
+```
+
+Notes:
+
+- The tests write under a random prefix and delete only their own objects and versions, but use a
+  dedicated **test** bucket anyway.
+- Any other S3-compatible endpoint works the same way. It must reject a second
+  `If-None-Match: *` PUT to an existing key; that is the property audit immutability rests on.
+- The SQL side of these tests also runs against Postgres/MySQL when `FIRM_TEST_PG_URL` /
+  `FIRM_TEST_MYSQL_URL` are set.
+
 ## Upstream test parity
 
 firm is a port of the Rails Solid stack (`solid_queue` / `solid_cache` / `solid_cable`), but it is
