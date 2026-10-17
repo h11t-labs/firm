@@ -131,6 +131,6 @@ audit_b = AuditLog(engine=engine, create_schema=False)
 
 ## Optional S3 storage
 
-The existing SQL backend remains the default. `firm-audit[s3]` adds a database-free S3 backend
-and optional archives for SQL/S3 sources. See [S3 & archives](s3-and-archives.md) for configuration,
+The SQL storage remains the default. `firm-audit[s3]` adds `S3AuditLog` (the same log, stored in
+S3) and optional archives for SQL and S3 logs. See [S3 & archives](s3-and-archives.md) for configuration,
 retry guarantees, CLI commands, and retention requirements.

@@ -8,20 +8,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
-- Read-only S3 audit and archive views, including bounded scan progress, filters, details,
-  and archive verification, built on the same components as the SQL audit page. Each names its
-  storage in a source strip. Routes share dashboard authentication, themes, and mount prefixes.
+- An `S3AuditLog` is shown on the same audit page as SQL (`/audit/s3`): cards, filters,
+  sorting, pagination, the integrity strip and per-row status, under a source strip naming the
+  bucket, prefix and stream. Routes share dashboard authentication, themes, and mount prefixes.
+- A read-only archive view lists the archive's batches (status, event count, time range, signed
+  rows, paged) and opens each as a verified batch with each event's recorded signature.
 - SQL and S3 audit logs can be shown side by side: the audit tab gets a Database / S3 / Archive
   switcher (`/audit`, `/audit/s3`, `/audit/archive`) when more than one view is configured.
   `--audit-archive-prefix` defaults to `firm-audit`, matching `ObjectStore`.
-- The archive view lists the archive's batches (status, event count, time range, paged) and
-  opens each as a verified batch, so no manifest key needs to be pasted.
-- The S3 view verifies event signatures when the dashboard has `FIRM_AUDIT_KEY`: a Signature
-  column (signed / not checked / unsigned), a signature cell on the event page, and a source
-  strip that says whether signatures are checked.
-- Signing is visible outside the database view: archived events show a recorded SQL row
-  signature (with key ID), unsigned, or an S3 SHA-256 receipt; the batch list shows signed rows
-  per batch; the S3 source strip says objects carry a SHA-256 digest, not a signature.
 
 - The dashboard can be **mounted inside a host application** — on its domain, in its routing,
   behind its own permissions — instead of running as a second process. One adapter per framework,

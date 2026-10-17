@@ -79,5 +79,6 @@ the cryptographic integrity layer.
 
 ## S3 backend and archives
 
-See [S3 backend and archival storage](s3-and-archives.md) for database-free audit,
-bounded scans, export, restore, and archive-before-prune protection. SQL remains the default.
+`S3AuditLog` is the same audit log with S3 objects as storage, for deployments without a
+database. See [S3 storage and archives](s3-and-archives.md), which also covers export, restore,
+and archive-before-prune for both storages. SQL remains the default.

@@ -307,21 +307,22 @@ Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. 
 
 ## Optional S3 audit and archival APIs
 
-Install `firm-audit[s3]`. These APIs live in optional submodules and leave SQL `AuditLog` unchanged:
+Install `firm-audit[s3]`. These APIs live in optional submodules; importing `firm.audit` loads no
+boto3.
 
-- `firm.audit.s3.S3AuditLog(bucket, *, stream, prefix="firm-audit", region=None, endpoint_url=None, client=None, mac_key=None, require_signatures=False)`; signs with `mac_key`/`FIRM_AUDIT_KEY`, verifies with it plus `FIRM_AUDIT_RETIRED_KEYS`; properties `key_id`, `verifies_signatures`. Decoded events carry `signature` (`status` `valid`/`unverified`/`unsigned`, `key_id`); a bad or malformed signature (or a non-valid one under `require_signatures`) raises `EventSignatureError`.
-- `S3AuditLog.prepare(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, event_id=None, created_at=None, provenance=None) -> PreparedEvent`
-- `S3AuditLog.write(prepared) -> Receipt`; `record(action, **event_fields) -> Receipt` rejects SQL `conn=`.
-- `S3AuditLog.get(receipt_or_key) -> dict`; `scan(*, start, end, limit=100, max_objects=1000, max_requests=1100, continuation=None, action=None, subject_type=None, subject_id=None, actor_type=None, actor_id=None, correlation_id=None) -> ScanPage`
-- `PreparedEvent(key, body)`; `UnknownEventOutcome.prepared` contains the retryable envelope.
+- `firm.audit.s3.S3AuditLog(bucket, *, stream, prefix="firm-audit", region=None, endpoint_url=None, client=None, ...)` takes every `AuditLog` keyword (`max_age`, `background_retention`, `retention_interval`, `mac_key`, `seal_key`, `background_sealing`, `seal_interval`, `grace`, `seal_batch_size`, `anchor_path`, `on_anchor`, `verify_cycle`, `background_verification`, `verify_interval`, `verify_full_every`, `anchor_max_age`, `unsealed_tail_max_age`, `on_error`, `on_finding`) plus `outbox_engine=None`, `outbox_interval=5.0`, `create_outbox=True`, `workers=16`, `lease_ttl=300.0`, `lease_wait=5.0`. It has `AuditLog`'s `record`, `history`, `verify`, `retention`, `sealer`, `close` and context-manager use, with the same semantics.
+- `S3AuditLog.record(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, conn=None) -> Receipt | None`; with `conn` it stages the event in the caller's transaction (`firm_audit_s3_outbox`) and returns `None`.
+- `S3AuditLog.prepare(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, created_at=None, provenance=None) -> PreparedEvent`; `write(prepared) -> Receipt` is idempotent per body and raises `UnknownEventOutcome` (`.prepared`) when the outcome is unknown.
+- `S3AuditLog.history(*, subject=None, subject_type=None, subject_id=None, actor=None, actor_type=None, actor_id=None, action=None, correlation_id=None, since=None, limit=100) -> list[dict]`; `get(id | Receipt | key) -> dict | None`; `flush_outbox(engine, *, limit=1000) -> int`; `import_provenance(id) -> dict | None`.
+- `PreparedEvent(body)` with property `entry_id`; `StorageBusy` is raised when the maintenance lease stays held past `lease_wait`.
+- `firm.audit.s3_outbox`: `create_outbox(bind)`, `pending(engine, stream) -> int`, `flush(engine, log, *, limit=1000) -> int`.
+- `firm.audit.s3_queries` mirrors `firm.audit.queries` over an `S3AuditLog` (`audit_stats`, `audit_count`, `audit_search`, `audit_detail`, `verify_status_row`, `integrity_config`) for the dashboard.
 - `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
 - `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`; `batches(*, limit=25, continuation=None) -> tuple[list, str | None]` (unverified summaries, batch-ID order).
-- `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
-- `Archive.export_s3(source, *, start, end, batch_id, continuation=None, max_objects=100) -> Receipt`.
-- `Archive.restore_s3(receipt_or_key, target) -> list[Receipt]`.
-- `firm.audit.sql_archive.SQLArchiver(audit, archive, *, stream)`; `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict`.
-- `firm.audit.sql_archive.restore_sql(archive, receipts, target) -> int` requires an isolated empty SQL target.
+- `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`; `Archive.export_s3(source, *, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
+- `Archive.restore_s3(receipts, target) -> int` and `firm.audit.sql_archive.restore_sql(archive, receipts, target) -> int` require an empty target; same-storage archives keep ids and row signatures.
+- `firm.audit.sql_archive.Archiver(log, archive, *, stream=None)` for an `AuditLog` (needs `stream`) or an `S3AuditLog`; `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict` (`events`, `unarchived`, `pending_batches`). `SQLArchiver` is the same class.
 
 See [S3 & archives](audit/s3-and-archives.md) for guarantees, supported restore paths, and limits.
 
-Imported SQL event provenance is available through `firm.audit.sql_archive.import_provenance(conn, event_id)`. Cross-backend restores retain source identities separately from destination IDs.
+Imported SQL event provenance is available through `firm.audit.sql_archive.import_provenance(conn, event_id)`. Cross-storage restores retain source identities separately from destination IDs.

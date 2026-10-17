@@ -8,21 +8,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
-- Optional `firm-audit[s3]` backend: immutable event objects, durable prepared retries,
-  version-aware receipts, bounded scans, and S3 CLI operations without a SQL database or PVC.
-- Verified S3 archives for SQL/S3 sources, resumable publication, deduplicated multi-batch reads,
-  and isolated restores with source provenance. Native SQL restores retain row signatures and
-  their exact JSON bytes; event archives do not recreate seals or external anchors.
-- S3 events can be signed: with `mac_key=`/`FIRM_AUDIT_KEY` each envelope carries an
-  HMAC-SHA256 and its `key_id`, verified on every read (retired keys included). Decoded events
-  report `signature` (`valid`/`unverified`/`unsigned`); a bad signature raises
-  `EventSignatureError`, and `require_signatures=True` also rejects unsigned or unknown-key
-  events. Archives keep the signature and count signed S3 events. Deletion is not detected
-  (use Object Lock).
+- `S3AuditLog` (`firm-audit[s3]`): the audit log with S3 objects as storage, for deployments
+  without a database or PVC. It takes `AuditLog`'s arguments and has the same `record()`,
+  `history()` (every filter, exact `since`), sequential ids, row MACs, sealing, anchors,
+  `verify()`, retention and background loops — the sealer, verifier and retention code is shared
+  through a storage seam. Ids come from one compare-and-swap counter per stream; maintenance runs
+  under one lease (`StorageBusy`). `prepare()`/`write()` give idempotent retries across processes
+  (`UnknownEventOutcome`), and `firm-audit s3` has the SQL commands' counterparts.
+- `record(conn=...)` on `S3AuditLog` stages the event in the caller's transaction (migration
+  `0004`, `firm_audit_s3_outbox`) and publishes it afterwards: `flush_outbox()`, a background
+  relay via `outbox_engine=`, or `firm-audit s3 flush-outbox`.
+- Verified archives for SQL and S3 logs: resumable publication, deduplicated multi-batch reads,
+  `export_sql`/`export_s3` by id, and isolated restores (`restore_sql`, `Archive.restore_s3`).
+  Same-storage restores keep ids and row signatures; others keep the source identity as
+  provenance. Event archives do not recreate seals or external anchors.
 - `Archive.batches()` pages through an archive's batches with unverified manifest summaries
   (count, time range, signed rows) and flags staged-but-unpublished (`pending`) batches.
   Manifests record `signed`/`sources`, and `read()` rejects a summary that disagrees with the data.
-- Migration `0003` adds an opt-in persisted archive-before-prune policy. Both plain and
+- Migration `0003` adds an opt-in persisted archive-before-prune policy; `Archiver` (also
+  `SQLArchiver`) enforces it for SQL and S3 logs (`firm-audit archive run-sql`/`run-s3`). Both plain and
   seal-aligned retention keep unarchived rows, including the pre-activation prefix. Eligibility
   is one query per batch or seal range; `Retention.last_blocked_unarchived` counts the expired
   rows a run kept for the guard, with an "archiver looks stalled" `on_error` alert past 1,000.
