@@ -154,3 +154,25 @@ def test_aligned_prune_eligibility_is_one_query_per_range(db_url, archive, at_ti
         # A per-row eligibility read would add two statements per extra row (80 here); the
         # second cycle differs only by the floor checks an earlier prune leaves behind.
         assert large - small <= 2
+
+
+def test_manifest_counts_signed_rows_and_read_rejects_a_forged_count(
+    db_url, archive, object_client
+):
+    import json
+
+    from firm.audit.event_format import canonical
+    from firm.audit.object_store import ObjectConflict
+
+    with AuditLog(db_url, mac_key=SECRET) as signed:
+        signed.record("one")
+        signed.record("two")
+        receipt = archive.export_sql(signed, stream=STREAM, batch_id=str(uuid4()))
+    (summary,), _ = archive.batches()
+    assert (summary["signed"], summary["count"], summary["sources"]) == (2, 2, ["sql"])
+    # The listing trusts the manifest, so read() holds the manifest's claim to the data.
+    manifest = json.loads(archive.store.read(receipt.key)[0])
+    forged = canonical({**manifest, "signed": 0})
+    object_client.put_object(Bucket=archive.store.bucket, Key=receipt.key, Body=forged)
+    with pytest.raises(ObjectConflict, match="signing summary"):
+        archive.read(receipt.key)

@@ -91,11 +91,13 @@ def test_archive_view_batch_list_and_bad_cursors(s3_dashboard_url):
         body = response.read().decode()
         assert "1 verified event<" in body
         assert 'Source</span> <span class="source-word">Archive' in body
+        assert '<span class="sig receipt"' in body and "SHA-256 receipt" in body
     with urlopen(base + "/audit/archive") as response:
         # Without a key the view lists batches, each linking to its verified view.
         listing = response.read().decode()
         assert 'href="/audit/archive?' + urlencode({"key": key}) + '"' in listing
         assert "1 batch on this page" in listing and ">complete<" in listing
+        assert ">S3 receipts<" in listing
     with pytest.raises(HTTPError) as caught:
         urlopen(base + "/audit/archive?continuation=bogus")
     assert caught.value.code == 400
@@ -139,6 +141,7 @@ def test_sql_and_s3_audit_side_by_side(tmp_path):
         assert status == 200 and "invoice.paid" in s3 and "order.shipped" not in s3
         assert 'aria-current="page">S3<' in s3
         assert "firm-audit/" in s3 and "…0001" in s3  # prefix and stream in the source strip
+        assert "SHA-256 per object, not signed" in s3
         # Type:id filters mean the same as on the SQL page, and row links build them.
         assert 'href="/audit/s3?start=2026-01-01&end=2026-01-01&subject=Invoice%3A42"' in s3
         status, filtered = _get(
@@ -237,5 +240,29 @@ def test_archive_batch_list_pages_and_flags_pending_batches():
         status, second = _get(app, match.group(1), html.unescape(match.group(2)))
         assert status == 200 and "2 batches on this page" in second and "Next" not in second
         assert ">pending<" in second  # the staged batch sorts last ("ffffffff…")
+    finally:
+        dash.close()
+
+
+def test_archive_shows_recorded_row_signatures(tmp_path):
+    secret = "dashboard-archive-row-secret-0123456789"  # noqa: S105
+    client = MemoryS3()
+    archive = Archive(ObjectStore("archives", client=client))
+    with AuditLog(f"sqlite:///{tmp_path / 'signed.db'}", mac_key=secret) as signed:
+        signed.record("signed.one")
+        signed_batch = archive.export_sql(signed, stream=str(UUID(int=2)), batch_id=str(uuid4()))
+    with AuditLog(f"sqlite:///{tmp_path / 'plain.db'}") as plain:
+        plain.record("plain.one")
+        plain_batch = archive.export_sql(plain, stream=str(UUID(int=3)), batch_id=str(uuid4()))
+    dash = build_dashboard(audit_archive=archive)
+    try:
+        app = DashboardApp(dash)
+        _, body = _get(app, "/audit/archive", urlencode({"key": signed_batch.key}))
+        assert '<span class="sig signed"' in body and "signed · key " in body
+        _, body = _get(app, "/audit/archive", urlencode({"key": plain_batch.key}))
+        assert '<span class="sig unsigned"' in body
+        _, listing = _get(app, "/audit/archive")
+        assert '<span class="sig-all">1 / 1</span>' in listing
+        assert '<span class="muted">0 / 1</span>' in listing
     finally:
         dash.close()

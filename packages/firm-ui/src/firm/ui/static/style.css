@@ -332,6 +332,16 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
   .source-fact:not(:first-child)::before { content: none; }
 }
 
+/* An archived row's protection: a shield for a recorded SQL row signature (tinted ok) or an S3
+   SHA-256 receipt (neutral); plain muted text when the row was never signed. */
+.sig { display: inline-flex; align-items: center; gap: .35rem; font-size: var(--fs-sm); color: var(--text-2);
+       white-space: nowrap; }
+.sig svg { width: 14px; height: 14px; flex: none; }
+.sig.signed svg { color: var(--ok); }
+.sig.receipt svg { color: var(--text-3); }
+.sig.unsigned { color: var(--text-3); }
+.sig-all { color: var(--ok); }
+
 /* An archived row's payload: a one-line preview that expands in place (no detail page to link). */
 details.payload summary { cursor: pointer; list-style: none; }
 details.payload summary::-webkit-details-marker { display: none; }

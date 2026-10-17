@@ -4388,7 +4388,9 @@ raises `ObjectUnavailable` rather than silently returning an empty archive.
 
 `archive.batches(limit=25, continuation=None)` returns one page of batches as
 `(summaries, continuation)`: batch ID, manifest key, status (`complete`, `pending` for staged
-input without a manifest, or `unreadable`), event count, and event time range. It costs one LIST
+input without a manifest, or `unreadable`), event count, event time range, and how many events
+carry a SQL row signature (`signed`, with `sources`). Manifests record that signing summary;
+`read()` rejects a manifest whose summary does not match its data. It costs one LIST
 plus one manifest GET per published batch and verifies nothing; pages follow batch-ID order,
 not creation order. Open a batch with `read()` to verify it.
 
@@ -4504,7 +4506,11 @@ The S3 view shows bounded date/filter scans (the "To" date is inclusive) and eve
 continuation and scan counts, under a source strip naming the bucket, prefix, and stream. It
 does not display misleading global counts or unsupported sorting. `--audit-archive-bucket cold`
 adds the archive view: it lists the archive's batches (with pending and unreadable ones
-flagged) and verifies a batch when you open it or paste its manifest key. `--audit-archive-prefix`
+flagged, and signed rows per batch) and verifies a batch when you open it or paste its manifest
+key. Each archived event shows its protection: a SQL row signature with its key ID (shown as
+recorded; restore into SQL with the original key to re-check it), unsigned, or an S3 SHA-256
+receipt. The S3 view's source strip states that S3 objects carry a SHA-256 digest, not a
+signature. `--audit-archive-prefix`
 defaults to `firm-audit`, the same as `ObjectStore` and `firm-audit archive`.
 
 SQL and S3 audit logs can be shown together: pass `--database-url` (or `--audit-url`) next to

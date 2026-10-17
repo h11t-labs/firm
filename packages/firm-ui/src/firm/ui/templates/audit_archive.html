@@ -10,7 +10,7 @@
 {% if key %}
 <Section title="Events"><span class="secondary tnum">{{ rows | length | num }} verified {{ "event" if rows | length == 1 else "events" }}</span></Section>
 {% if rows %}
-<div class="tw"><table><tr><th>Event</th><th>Origin</th><th>When</th><th>Action</th><th>Subject</th><th>Actor</th><th>Payload</th></tr>
+<div class="tw"><table><tr><th>Event</th><th>Origin</th><th>When</th><th>Action</th><th>Subject</th><th>Actor</th><th title="A SQL row signature is shown as recorded; re-check it by restoring into SQL with the original key.">Signature</th><th>Payload</th></tr>
 {% for r in rows %}
 {% set preview = r.payload | json_preview %}
 <tr><td class="mono" title="{{ r.identity }}">{{ r.event_label }}</td>
@@ -19,6 +19,7 @@
 <td class="mono">{{ r.action }}</td>
 <td class="mono">{% if r.subject_display %}{{ r.subject_display }}{% else %}<Dash />{% endif %}</td>
 <td class="mono">{% if r.actor_display %}{{ r.actor_display }}{% else %}<Dash />{% endif %}</td>
+<td><span class="sig {{ r.signature.kind }}" title="{{ r.signature.title }}">{{ r.signature.icon or "" }}{{ r.signature.label }}</span></td>
 <td class="mono secondary cell-data">{% if r.payload %}<details class="payload"><summary class="truncate" title="{{ preview }}">{{ preview }}</summary><pre>{{ r.payload | json_pretty }}</pre></details>{% else %}<Dash />{% endif %}</td></tr>
 {% endfor %}
 </table></div>
@@ -28,11 +29,12 @@
 {% else %}
 <Section title="Batches"><span class="secondary">batch-id order · open one to verify it</span></Section>
 {% if batches %}
-<div class="tw"><table><tr><th>Batch</th><th>Status</th><th class="right">Events</th><th>First event</th><th>Last event</th></tr>
+<div class="tw"><table><tr><th>Batch</th><th>Status</th><th class="right">Events</th><th>Signed</th><th>First event</th><th>Last event</th></tr>
 {% for b in batches %}
 <tr><td class="mono">{% if b.href %}<a href="{{ b.href }}" title="{{ b.batch_id }}">{{ b.short_id }}</a>{% else %}<span title="{{ b.batch_id }}">{{ b.short_id }}</span>{% endif %}</td>
 <td>{% if b.status == "complete" %}<span class="secondary">complete</span>{% elif b.status == "pending" %}<span class="text-warn" title="Input is staged but no manifest was published; resume the batch to finish it.">pending</span>{% else %}<span class="text-danger" title="The manifest could not be read.">unreadable</span>{% endif %}</td>
 <td class="right tnum">{% if b.count is defined %}{{ b.count | num }}{% else %}<Dash />{% endif %}</td>
+<td class="tnum">{% if b.signing %}<span class="{{ b.signing.cls }}">{{ b.signing.text }}</span>{% else %}<Dash />{% endif %}</td>
 <td class="secondary">{{ b.first }}</td>
 <td class="secondary">{{ b.last }}</td></tr>
 {% endfor %}

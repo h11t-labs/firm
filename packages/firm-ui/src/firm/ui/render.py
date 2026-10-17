@@ -1223,13 +1223,15 @@ def _endpoint_host(endpoint: str) -> str | None:
     return urlsplit(endpoint).netloc or endpoint
 
 
-def _source_view(icon: str, word: str, note: str, store: Any, *extra: tuple[str, str]) -> dict:
+def _source_view(
+    icon: str, word: str, note: str, store: Any, *extra: tuple[str, str], hint: str = ""
+) -> dict:
     """The <Source/> strip's data: which storage this audit view reads and where it lives."""
     facts = [{"label": "bucket", "value": store.bucket}, {"label": "prefix", "value": store.prefix}]
     facts += [{"label": label, "value": value} for label, value in extra]
     if host := _endpoint_host(store.endpoint_url):
         facts.append({"label": "endpoint", "value": host})
-    return {"icon": Markup(_ICONS[icon]), "word": word, "note": note, "facts": facts}
+    return {"icon": Markup(_ICONS[icon]), "word": word, "note": note, "hint": hint, "facts": facts}
 
 
 def _event_row(item: dict[str, Any]) -> dict[str, Any]:
@@ -1280,9 +1282,10 @@ def s3_audit_page(
     source = _source_view(
         "cloud",
         "S3",
-        "key-order scans · no totals or sorting",
+        "SHA-256 per object, not signed",
         log.store,
         ("stream", f"…{stream[-4:]}"),
+        hint="Bounded scans in object-key order: no totals, sorting, or SQL-style row signatures",
     )
     return _render(
         "audit_s3.html",
@@ -1343,6 +1346,7 @@ def archive_page(
                     "event_label": f"#{original_id}"
                     if original_id is not None
                     else envelope_id[:8],
+                    "signature": _signature(entry),
                     "payload": payload,
                 }
             )
@@ -1372,6 +1376,49 @@ def archive_page(
     )
 
 
+def _signature(entry: dict[str, Any]) -> dict[str, Any]:
+    """How an archived event is protected: a SQL row signature as recorded (shown, not
+    re-checked here), no signature, or the S3 object's SHA-256 receipt."""
+    if entry["source"] == "s3":
+        receipt = entry.get("receipt") or {}
+        version = receipt.get("version_id")
+        return {
+            "kind": "receipt",
+            "icon": Markup(_ICONS["shield"]),
+            "label": "SHA-256 receipt",
+            "title": f"sha256 {str(receipt.get('sha256', ''))[:16]}…"
+            + (f" · version {version}" if version else "")
+            + " · detects corruption; not a signature",
+        }
+    integrity = entry.get("integrity") or {}
+    if integrity.get("row_mac"):
+        key_id = integrity.get("key_id")
+        return {
+            "kind": "signed",
+            "icon": Markup(_ICONS["shield-check"]),
+            "label": f"signed · key {key_id}" if key_id else "signed",
+            "title": "Row MAC recorded when the row was written; restore into SQL with the "
+            "original key to re-check it",
+        }
+    return {
+        "kind": "unsigned",
+        "icon": None,
+        "label": "unsigned",
+        "title": "Written without FIRM_AUDIT_KEY: no row MAC",
+    }
+
+
+def _batch_signing(batch: dict[str, Any]) -> dict[str, str] | None:
+    """The batch list's Signed cell: S3 receipts, or signed rows out of the batch's events."""
+    sources, signed, count = batch.get("sources"), batch.get("signed"), batch.get("count")
+    if sources == ["s3"]:
+        return {"cls": "secondary", "text": "S3 receipts"}
+    if signed is None or count is None:
+        return None  # pending, unreadable, or a manifest written before signing summaries
+    cls = "sig-all" if signed == count else ("text-warn" if signed else "muted")
+    return {"cls": cls, "text": f"{_num(signed)} / {_num(count)}"}
+
+
 def _batch_row(urls: Urls, batch: dict[str, Any]) -> dict[str, Any]:
     """A listed archive batch: short id, a link to verify it, and its manifest summary."""
     manifest_key = batch["manifest_key"]
@@ -1388,6 +1435,7 @@ def _batch_row(urls: Urls, batch: dict[str, Any]) -> dict[str, Any]:
         else None,
         "first": when("min_created_at"),
         "last": when("max_created_at"),
+        "signing": _batch_signing(batch),
     }
 
 

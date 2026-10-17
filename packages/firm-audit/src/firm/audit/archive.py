@@ -56,6 +56,16 @@ def entry_key(entry: dict[str, Any]) -> tuple[str, str, str]:
     return entry["source"], entry["stream"], entry["identity"]
 
 
+def signed_count(entries: list[dict[str, Any]]) -> int:
+    """Entries carrying a SQL row signature (the MAC recorded when the row was written)."""
+    return sum(1 for entry in entries if (entry.get("integrity") or {}).get("row_mac"))
+
+
+def _signing_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Manifest fields that let a listing show signing without downloading batch data."""
+    return {"signed": signed_count(entries), "sources": sorted({e["source"] for e in entries})}
+
+
 class Archive:
     """Copy-only S3 archive with explicit verification and restoration."""
 
@@ -145,6 +155,7 @@ class Archive:
             "data": asdict(payload),
             "scope": staging["scope"],
             "sha256": digest(raw),
+            **_signing_summary(entries),
         }
         receipt = self.store.put(base + "manifest.json", canonical(manifest))
         self.read(receipt)
@@ -163,10 +174,11 @@ class Archive:
     ) -> tuple[list[dict[str, Any]], str | None]:
         """List batches in batch-id (key) order, not creation order, with manifest summaries.
 
-        Bounded: one LIST plus one manifest GET per published batch. Summaries are read, not
-        verified; ``read()`` verifies a batch. A batch with staged input but no manifest is
-        ``pending`` (``resume()`` completes it); a manifest that does not parse is
-        ``unreadable``. Returns the page and a continuation for the next one, or ``None``.
+        Bounded: one LIST plus one manifest GET per published batch. Summaries (count, time range,
+        ``signed`` rows, ``sources``) are read, not verified; ``read()`` verifies a batch. A batch
+        with staged input but no manifest is ``pending`` (``resume()`` completes it); a manifest
+        that does not parse is ``unreadable``. Returns the page and a continuation for the next
+        one, or ``None``.
         """
         if not 1 <= limit <= 100:
             raise ValueError("limit must be 1..100")
@@ -198,6 +210,8 @@ class Archive:
                 count=int(manifest["count"]),
                 min_created_at=manifest["min_created_at"],
                 max_created_at=manifest["max_created_at"],
+                signed=manifest.get("signed"),
+                sources=manifest.get("sources"),
             )
         except (ValueError, KeyError, TypeError, FileNotFoundError, ObjectUnavailable):
             summary["status"] = "unreadable"
@@ -251,6 +265,9 @@ class Archive:
         self._validate_entries(entries)
         if len(entries) != manifest["count"]:
             raise ObjectConflict("archive count mismatch")
+        summary = _signing_summary(entries)
+        if any(field in manifest and manifest[field] != value for field, value in summary.items()):
+            raise ObjectConflict("archive signing summary does not match its data")
         return manifest, entries
 
     def export_sql(
