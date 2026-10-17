@@ -151,15 +151,31 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("FIRM_AUDIT_DATABASE_URL"),
         help="Override the URL for the audit tab (or set FIRM_AUDIT_DATABASE_URL).",
     )
-    parser.add_argument("--audit-archive-bucket", default=os.getenv("FIRM_AUDIT_ARCHIVE_BUCKET"))
-    parser.add_argument("--audit-archive-prefix", default="firm-audit-archive")
-    parser.add_argument("--audit-s3-bucket", default=os.getenv("FIRM_AUDIT_S3_BUCKET"))
+    parser.add_argument(
+        "--audit-archive-bucket",
+        default=os.getenv("FIRM_AUDIT_ARCHIVE_BUCKET"),
+        help="Bucket holding audit archives; adds the archive view to the audit tab.",
+    )
+    # Same default as ObjectStore and `firm-audit archive`, so archives written with defaults open.
+    parser.add_argument(
+        "--audit-archive-prefix", default=os.getenv("FIRM_AUDIT_ARCHIVE_PREFIX", "firm-audit")
+    )
+    parser.add_argument(
+        "--audit-s3-bucket",
+        default=os.getenv("FIRM_AUDIT_S3_BUCKET"),
+        help="Bucket of an S3 audit log; adds the S3 view to the audit tab "
+        "(needs --audit-s3-stream).",
+    )
     parser.add_argument("--audit-s3-stream", default=os.getenv("FIRM_AUDIT_S3_STREAM"))
     parser.add_argument(
         "--audit-s3-prefix", default=os.getenv("FIRM_AUDIT_S3_PREFIX", "firm-audit")
     )
     parser.add_argument("--audit-s3-region", default=os.getenv("AWS_REGION"))
-    parser.add_argument("--audit-s3-endpoint", default=os.getenv("FIRM_AUDIT_S3_ENDPOINT"))
+    parser.add_argument(
+        "--audit-s3-endpoint",
+        default=os.getenv("FIRM_AUDIT_S3_ENDPOINT"),
+        help="Endpoint for S3-compatible storage; also used for the archive bucket.",
+    )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default 127.0.0.1).")
     parser.add_argument("--port", type=int, default=8787, help="Bind port (default 8787).")
 

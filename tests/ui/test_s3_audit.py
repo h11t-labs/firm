@@ -65,6 +65,17 @@ def test_archive_view_and_bad_cursor(s3_dashboard_url):
     assert caught.value.code == 400
 
 
+def test_cli_archive_prefix_matches_the_library_default(monkeypatch):
+    # An archive written with ObjectStore's defaults must open without extra dashboard flags.
+    import inspect
+
+    from firm.ui import cli
+
+    monkeypatch.delenv("FIRM_AUDIT_ARCHIVE_PREFIX", raising=False)
+    args = cli._build_parser().parse_args(["--audit-archive-bucket", "cold"])
+    assert args.audit_archive_prefix == inspect.signature(ObjectStore).parameters["prefix"].default
+
+
 def test_mounted_s3_routes_keep_prefix_theme_and_authentication():
     from datetime import date
 
