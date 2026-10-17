@@ -305,14 +305,51 @@ pre.err { background: var(--danger-bg); border-color: var(--danger); }
   .integrity.banner a, .integrity-next a { display: inline-flex; align-items: center; min-height: 44px; }
 }
 
+/* -- audit source strip ----------------------------------------------------- */
+/* Which storage an audit view reads (S3 history, archive) and what that storage can't do. The same
+   quiet tinted block as the neutral integrity strip, so the two read as one family. */
+.source { display: flex; align-items: center; gap: .7rem;
+          padding: .5rem .85rem; margin: .2rem 0 .6rem; border-radius: var(--radius-lg);
+          background: var(--surface-2); font-size: var(--fs-sm); }
+.source-icon { display: grid; place-items: center; flex: none; width: 30px; height: 30px; color: var(--text-3);
+               border-radius: 9px; background: color-mix(in oklab, currentColor 14%, transparent); }
+.source-icon svg { width: 17px; height: 17px; }
+.source-body { display: flex; flex: 1; flex-wrap: wrap; align-items: baseline; gap: .3rem .7rem; min-width: 0; }
+.source-verdict { display: inline-flex; align-items: baseline; gap: .4rem; }
+.source-label { color: var(--text-3); }
+.source-word { font-weight: 600; color: var(--text-2); }
+.source-note { color: var(--text-2); }
+.source-facts { margin-left: auto; display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .8rem; }
+.source-fact { display: inline-flex; align-items: baseline; gap: .35rem; min-width: 0; }
+.source-fact:not(:first-child)::before { content: "·"; margin-right: .8rem; color: var(--border-strong); }
+.source-fact .fk { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .03em; color: var(--text-3); }
+.source-fact .fv { color: var(--text-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                   font-size: var(--fs-xs); overflow-wrap: anywhere; }
+
+/* Narrow screens: the facts stack under the verdict instead of wrapping with stray separators. */
+@media (max-width: 560px) {
+  .source-facts { margin-left: 0; flex-direction: column; align-items: flex-start; }
+  .source-fact:not(:first-child)::before { content: none; }
+}
+
+/* An archived row's payload: a one-line preview that expands in place (no detail page to link). */
+details.payload summary { cursor: pointer; list-style: none; }
+details.payload summary::-webkit-details-marker { display: none; }
+details.payload[open] summary { white-space: normal; }
+details.payload pre { margin: .5rem 0 0; white-space: pre-wrap; }
+
 /* -- filter form ------------------------------------------------------------- */
 .filters { display: flex; flex-wrap: wrap; gap: .6rem; align-items: end; margin: 1rem 0; }
 .filters label { display: flex; flex-direction: column; gap: .25rem; font-size: var(--fs-xs); color: var(--text-3); }
-.filters input[type="text"], .filters select { font: inherit; font-size: var(--fs-md); height: 2.25rem;
+.filters input[type="text"], .filters input[type="date"], .filters select { font: inherit; font-size: var(--fs-md); height: 2.25rem;
   padding: 0 .55rem; border: 1px solid var(--border-strong); border-radius: var(--radius);
   background: var(--surface); color: var(--text); min-width: 160px; box-sizing: border-box; }
 .filters select { min-width: 0; }
 .filters button, .filters .btn { height: 2.25rem; padding: 0 .8rem; box-sizing: border-box; }
+.filters .break { flex-basis: 100%; height: 0; }  /* start a new filter row */
+.filters input[type="date"] { min-width: 0; }
+.filters label.grow { flex: 1 1 24rem; }  /* one long field, e.g. an archive manifest key */
+.filters label.grow input { width: 100%; }
 
 /* -- sortable table header --------------------------------------------------- */
 th a { color: var(--text-3); display: inline-flex; align-items: center; gap: .25rem; }

@@ -1,0 +1,4 @@
+{#def items #}
+{# A plain pill switcher under the header (no state dots): `items` is a list of {label, url, active}
+   built in render.py — today the audit tab's database / S3 / archive views. #}
+<nav class="sub">{% for item in items %}<a class="{{ "active" if item.active else "" }}" href="{{ item.url }}"{% if item.active %} aria-current="page"{% endif %}>{{ item.label }}</a>{% endfor %}</nav>

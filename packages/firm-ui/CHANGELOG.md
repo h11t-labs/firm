@@ -9,7 +9,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 ### Added
 
 - Read-only S3 audit and archive views, including bounded scan progress, filters, details,
-  and archive verification. Routes share dashboard authentication, themes, and mount prefixes.
+  and archive verification, built on the same components as the SQL audit page. Each names its
+  storage in a source strip. Routes share dashboard authentication, themes, and mount prefixes.
+- SQL and S3 audit logs can be shown side by side: the audit tab gets a Database / S3 / Archive
+  switcher (`/audit`, `/audit/s3`, `/audit/archive`) when more than one view is configured.
+  `--audit-archive-prefix` defaults to `firm-audit`, matching `ObjectStore`.
 
 - The dashboard can be **mounted inside a host application** — on its domain, in its routing,
   behind its own permissions — instead of running as a second process. One adapter per framework,

@@ -20,6 +20,7 @@ from datetime import date, timedelta
 from http.cookies import SimpleCookie
 from importlib import resources
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, quote, urlsplit
 
 from sqlalchemy.engine import Connection
@@ -383,7 +384,7 @@ class _Handler:
                 )
             if path == "/audit/archive" and dash.audit_archive is not None:
                 return self._archive_view(params)
-            if path == "/audit" and dash.audit_s3 is not None:
+            if path == "/audit/s3" and dash.audit_s3 is not None:
                 return self._s3_audit(params)
             if path == "/audit/object" and dash.audit_s3 is not None:
                 try:
@@ -401,11 +402,17 @@ class _Handler:
                     render.audit_detail_page(
                         dash.parts,
                         event,
+                        back="/audit/s3",
+                        views=self._audit_views("s3"),
                         theme=self._theme(),
                         urls=self.urls,
                         request_path=self.request.full_path,
                     )
                 )
+            if path == "/audit" and dash.audit is None and dash.audit_s3 is not None:
+                # No SQL log: the tab lands on S3 history, carrying any query along.
+                query = f"?{self.request.query}" if self.request.query else ""
+                return _redirect(self.urls.path("/audit/s3") + query)
             if path == "/audit" and dash.audit is None and dash.audit_archive is not None:
                 return _redirect(self.urls.path("/audit/archive"))
             if path == "/audit" and dash.audit is not None:
@@ -702,7 +709,7 @@ class _Handler:
                     "actor": actor or "",
                     "correlation_id": correlation_id or "",
                 },
-                has_archive=dash.audit_archive is not None,
+                views=self._audit_views("sql"),
                 integrity=self._integrity(conn),
                 row_ctx=audit_queries.row_integrity_context(conn),
                 total=total,
@@ -717,34 +724,42 @@ class _Handler:
             )
         return _html(body)
 
+    def _audit_views(self, active: str) -> list[dict[str, Any]] | None:
+        dash = self.dash
+        return render.audit_views(
+            self.urls,
+            sql=dash.audit is not None,
+            s3=dash.audit_s3 is not None,
+            archive=dash.audit_archive is not None,
+            active=active,
+        )
+
     def _s3_audit(self, params: dict[str, list[str]]) -> UIResponse:
         dash = self.dash
         assert dash.audit_s3 is not None
-        today = now_utc().date()
+        today = now_utc().date().isoformat()
+        filters = {
+            name: params.get(name, [""])[0]
+            for name in ("action", "subject", "actor", "correlation_id")
+        }
+        subject_type, subject_id = _split_ref(filters["subject"])
+        actor_type, actor_id = _split_ref(filters["actor"])
         try:
-            start = date.fromisoformat(params.get("start", [today.isoformat()])[0])
-            end = date.fromisoformat(
-                params.get("end", [(today + timedelta(days=1)).isoformat()])[0]
-            )
-            fields = {
-                name: params.get(name, [""])[0] or None
-                for name in (
-                    "action",
-                    "subject_type",
-                    "subject_id",
-                    "actor_type",
-                    "actor_id",
-                    "correlation_id",
-                )
-            }
+            start = date.fromisoformat(params.get("start", [today])[0])
+            end = date.fromisoformat(params.get("end", [today])[0])  # inclusive, as the form shows
             page = dash.audit_s3.scan(
                 start=start,
-                end=end,
+                end=end + timedelta(days=1),
                 limit=25,
                 max_objects=100,
                 max_requests=150,
                 continuation=params.get("continuation", [None])[0],
-                **fields,
+                action=filters["action"] or None,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                correlation_id=filters["correlation_id"] or None,
             )
         except ValueError as exc:
             return _html(
@@ -754,10 +769,11 @@ class _Handler:
             render.s3_audit_page(
                 dash.parts,
                 page,
+                dash.audit_s3,
                 start,
                 end,
-                fields,
-                has_archive=dash.audit_archive is not None,
+                filters,
+                views=self._audit_views("s3"),
                 theme=self._theme(),
                 urls=self.urls,
             )
@@ -776,7 +792,15 @@ class _Handler:
                 render.error_page(dash.parts, str(exc), theme=self._theme(), urls=self.urls), 400
             )
         return _html(
-            render.archive_page(dash.parts, entries, key, theme=self._theme(), urls=self.urls)
+            render.archive_page(
+                dash.parts,
+                entries,
+                key,
+                dash.audit_archive,
+                views=self._audit_views("archive"),
+                theme=self._theme(),
+                urls=self.urls,
+            )
         )
 
     def _audit_detail(self, event_id: int) -> UIResponse:

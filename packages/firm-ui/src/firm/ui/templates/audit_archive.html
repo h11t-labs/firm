@@ -1,15 +1,31 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="pagehead"><h1>Audit archive</h1></div>
-<form class="filters" method="get" action="{{ urls.prefix }}/audit/archive">
-<label>Manifest key <input name="key" value="{{ key }}" required></label>
-<button class="primary" type="submit">Verify and read</button>
+<h1>Audit</h1>
+<Source view={{ source }} />
+<form method="get" action="{{ urls.prefix }}/audit/archive" class="filters">
+<label class="grow">Manifest key<input type="text" name="key" value="{{ key }}" placeholder="…/archives/v1/BATCH_ID/manifest.json" required></label>
+<button type="submit" class="primary">{{ icons.check }}Verify and read</button>
+{% if key %}<a class="btn" href="{{ urls.prefix }}/audit/archive">{{ icons.x }}Clear</a>{% endif %}
 </form>
-{% if key %}<p>{{ rows | length }} verified events in this batch.</p>{% endif %}
-{% for row in rows %}
-<details><summary>{{ row.created_at }} · {{ row.action }} · {{ row.identity }}</summary>
-{% for label, value in (("Data", row.data), ("Changes", row.changes), ("Context", row.context)) %}
-{% if value %}<p>{{ label }}</p><pre>{{ value | json_pretty }}</pre>{% endif %}
-{% endfor %}</details>
+{% if key %}
+<Section title="Events"><span class="secondary tnum">{{ rows | length | num }} verified {{ "event" if rows | length == 1 else "events" }}</span></Section>
+{% if rows %}
+<div class="tw"><table><tr><th>Event</th><th>Origin</th><th>When</th><th>Action</th><th>Subject</th><th>Actor</th><th>Payload</th></tr>
+{% for r in rows %}
+{% set preview = r.payload | json_preview %}
+<tr><td class="mono" title="{{ r.identity }}">{{ r.event_label }}</td>
+<td class="secondary">{{ r.origin | upper }}</td>
+<td class="secondary">{{ r.when }}</td>
+<td class="mono">{{ r.action }}</td>
+<td class="mono">{% if r.subject_display %}{{ r.subject_display }}{% else %}<Dash />{% endif %}</td>
+<td class="mono">{% if r.actor_display %}{{ r.actor_display }}{% else %}<Dash />{% endif %}</td>
+<td class="mono secondary cell-data">{% if r.payload %}<details class="payload"><summary class="truncate" title="{{ preview }}">{{ preview }}</summary><pre>{{ r.payload | json_pretty }}</pre></details>{% else %}<Dash />{% endif %}</td></tr>
 {% endfor %}
+</table></div>
+{% else %}
+<Empty text="This batch holds no events." />
+{% endif %}
+{% else %}
+<Empty text="Paste a manifest key from an archive receipt to verify and read that batch." />
+{% endif %}
 {% endblock %}

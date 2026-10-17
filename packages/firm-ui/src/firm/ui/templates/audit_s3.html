@@ -1,23 +1,35 @@
 {% extends "layout.html" %}
+{% macro field(name, label) %}<label>{{ label }}<input type="text" name="{{ name }}" value="{{ filters.get(name, "") }}"></label>{% endmacro %}
 {% block content %}
-<div class="pagehead"><h1>Audit</h1></div>
-<p>S3 history · {{ start }} to {{ end }} (exclusive) · ascending object order</p>
-{% if has_archive %}<p><a href="{{ urls.prefix }}/audit/archive">Read an archive</a></p>{% endif %}
-<form class="filters" method="get" action="{{ urls.prefix }}/audit">
-<label>From <input type="date" name="start" value="{{ start }}" required></label>
-<label>Until <input type="date" name="end" value="{{ end }}" required></label>
-{% for name in ("action", "subject_type", "subject_id", "actor_type", "actor_id", "correlation_id") %}
-<label>{{ name | replace("_", " ") }} <input name="{{ name }}" value="{{ filters[name] or '' }}"></label>
-{% endfor %}
-<button class="primary" type="submit">Search</button>
+<h1>Audit</h1>
+<Source view={{ source }} />
+<form method="get" action="{{ urls.prefix }}/audit/s3" class="filters">
+<label>From<input type="date" name="start" value="{{ start }}" required></label>
+<label>To<input type="date" name="end" value="{{ end }}" required></label>
+<span class="break"></span>
+{{ field("action", "Action") }}
+{{ field("subject", "Subject (Type:id)") }}
+{{ field("actor", "Actor (Type:id)") }}
+{{ field("correlation_id", "Correlation ID") }}
+<button type="submit" class="primary">{{ icons.filter }}Filter</button>
+<a class="btn" href="{{ reset_url }}">{{ icons.x }}Reset</a>
 </form>
-<p>{{ rows | length }} matching events · {{ page.scanned }} objects scanned · {{ page.requests }} requests.
-{% if page.exhausted %}End of selected range.{% else %}More objects remain in the selected range.{% endif %}</p>
-<table><thead><tr><th>Event</th><th>Recorded</th><th>Action</th><th>Subject</th><th>Actor</th></tr></thead>
-<tbody>{% for row in rows %}<tr>
-<td><a href="{{ row.href }}">{{ row.id }}</a></td><td>{{ row.created_at }}</td><td>{{ row.action }}</td>
-<td>{{ row.subject_type or '' }}{% if row.subject_id %}:{{ row.subject_id }}{% endif %}</td>
-<td>{{ row.actor_type or '' }}{% if row.actor_id %}:{{ row.actor_id }}{% endif %}</td>
-</tr>{% else %}<tr><td colspan="5">No matching events in this scan.</td></tr>{% endfor %}</tbody></table>
-{% if next_url %}<p><a href="{{ next_url }}">Continue scan</a></p>{% endif %}
+<Section title="Events"><span class="secondary tnum">{{ page.scanned | num }} objects scanned · {{ page.requests | num }} requests</span></Section>
+{% if rows %}
+<div class="tw"><table><tr><th>Event</th><th>When</th><th>Action</th><th>Subject</th><th>Actor</th><th>Correlation</th><th>Data</th></tr>
+{% for r in rows %}
+{% set payload = r.data | json_preview %}
+<tr><td class="mono"><a href="{{ r.href }}" title="{{ r.id }}">{{ r.id[:8] }}</a></td>
+<td class="secondary">{{ r.when }}</td>
+<td class="mono"><a href="{{ filter_href({'action': r.action}) }}">{{ r.action }}</a></td>
+<td class="mono">{% if r.subject_display %}<a href="{{ filter_href({'subject': r.subject_filter}) }}">{{ r.subject_display }}</a>{% else %}<Dash />{% endif %}</td>
+<td class="mono">{% if r.actor_display %}<a href="{{ filter_href({'actor': r.actor_filter}) }}">{{ r.actor_display }}</a>{% else %}<Dash />{% endif %}</td>
+<td class="mono secondary">{% if r.correlation_id %}<a href="{{ filter_href({'correlation_id': r.correlation_id}) }}">{{ r.correlation_id }}</a>{% endif %}</td>
+<td class="mono secondary truncate cell-data" title="{{ payload }}">{{ payload }}</td></tr>
+{% endfor %}
+</table></div>
+{% else %}
+<Empty text="No matching events in this scan." />
+{% endif %}
+<div class="pager"><span>{{ rows | length | num }} matching {{ "event" if rows | length == 1 else "events" }} · {{ "end of selected range" if page.exhausted else "more objects remain in this range" }}</span><div class="pg-nav">{% if next_url %}<a href="{{ next_url }}">Continue scan →</a>{% endif %}</div></div>
 {% endblock %}

@@ -110,10 +110,6 @@ def build_dashboard(
     audit_s3: S3AuditLog | None = None,
     audit_archive: Archive | None = None,
 ) -> Dashboard:
-    if audit_s3 is not None and (audit_url or database_url):
-        raise ValueError(
-            "Use either SQL or S3 for the audit tab; configure other SQL parts separately"
-        )
     dash = Dashboard(audit_s3=audit_s3, audit_archive=audit_archive)
 
     queue_resolved = queue_url or database_url

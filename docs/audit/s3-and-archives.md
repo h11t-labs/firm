@@ -268,14 +268,19 @@ repeat/schedule it to drain backlog. Activation is explicit via `--enable-prune-
 
 For an S3 dashboard, use `firm-ui --audit-s3-bucket events --audit-s3-stream STREAM_UUID`.
 Optional `--audit-s3-prefix`, `--audit-s3-region`, and `--audit-s3-endpoint` select the store.
-The audit tab exposes bounded date/filter scans and event details, with continuation and scan
-counts. It does not display misleading global SQL counts or unsupported sorting. Other SQL
-parts can be configured with their per-part URLs. `--audit-archive-bucket cold` enables the
-separate manifest inspection view, optionally with `--audit-archive-prefix`.
+The S3 view shows bounded date/filter scans (the "To" date is inclusive) and event details, with
+continuation and scan counts, under a source strip naming the bucket, prefix, and stream. It
+does not display misleading global counts or unsupported sorting. `--audit-archive-bucket cold`
+adds the archive view, which verifies a batch by manifest key; `--audit-archive-prefix`
+defaults to `firm-audit`, the same as `ObjectStore` and `firm-audit archive`.
 
-Programmatic `build_dashboard(audit_s3=log, audit_archive=archive)` accepts these capabilities.
-It owns their lifecycle when closed. Existing SQL dashboard configuration/views remain supported.
-Authentication requirements are the same as for existing dashboards.
+SQL and S3 audit logs can be shown together: pass `--database-url` (or `--audit-url`) next to
+the S3 flags and the audit tab gets a Database / S3 / Archive switcher. With only one view
+configured there is no switcher and the tab looks as it always has.
+
+Programmatic `build_dashboard(audit_s3=log, audit_archive=archive)` accepts these capabilities,
+alongside any SQL URLs. It owns their lifecycle when closed. Authentication requirements are the
+same as for existing dashboards.
 
 ## Kubernetes and provider validation
 

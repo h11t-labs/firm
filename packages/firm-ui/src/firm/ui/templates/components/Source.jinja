@@ -1,0 +1,11 @@
+{#def view #}
+{# Which storage an audit view reads and what that storage can't do, as one quiet strip in the
+   same family as the neutral <Integrity/> strip. `view` comes from render._source_view. #}
+<div class="source">
+  <span class="source-icon">{{ view.icon }}</span>
+  <div class="source-body">
+    <span class="source-verdict"><span class="source-label">Source</span> <span class="source-word">{{ view.word }}</span></span>
+    <span class="source-note">{{ view.note }}</span>
+    <span class="source-facts">{% for f in view.facts %}<span class="source-fact"><span class="fk">{{ f.label }}</span> <span class="fv">{{ f.value }}</span></span>{% endfor %}</span>
+  </div>
+</div>

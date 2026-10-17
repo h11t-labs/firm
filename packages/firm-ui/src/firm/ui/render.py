@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 from jinjax import Catalog
@@ -74,6 +74,9 @@ _ICONS = {
     "sun": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     "moon": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     "monitor": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    # Storage marks for the audit source strip (S3 history / archive), tinted like the shields.
+    "cloud": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>',
+    "archive": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/></svg>',
     # Shield state marks for the tamper-evidence panel (stroke = currentColor, tinted per state
     # by the .integrity-icon medallion). A crisp icon beats the emoji glyphs that render
     # inconsistently across platforms; the verdict word travels alongside, so meaning never
@@ -437,6 +440,7 @@ def _when(value: datetime | None) -> Markup:
 # Context defaults for the layout chrome -- always present so `layout.html` never has to guard
 # against an undefined variable; a page-specific kwarg of the same name overrides it.
 _LAYOUT_DEFAULTS: dict[str, Any] = {
+    "subnav_items": None,
     "substate": None,
     "substate_counts": None,
     "queue": None,
@@ -1099,7 +1103,7 @@ def audit_page(
     dir: str = AUDIT_DEFAULT_DIR,
     refresh: int = 10,
     request_path: str = "/audit",
-    has_archive: bool = False,
+    views: list[dict[str, Any]] | None = None,
     theme: str = "system",
     urls: Urls = ROOT_URLS,
 ) -> str:
@@ -1121,7 +1125,7 @@ def audit_page(
             r["status_icon"] = _row_status_icon(status) if status else Markup("")
     return _render(
         "audit.html",
-        has_archive=has_archive,
+        subnav_items=views,
         title="Audit",
         parts=parts,
         active_part="audit",
@@ -1155,6 +1159,8 @@ def audit_detail_page(
     event: dict[str, Any],
     *,
     row_ctx: dict[str, Any] | None = None,
+    back: str = "/audit",
+    views: list[dict[str, Any]] | None = None,
     theme: str = "system",
     request_path: str = "",
     urls: Urls = ROOT_URLS,
@@ -1178,6 +1184,8 @@ def audit_detail_page(
         title=f"Event #{event['id']}",
         parts=parts,
         active_part="audit",
+        subnav_items=views,
+        back_url=urls.path(back),
         event=event,
         cells=cells,
         theme=theme,
@@ -1186,45 +1194,115 @@ def audit_detail_page(
     )
 
 
+def audit_views(
+    urls: Urls, *, sql: bool, s3: bool, archive: bool, active: str
+) -> list[dict[str, Any]] | None:
+    """The audit tab's source switcher: one pill per configured view (database / S3 / archive),
+    or ``None`` when there is only one, so a plain SQL dashboard looks exactly as before."""
+    views = [
+        (key, label, path)
+        for key, label, path, enabled in (
+            ("sql", "Database", "/audit", sql),
+            ("s3", "S3", "/audit/s3", s3),
+            ("archive", "Archive", "/audit/archive", archive),
+        )
+        if enabled
+    ]
+    if len(views) < 2:
+        return None
+    return [
+        {"label": label, "url": urls.path(path), "active": key == active}
+        for key, label, path in views
+    ]
+
+
+def _endpoint_host(endpoint: str) -> str | None:
+    """The host[:port] of a custom S3 endpoint, or ``None`` for an injected client."""
+    if endpoint == "injected":
+        return None
+    return urlsplit(endpoint).netloc or endpoint
+
+
+def _source_view(icon: str, word: str, note: str, store: Any, *extra: tuple[str, str]) -> dict:
+    """The <Source/> strip's data: which storage this audit view reads and where it lives."""
+    facts = [{"label": "bucket", "value": store.bucket}, {"label": "prefix", "value": store.prefix}]
+    facts += [{"label": label, "value": value} for label, value in extra]
+    if host := _endpoint_host(store.endpoint_url):
+        facts.append({"label": "endpoint", "value": host})
+    return {"icon": Markup(_ICONS[icon]), "word": word, "note": note, "facts": facts}
+
+
+def _event_row(item: dict[str, Any]) -> dict[str, Any]:
+    """Display fields shared by the S3 history and archive tables (labels, filters, preview)."""
+    subject_type, actor_type = item.get("subject_type"), item.get("actor_type")
+    return {
+        **item,
+        "when": _when(item.get("created_at")),
+        "subject_display": _ref_display(
+            subject_type, item.get("subject_id"), item.get("subject_label")
+        ),
+        "subject_filter": _ref_filter(subject_type, item.get("subject_id"))
+        if subject_type
+        else None,
+        "actor_display": _ref_display(actor_type, item.get("actor_id"), item.get("actor_label")),
+        "actor_filter": _ref_filter(actor_type, item.get("actor_id")) if actor_type else None,
+    }
+
+
 def s3_audit_page(
     parts: list[str],
     page: Any,
+    log: Any,
     start: Any,
     end: Any,
-    filters: dict[str, Any],
+    filters: dict[str, str],
     *,
-    has_archive: bool = False,
+    views: list[dict[str, Any]] | None = None,
     theme: str = "system",
     urls: Urls = ROOT_URLS,
 ) -> str:
-    params = {
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        **{k: v for k, v in filters.items() if v is not None},
-    }
-    next_url = (
-        urls.path("/audit") + "?" + urlencode({**params, "continuation": page.continuation})
-        if page.continuation
-        else None
-    )
+    """S3 history: one bounded scan over a date range (``end`` inclusive), styled like the SQL
+    events list but without totals or sorting, which an object listing cannot provide."""
+    dates = {"start": start.isoformat(), "end": end.isoformat()}
+
+    def href(extra: dict[str, str]) -> str:
+        params = {**dates, **{k: v for k, v in extra.items() if v}}
+        return urls.path("/audit/s3") + "?" + urlencode(params, quote_via=quote)
+
     rows = [
-        {**row, "href": urls.path("/audit/object") + "?" + urlencode({"key": row["key"]})}
-        for row in page.items
+        {
+            **_event_row(item),
+            "href": urls.path("/audit/object") + "?" + urlencode({"key": item["key"]}),
+        }
+        for item in page.items
     ]
+    stream = log.stream
+    source = _source_view(
+        "cloud",
+        "S3",
+        "key-order scans · no totals or sorting",
+        log.store,
+        ("stream", f"…{stream[-4:]}"),
+    )
     return _render(
         "audit_s3.html",
-        title="Audit",
+        title="Audit · S3",
         parts=parts,
         active_part="audit",
+        subnav_items=views,
         theme=theme,
         urls=urls,
+        source=source,
         rows=rows,
         page=page,
         start=start,
         end=end,
         filters=filters,
-        next_url=next_url,
-        has_archive=has_archive,
+        filter_href=_markup_fn(href),
+        next_url=Markup(href({**filters, "continuation": page.continuation}))
+        if page.continuation
+        else None,
+        reset_url=urls.path("/audit/s3"),
     )
 
 
@@ -1232,7 +1310,9 @@ def archive_page(
     parts: list[str],
     entries: list[dict[str, Any]],
     key: str,
+    archive: Any,
     *,
+    views: list[dict[str, Any]] | None = None,
     theme: str = "system",
     urls: Urls = ROOT_URLS,
 ) -> str:
@@ -1244,14 +1324,39 @@ def archive_page(
         identity = entry["source"], entry["stream"], entry["identity"]
         if identity not in seen:
             seen.add(identity)
-            rows.append({**read_event(entry["event"]), "identity": entry["identity"]})
+            event = read_event(entry["event"])
+            payload = {
+                name: event[name] for name in ("data", "changes", "context") if event.get(name)
+            }
+            # Name the event the way its source does: SQL row #id, or the S3 event UUID's head.
+            envelope_id = (entry.get("envelope") or {}).get("id") or entry["identity"]
+            original_id = entry.get("original_id")
+            rows.append(
+                {
+                    **_event_row(event),
+                    "origin": entry["source"],
+                    "identity": entry["identity"],
+                    "event_label": f"#{original_id}"
+                    if original_id is not None
+                    else envelope_id[:8],
+                    "payload": payload,
+                }
+            )
+    source = _source_view(
+        "archive",
+        "Archive",
+        "each batch is checksum-verified before it is shown",
+        archive.store,
+    )
     return _render(
         "audit_archive.html",
-        title="Audit archive",
+        title="Audit · Archive",
         parts=parts,
         active_part="audit",
+        subnav_items=views,
         theme=theme,
         urls=urls,
+        source=source,
         rows=rows,
         key=key,
     )
