@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import timedelta
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
 
+from firm._core.clock import now_utc
 from firm.audit.archive import Archive
-from firm.audit.object_store import ObjectConflict, ObjectStore
-from firm.audit.s3 import S3AuditLog
-from firm.audit.sql_archive import SQLArchiver
+from firm.audit.event_format import canonical
+from firm.audit.object_store import ObjectStore
+from firm.audit.s3 import S3AuditLog, StorageBusy
+
+KEY = "live-provider-row-and-seal-key-0123456789abc"
+STREAM = str(UUID(int=1))
 
 
 @pytest.fixture
-def live_storage():
+def live():
     bucket = os.getenv("FIRM_TEST_S3_BUCKET")
     # CI's live job sets this so a misconfiguration fails the run instead of skipping it green.
     required = bool(os.getenv("FIRM_TEST_S3_REQUIRED"))
@@ -35,11 +41,20 @@ def live_storage():
         region_name=os.getenv("AWS_REGION", "us-east-1"),
     )
     prefix = "firm-integration/" + str(uuid4())
-    log = S3AuditLog(bucket, stream=str(UUID(int=1)), prefix=prefix, client=client)
+    logs: list[S3AuditLog] = []
+
+    def make(**kwargs) -> S3AuditLog:
+        log = S3AuditLog(bucket, stream=STREAM, prefix=prefix, client=client, **kwargs)
+        logs.append(log)
+        return log
+
     archive = Archive(ObjectStore(bucket, prefix=prefix + "/cold", client=client))
     try:
-        yield log, archive
+        yield make, archive, client, bucket
     finally:
+        for log in logs:
+            log._stop_maintenance()
+            log.storage.close()
         # Delete only this fixture's objects/versions, never the supplied bucket.
         for page in client.get_paginator("list_object_versions").paginate(
             Bucket=bucket, Prefix=prefix
@@ -53,63 +68,76 @@ def live_storage():
         client.close()
 
 
-def test_live_conditional_publication_pagination_archive_and_restore(live_storage):
-    log, archive = live_storage
-    now = datetime(2026, 1, 1, tzinfo=UTC)
-    event = log.prepare("one", created_at=now)
+def test_live_concurrent_writers_and_retries(live):
+    make, *_ = live
+    log = make()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: log.record("parallel", data={"i": i}), range(24)))
+    prepared = log.prepare("retried", subject=("Invoice", 42))
     with ThreadPoolExecutor(max_workers=4) as pool:
-        receipts = list(pool.map(log.write, [event] * 8))
-    assert len(set(receipts)) == 1
-    assert log.get(receipts[0])["action"] == "one"
-    conflicting = log.prepare("other", created_at=now, event_id=log.get(receipts[0])["id"])
-    with pytest.raises(ObjectConflict):
-        log.write(conflicting)
-    for i in range(5):
-        log.record("many", created_at=now, data={"i": i})
-    token = None
-    rows = []
-    while True:
-        page = log.scan(start=date(2026, 1, 1), end=date(2026, 1, 2), limit=2, continuation=token)
-        rows.extend(page.items)
-        if page.exhausted:
-            break
-        token = page.continuation
-    assert len(rows) == 6 and len({row["id"] for row in rows}) == 6
-    receipt = archive.export_s3(
-        log, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
-    )
-    assert len(archive.read(receipt)) == 6
+        receipts = set(pool.map(lambda _: log.write(prepared), range(4)))
+    assert len(receipts) == 1
+    assert sorted(e["id"] for e in log.history(limit=100)) == list(range(1, 26))
+    assert [e["action"] for e in log.history(subject=("Invoice", 42))] == ["retried"]
+
+
+def test_live_seal_verify_tamper_and_lease(live):
+    make, _, client, bucket = live
+    log = make(mac_key=KEY, grace=0.0, seal_batch_size=3)
+    with patch("firm.audit.s3.now_utc", lambda: now_utc() - timedelta(hours=1)):
+        for index in range(5):
+            log.record(f"event.{index}")
+    assert log.sealer.run_once() == 5
+    assert log.verify(full=True).outcome == "ok"
+    contender = make(mac_key=KEY, lease_wait=0.5)
+    with log.storage.claim(), pytest.raises(StorageBusy):
+        contender.storage.claim().__enter__()
+    key = next(log.storage.store.iter_keys(log.storage.layout.events))
+    row = json.loads(log.storage.store.read(key)[0])
+    client.put_object(Bucket=bucket, Key=key, Body=canonical({**row, "action": "forged"}))
+    assert log.verify(full=True).outcome == "tampered"
+
+
+def test_live_export_restore_and_sql_outbox(live, tmp_path):
+    from sqlalchemy import create_engine
+
+    make, archive, *_ = live
+    log = make(mac_key=KEY)
+    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}")
+    from firm.audit.s3_outbox import create_outbox
+
+    create_outbox(engine)
+    with engine.begin() as conn:
+        log.record("staged", conn=conn)
+    log.record("direct")
+    assert log.flush_outbox(engine) == 1
+    receipt = archive.export_s3(log, batch_id=str(uuid4()))
+    assert len(archive.read(receipt)) == 2
     target = S3AuditLog(
         log.store.bucket,
-        stream=log.stream,
+        stream=STREAM,
         prefix=log.store.prefix + "restore",
         client=log.store.client,
+        mac_key=KEY,
     )
-    assert len(archive.restore_s3(receipt, target)) == 6
+    try:
+        assert archive.restore_s3(receipt, target) == 2
+        assert target.history() == log.history()
+        assert target.verify(full=True).outcome in {"ok", "warning"}
+    finally:
+        target._stop_maintenance()
+        target.storage.close()
 
 
-def test_live_sql_publication_and_guarded_prune(live_storage, audit):
-    _, archive = live_storage
-    worker = SQLArchiver(audit, archive, stream=str(UUID(int=1)))
-    worker.enable()
-    audit.record("old")
-    audit.max_age = -1
-    assert audit.retention.run_once() == 0
-    receipt = worker.run_once()
-    assert len(archive.read(receipt)) == 1
-    assert audit.retention.run_once() == 1
-
-
-def test_process_restart_after_accepted_put_uses_durable_retry(live_storage, tmp_path):
-    import json
+def test_process_death_after_claim_converges_on_retry(live, tmp_path):
     import subprocess
     import sys
-    from dataclasses import asdict
 
-    log, _ = live_storage
-    event = log.prepare("survives-process-loss", created_at=datetime(2026, 1, 1, tzinfo=UTC))
+    make, *_ = live
+    log = make()
+    prepared = log.prepare("survives-process-loss")
     path = tmp_path / "request-state.json"
-    path.write_text(json.dumps(asdict(event)))
+    path.write_text(json.dumps({"body": prepared.body}))
     config = {
         "bucket": log.store.bucket,
         "stream": log.stream,
@@ -123,26 +151,24 @@ def test_process_restart_after_accepted_put_uses_durable_retry(live_storage, tmp
     }
     script = """
 import json, os
-from dataclasses import asdict
 from pathlib import Path
 from firm.audit.s3 import S3AuditLog, PreparedEvent
 log = S3AuditLog(**json.loads(os.environ["FIRM_S3_PROCESS_CONFIG"]))
 event = PreparedEvent(**json.loads(Path(os.environ["FIRM_S3_PROCESS_EVENTFILE"]).read_text()))
-if os.getenv("FIRM_S3_CRASH_AFTER_PUT"):
-    original = log.store.client.put_object
-    def crash(**kwargs):
-        original(**kwargs)
+if os.getenv("FIRM_S3_CRASH_AFTER_CLAIM"):
+    original = log.storage._write_row
+    def crash(row):
         os._exit(17)
-    log.store.client.put_object = crash
+    log.storage._write_row = crash
 receipt = log.write(event)
-print(json.dumps(asdict(receipt)))
+print(json.dumps(receipt.key))
 log.close()
 """
     failed = subprocess.run(  # noqa: S603 - fixed interpreter/script, no shell
         [sys.executable, "-c", script],
-        env={**env, "FIRM_S3_CRASH_AFTER_PUT": "1"},
+        env={**env, "FIRM_S3_CRASH_AFTER_CLAIM": "1"},
         capture_output=True,
-        timeout=30,
+        timeout=60,
     )
     assert failed.returncode == 17
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -153,30 +179,11 @@ log.close()
                     env=env,
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=60,
                 ),
                 range(2),
             )
         )
     assert all(p.returncode == 0 for p in completed), [p.stderr for p in completed]
-    receipts = [json.loads(p.stdout) for p in completed]
-    assert receipts[0] == receipts[1]
-    assert log.get(receipts[0]["key"])["action"] == "survives-process-loss"
-
-
-def test_live_signed_events_verify_and_archive(live_storage):
-    log, archive = live_storage
-    signed = S3AuditLog(
-        log.store.bucket,
-        stream=log.stream,
-        prefix=log.store.prefix,
-        client=log.store.client,
-        mac_key="live-provider-signing-key-0123456789abcdef",
-    )
-    receipt = signed.record("signed", created_at=datetime(2026, 1, 1, tzinfo=UTC))
-    assert signed.get(receipt)["signature"] == {"status": "valid", "key_id": signed.key_id}
-    assert log.get(receipt)["signature"]["status"] == "unverified"  # reader without the key
-    batch = archive.export_s3(
-        signed, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
-    )
-    assert archive.read(batch)[0]["envelope"]["sig"]["key_id"] == signed.key_id
+    assert completed[0].stdout == completed[1].stdout
+    assert [e["action"] for e in log.history()] == ["survives-process-loss"]

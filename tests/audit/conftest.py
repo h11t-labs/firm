@@ -102,16 +102,28 @@ class S3Error(Exception):
 
 
 class MemoryS3:
-    """Immutable/versioned object test double with controllable request failures."""
+    """Versioned object test double with S3's conditional-write semantics (``If-None-Match``,
+    ``If-Match`` on ETags), delete markers, and controllable request failures."""
 
     def __init__(self) -> None:
         import threading
 
-        self.objects: dict[tuple[str, str], list[bytes]] = {}
+        # Each key maps to its versions; ``None`` is a delete marker.
+        self.objects: dict[tuple[str, str], list[bytes | None]] = {}
         self.lock = threading.Lock()
         self.fail_key: str | None = None
         self.fail_after_put = False
         self.request_count = 0
+
+    @staticmethod
+    def _etag(body: bytes) -> str:
+        import hashlib
+
+        return '"' + hashlib.md5(body, usedforsecurity=False).hexdigest() + '"'
+
+    def _current(self, key: tuple[str, str]) -> bytes | None:
+        versions = self.objects.get(key)
+        return versions[-1] if versions else None
 
     def put_object(self, **kwargs):
         with self.lock:
@@ -119,13 +131,18 @@ class MemoryS3:
             key = (kwargs["Bucket"], kwargs["Key"])
             if self.fail_key and self.fail_key in key[1]:
                 raise S3Error("ServiceUnavailable")
-            if key in self.objects and kwargs.get("IfNoneMatch") == "*":
+            current = self._current(key)
+            if kwargs.get("IfNoneMatch") == "*" and current is not None:
+                raise S3Error("PreconditionFailed")
+            if "IfMatch" in kwargs and (
+                current is None or self._etag(current) != kwargs["IfMatch"]
+            ):
                 raise S3Error("PreconditionFailed")
             self.objects.setdefault(key, []).append(kwargs["Body"])
             if self.fail_after_put:
                 self.fail_after_put = False
                 raise TimeoutError("injected timeout after accepted PUT")
-            return {"VersionId": str(len(self.objects[key]))}
+            return {"VersionId": str(len(self.objects[key])), "ETag": self._etag(kwargs["Body"])}
 
     def get_object(self, **kwargs):
         import io
@@ -135,18 +152,45 @@ class MemoryS3:
             key = (kwargs["Bucket"], kwargs["Key"])
             if self.fail_key and self.fail_key in key[1]:
                 raise S3Error("ServiceUnavailable")
-            if key not in self.objects:
-                raise S3Error("NoSuchKey")
-            version = int(kwargs.get("VersionId", len(self.objects[key])))
-            return {"Body": io.BytesIO(self.objects[key][version - 1]), "VersionId": str(version)}
+            versions = self.objects.get(key)
+            if "VersionId" in kwargs:
+                index = int(kwargs["VersionId"])
+                if not versions or index > len(versions) or versions[index - 1] is None:
+                    raise S3Error("NoSuchVersion")
+                body = versions[index - 1]
+                version = index
+            else:
+                body = versions[-1] if versions else None
+                if body is None:
+                    raise S3Error("NoSuchKey")
+                version = len(versions)
+            assert body is not None
+            return {"Body": io.BytesIO(body), "VersionId": str(version), "ETag": self._etag(body)}
+
+    def head_object(self, **kwargs):
+        with self.lock:
+            self.request_count += 1
+            if self._current((kwargs["Bucket"], kwargs["Key"])) is None:
+                raise S3Error("404")
+            return {}
+
+    def delete_objects(self, **kwargs):
+        with self.lock:
+            self.request_count += 1
+            for item in kwargs["Delete"]["Objects"]:
+                key = (kwargs["Bucket"], item["Key"])
+                if self._current(key) is not None:
+                    self.objects[key].append(None)
+            return {}
 
     def list_objects_v2(self, **kwargs):
         with self.lock:
             self.request_count += 1
             keys = sorted(
                 k
-                for bucket, k in self.objects
+                for (bucket, k), versions in self.objects.items()
                 if bucket == kwargs["Bucket"]
+                and versions[-1] is not None
                 and k.startswith(kwargs["Prefix"])
                 and k > kwargs.get("StartAfter", "")
             )

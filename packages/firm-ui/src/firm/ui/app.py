@@ -15,18 +15,17 @@ import re
 import sys
 import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, timedelta
 from http.cookies import SimpleCookie
 from importlib import resources
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlsplit
 
-from sqlalchemy.engine import Connection
-
 from firm._core.clock import now_utc
 from firm.audit import queries as audit_queries
+from firm.audit import s3_queries
 from firm.cache import queries as cache_queries
 from firm.channel import queries as channel_queries
 from firm.queue import queries as queue_queries
@@ -385,30 +384,12 @@ class _Handler:
             if path == "/audit/archive" and dash.audit_archive is not None:
                 return self._archive_view(params)
             if path == "/audit/s3" and dash.audit_s3 is not None:
-                return self._s3_audit(params)
-            if path == "/audit/object" and dash.audit_s3 is not None:
-                try:
-                    event = dash.audit_s3.get(params.get("key", [""])[0])
-                except FileNotFoundError:
+                return self._audit(*self._audit_params(params), s3=True)
+            if (match := re.fullmatch(r"/audit/s3/(\d+)", path)) and dash.audit_s3 is not None:
+                audit_id = _parse_id(match.group(1))
+                if audit_id is None:
                     return self._not_found()
-                except ValueError as exc:
-                    return _html(
-                        render.error_page(
-                            dash.parts, str(exc), theme=self._theme(), urls=self.urls
-                        ),
-                        400,
-                    )
-                return _html(
-                    render.audit_detail_page(
-                        dash.parts,
-                        event,
-                        back="/audit/s3",
-                        views=self._audit_views("s3"),
-                        theme=self._theme(),
-                        urls=self.urls,
-                        request_path=self.request.full_path,
-                    )
-                )
+                return self._audit_detail(audit_id, s3=True)
             if path == "/audit" and dash.audit is None and dash.audit_s3 is not None:
                 # No SQL log: the tab lands on S3 history, carrying any query along.
                 query = f"?{self.request.query}" if self.request.query else ""
@@ -416,16 +397,7 @@ class _Handler:
             if path == "/audit" and dash.audit is None and dash.audit_archive is not None:
                 return _redirect(self.urls.path("/audit/archive"))
             if path == "/audit" and dash.audit is not None:
-                return self._audit(
-                    params.get("action", [None])[0],
-                    params.get("subject", [None])[0],
-                    params.get("actor", [None])[0],
-                    params.get("correlation_id", [None])[0],
-                    params.get("sort", [None])[0],
-                    params.get("dir", [None])[0],
-                    max(1, _to_int(params.get("page", ["1"])[0], 1)),
-                    params.get("per_page", [None])[0],
-                )
+                return self._audit(*self._audit_params(params))
             if (match := re.fullmatch(r"/audit/(\d+)", path)) and dash.audit is not None:
                 audit_id = _parse_id(match.group(1))
                 if audit_id is None:
@@ -498,14 +470,40 @@ class _Handler:
         except Exception as exc:
             return self._server_error(exc)
 
-    def _integrity(self, conn: Connection) -> audit_queries.IntegrityState:
-        """Derive the tamper-evidence panel's state from an audit connection (shared with the
-        page's own query so the panel costs no extra round-trip). ``key_configured`` comes from
-        this process's ``FIRM_AUDIT_KEY``."""
+    def _integrity(self, conn: Any, queries: Any = audit_queries) -> audit_queries.IntegrityState:
+        """Derive the tamper-evidence panel's state from an audit source — a SQL connection with
+        :mod:`firm.audit.queries`, or an S3 log with :mod:`firm.audit.s3_queries`, which reads
+        the same verifier records. ``key_configured`` comes from this process's
+        ``FIRM_AUDIT_KEY``."""
         key_configured = bool(os.environ.get(_AUDIT_KEY_ENV))
-        status = audit_queries.verify_status_row(conn)
-        config = audit_queries.integrity_config(conn, key_configured=key_configured)
-        return audit_queries.integrity_state(status, config, now=now_utc())
+        status = queries.verify_status_row(conn)
+        config = queries.integrity_config(conn, key_configured=key_configured)
+        return queries.integrity_state(status, config, now=now_utc())
+
+    @staticmethod
+    def _audit_params(params: dict[str, list[str]]) -> tuple[Any, ...]:
+        return (
+            params.get("action", [None])[0],
+            params.get("subject", [None])[0],
+            params.get("actor", [None])[0],
+            params.get("correlation_id", [None])[0],
+            params.get("sort", [None])[0],
+            params.get("dir", [None])[0],
+            max(1, _to_int(params.get("page", ["1"])[0], 1)),
+            params.get("per_page", [None])[0],
+        )
+
+    @contextmanager
+    def _audit_source(self, s3: bool) -> Iterator[tuple[Any, Any]]:
+        """The audit part to read and its query module: SQL tables or an S3 log, one surface."""
+        dash = self.dash
+        if s3:
+            assert dash.audit_s3 is not None
+            yield dash.audit_s3, s3_queries
+        else:
+            assert dash.audit is not None
+            with dash.audit.connect() as conn:
+                yield conn, audit_queries
 
     # -- pages ---------------------------------------------------------------------------------
 
@@ -531,6 +529,8 @@ class _Handler:
         if dash.audit is not None:
             with dash.audit.connect() as audit_conn:
                 integrity = self._integrity(audit_conn)
+        elif dash.audit_s3 is not None:
+            integrity = self._integrity(dash.audit_s3, s3_queries)
         with dash.queue.engine.connect() as conn:
             body = render.overview_page(
                 dash.parts,
@@ -662,9 +662,9 @@ class _Handler:
         dir: str | None,
         page: int,
         per_page: str | None,
+        *,
+        s3: bool = False,
     ) -> UIResponse:
-        dash = self.dash
-        assert dash.audit is not None
         sort = sort if sort in audit_queries.SORT_COLUMNS else render.AUDIT_DEFAULT_SORT
         dir = dir if dir in ("asc", "desc") else render.AUDIT_DEFAULT_DIR
         per_page_n = self._per_page(per_page, render.AUDIT_DEFAULT_PER_PAGE)
@@ -675,8 +675,8 @@ class _Handler:
         actor_type, actor_id = _split_ref(actor)
         action_filter = action or None
         correlation_filter = correlation_id or None
-        with dash.audit.connect() as conn:
-            total = audit_queries.audit_count(
+        with self._audit_source(s3) as (conn, queries):
+            total = queries.audit_count(
                 conn,
                 action=action_filter,
                 subject_type=subject_type,
@@ -688,9 +688,9 @@ class _Handler:
             page = _clamp_page(page, total, per_page_n)
             offset = (page - 1) * per_page_n
             body = render.audit_page(
-                dash.parts,
-                audit_queries.audit_stats(conn),
-                audit_queries.audit_search(
+                self.dash.parts,
+                queries.audit_stats(conn),
+                queries.audit_search(
                     conn,
                     action=action_filter,
                     subject_type=subject_type,
@@ -709,9 +709,11 @@ class _Handler:
                     "actor": actor or "",
                     "correlation_id": correlation_id or "",
                 },
-                views=self._audit_views("sql"),
-                integrity=self._integrity(conn),
-                row_ctx=audit_queries.row_integrity_context(conn),
+                views=self._audit_views("s3" if s3 else "sql"),
+                base="/audit/s3" if s3 else "/audit",
+                source=render.s3_source(conn) if s3 else None,
+                integrity=self._integrity(conn, queries),
+                row_ctx=queries.row_integrity_context(conn),
                 total=total,
                 page=page,
                 per_page=per_page_n,
@@ -732,51 +734,6 @@ class _Handler:
             s3=dash.audit_s3 is not None,
             archive=dash.audit_archive is not None,
             active=active,
-        )
-
-    def _s3_audit(self, params: dict[str, list[str]]) -> UIResponse:
-        dash = self.dash
-        assert dash.audit_s3 is not None
-        today = now_utc().date().isoformat()
-        filters = {
-            name: params.get(name, [""])[0]
-            for name in ("action", "subject", "actor", "correlation_id")
-        }
-        subject_type, subject_id = _split_ref(filters["subject"])
-        actor_type, actor_id = _split_ref(filters["actor"])
-        try:
-            start = date.fromisoformat(params.get("start", [today])[0])
-            end = date.fromisoformat(params.get("end", [today])[0])  # inclusive, as the form shows
-            page = dash.audit_s3.scan(
-                start=start,
-                end=end + timedelta(days=1),
-                limit=25,
-                max_objects=100,
-                max_requests=150,
-                continuation=params.get("continuation", [None])[0],
-                action=filters["action"] or None,
-                subject_type=subject_type,
-                subject_id=subject_id,
-                actor_type=actor_type,
-                actor_id=actor_id,
-                correlation_id=filters["correlation_id"] or None,
-            )
-        except ValueError as exc:
-            return _html(
-                render.error_page(dash.parts, str(exc), theme=self._theme(), urls=self.urls), 400
-            )
-        return _html(
-            render.s3_audit_page(
-                dash.parts,
-                page,
-                dash.audit_s3,
-                start,
-                end,
-                filters,
-                views=self._audit_views("s3"),
-                theme=self._theme(),
-                urls=self.urls,
-            )
         )
 
     def _archive_view(self, params: dict[str, list[str]]) -> UIResponse:
@@ -812,19 +769,19 @@ class _Handler:
             )
         )
 
-    def _audit_detail(self, event_id: int) -> UIResponse:
-        dash = self.dash
-        assert dash.audit is not None
-        with dash.audit.connect() as conn:
-            event = audit_queries.audit_detail(conn, event_id)
-            row_ctx = audit_queries.row_integrity_context(conn) if event is not None else None
+    def _audit_detail(self, event_id: int, *, s3: bool = False) -> UIResponse:
+        with self._audit_source(s3) as (conn, queries):
+            event = queries.audit_detail(conn, event_id)
+            row_ctx = queries.row_integrity_context(conn) if event is not None else None
         if event is None:
             return self._not_found()
         return _html(
             render.audit_detail_page(
-                dash.parts,
+                self.dash.parts,
                 event,
                 row_ctx=row_ctx,
+                back="/audit/s3" if s3 else "/audit",
+                views=self._audit_views("s3" if s3 else "sql"),
                 theme=self._theme(),
                 request_path=self.request.full_path,
                 urls=self.urls,

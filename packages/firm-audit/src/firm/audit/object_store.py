@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,6 +70,8 @@ class ObjectStore:
                     connect_timeout=5,
                     read_timeout=15,
                     retries={"mode": "standard", "total_max_attempts": 3},
+                    # Maintenance reads fan out over a bounded thread pool.
+                    max_pool_connections=32,
                 ),
             )
         self.client = client
@@ -163,6 +166,83 @@ class ObjectStore:
         if not keys and result.get("IsTruncated"):
             raise ValueError("provider returned an empty truncated page")
         return keys, not result.get("IsTruncated", False)
+
+    def iter_keys(self, prefix: str, *, after: str = "", page: int = 1000) -> Iterator[str]:
+        """Every key under ``prefix`` after ``after``, ascending, one LIST per ``page`` keys."""
+        while True:
+            keys, exhausted = self.list_keys(prefix, after=after, limit=page)
+            yield from keys
+            if exhausted or not keys:
+                return
+            after = keys[-1]
+
+    def read_tagged(self, key: str) -> tuple[bytes, str] | None:
+        """The current bytes and ETag (for a compare-and-swap), or ``None`` when absent."""
+        self._check_key(key)
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            if error_code(exc) in {"NoSuchKey", "404"}:
+                return None
+            raise
+        body = response["Body"]
+        try:
+            data = body.read(MAX_OBJECT_BYTES + 1)
+        finally:
+            body.close()
+        if len(data) > MAX_OBJECT_BYTES:
+            raise ValueError("object exceeds the audit size limit")
+        return data, str(response["ETag"])
+
+    def swap(self, key: str, data: bytes, *, etag: str | None) -> bool:
+        """Compare-and-swap one small mutable object: create it when ``etag`` is ``None``
+        (``If-None-Match: *``), else replace it only while its ETag still matches
+        (``If-Match``). Returns ``False`` when another writer got there first."""
+        self._check_key(key)
+        condition = {"IfNoneMatch": "*"} if etag is None else {"IfMatch": etag}
+        try:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=data,
+                ContentType="application/json",
+                **condition,
+            )
+        except Exception as exc:
+            if error_code(exc) in {"PreconditionFailed", "ConditionalRequestConflict", "412"}:
+                return False
+            raise
+        return True
+
+    def exists(self, key: str) -> bool:
+        self._check_key(key)
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=key)
+        except Exception as exc:
+            if error_code(exc) in {"NoSuchKey", "404", "NotFound"}:
+                return False
+            raise
+        return True
+
+    def delete_keys(self, keys: Iterable[str]) -> None:
+        """Delete objects (a delete marker in a versioned bucket), 1,000 per request."""
+        batch: list[str] = []
+        for key in keys:
+            self._check_key(key)
+            batch.append(key)
+            if len(batch) == 1000:
+                self._delete_batch(batch)
+                batch = []
+        if batch:
+            self._delete_batch(batch)
+
+    def _delete_batch(self, keys: list[str]) -> None:
+        result = self.client.delete_objects(
+            Bucket=self.bucket, Delete={"Objects": [{"Key": key} for key in keys], "Quiet": True}
+        )
+        errors = result.get("Errors") or []
+        if errors:
+            raise RuntimeError(f"S3 refused to delete {len(errors)} object(s): {errors[0]}")
 
     def close(self) -> None:
         if self._owns_client:

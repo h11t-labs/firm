@@ -170,6 +170,21 @@ archive_imports = Table(
 )
 
 
+# Events an S3AuditLog staged inside a caller's SQL transaction (``record(conn=...)``), waiting
+# for the relay to publish them. It lives in the caller's database, which may hold no other audit
+# table; ``firm.audit.s3_outbox.create_outbox`` creates just this table.
+s3_outbox = Table(
+    "firm_audit_s3_outbox",
+    metadata,
+    Column("id", pk_bigint(), primary_key=True),
+    Column("stream", String(36), nullable=False),
+    Column("entry_id", String(26), nullable=False, unique=True),
+    Column("body", long_text(), nullable=False),
+    Column("created_at", _DT, nullable=False, default=now_utc),
+    Index("index_firm_audit_s3_outbox_on_stream_id", "stream", "id"),
+)
+
+
 def create_all(bind: Engine | Connection) -> None:
     """Create the firm-audit table and stamp the Alembic baseline, so an auto-created schema
     stays ``alembic upgrade``-able later."""

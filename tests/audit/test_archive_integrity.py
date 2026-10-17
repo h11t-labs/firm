@@ -115,7 +115,7 @@ def test_copy_export_and_migration_from_released_schema(db_url, archive):
                 conn.exec_driver_sql(
                     "SELECT version_num FROM firm_audit_alembic_version"
                 ).scalar_one()
-                == "0003"
+                == "0004"
             )
     finally:
         engine.dispose()

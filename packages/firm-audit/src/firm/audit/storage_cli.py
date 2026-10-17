@@ -1,10 +1,10 @@
-"""Explicit S3 recording, bounded scans, and archive operations for firm-audit."""
+"""The S3 audit log and archive commands for firm-audit (the SQL commands' S3 counterparts)."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +53,7 @@ def prepare(log: Any, action: str, event_file: Path, data: str) -> None:
     # Exclusive create avoids overwriting the retry identity after an unknown result.
     with event_file.open("x", encoding="utf-8") as handle:
         handle.write(canonical(asdict(prepared)).decode() + "\n")
-    output({"prepared": str(event_file), "key": prepared.key})
+    output({"prepared": str(event_file), "entry_id": prepared.entry_id})
 
 
 @s3.command(help="Write/retry the exact prepared event, then print a receipt.")
@@ -65,32 +65,94 @@ def write(log: Any, event_file: Path) -> None:
     output(asdict(log.write(PreparedEvent(**json.loads(event_file.read_text())))))
 
 
-@s3.command(help="Retrieve an event by key; use receipt fields to pin and verify a version.")
-@click.argument("key")
+@s3.command(help="Retrieve one event by id or object key; receipt fields verify a version.")
+@click.argument("locator")
 @click.option("--sha256", default=None)
 @click.option("--version-id", default=None)
 @click.pass_obj
-def get(log: Any, key: str, sha256: str | None, version_id: str | None) -> None:
+def get(log: Any, locator: str, sha256: str | None, version_id: str | None) -> None:
     from .object_store import Receipt
 
     if version_id and not sha256:
         raise click.BadParameter("--version-id requires --sha256")
-    output(log.get(Receipt(key, sha256, version_id) if sha256 else key))
+    if locator.isdigit():
+        output(log.get(int(locator)))
+    else:
+        output(log.get(Receipt(locator, sha256, version_id) if sha256 else locator))
 
 
-@s3.command(help="Scan UTC date partitions [start,end) within explicit budgets.")
-@click.option("--start", required=True)
-@click.option("--end", required=True)
-@click.option("--limit", default=100, type=int)
-@click.option("--max-objects", default=1000, type=int)
-@click.option("--max-requests", default=1100, type=int)
-@click.option("--continuation", default=None)
-@click.option("--action", default=None)
+@s3.command(help="Show the total number of recorded events.")
 @click.pass_obj
-def scan(log: Any, start: str, end: str, **options: Any) -> None:
-    output(
-        asdict(log.scan(start=date.fromisoformat(start), end=date.fromisoformat(end), **options))
-    )
+def stats(log: Any) -> None:
+    click.echo(f"events: {log.storage.count_events()}")
+
+
+@s3.command("history", help="List recent events, optionally filtered.")
+@click.option("--action", default=None, help="Filter by action.")
+@click.option("--subject-type", default=None, help="Filter by subject type.")
+@click.option("--subject-id", default=None, help="Filter by subject id.")
+@click.option("--actor-type", default=None, help="Filter by actor type.")
+@click.option("--actor-id", default=None, help="Filter by actor id.")
+@click.option("--correlation-id", default=None, help="Filter by correlation id.")
+@click.option("--since", default=None, help="Only events created at or after this ISO time.")
+@click.option("--limit", default=20, show_default=True, help="Max rows to show.")
+@click.pass_obj
+def s3_history(log: Any, since: str | None, **filters: Any) -> None:
+    from .cli import print_history
+
+    print_history(log.history(since=datetime.fromisoformat(since) if since else None, **filters))
+
+
+@s3.command(help="Delete events older than max_age, exactly as `firm-audit prune` does.")
+@click.option(
+    "--max-age", default=None, type=float, help="Override max_age in seconds for this run."
+)
+@click.pass_obj
+def prune(log: Any, max_age: float | None) -> None:
+    from .cli import run_prune
+
+    run_prune(log, max_age)
+
+
+@s3.command(help="Seal the backlog of past-grace events (Layer 2). Needs a key.")
+@click.pass_obj
+def seal(log: Any) -> None:
+    from .cli import run_seal
+
+    run_seal(log)
+
+
+@s3.command("anchor-compact", help="Compact a mutable anchor to one signed CHECKPOINT.")
+@click.option("--anchor", "anchor_path", default=None, help="Defaults to FIRM_AUDIT_ANCHOR_PATH.")
+@click.pass_obj
+def anchor_compact(log: Any, anchor_path: str | None) -> None:
+    from .cli import run_anchor_compact
+
+    run_anchor_compact(log, anchor_path)
+
+
+@s3.command(help="Verify row MACs, independent seals, markers, and anchor.")
+@click.option("--anchor", "anchor_path", default=None, help="Anchor file to check (Layer 3).")
+@click.option("--full", is_flag=True, help="Recompute every sealed range.")
+@click.pass_obj
+def verify(log: Any, anchor_path: str | None, full: bool) -> None:
+    from .cli import print_verify
+
+    print_verify(log.verify(anchor_path=anchor_path, full=full))
+
+
+@s3.command("flush-outbox", help="Publish events staged by record(conn=...) in a database.")
+@click.option("--database-url", required=True, envvar="FIRM_AUDIT_DATABASE_URL")
+@click.option("--limit", default=1000, show_default=True)
+@click.pass_obj
+def flush_outbox(log: Any, database_url: str, limit: int) -> None:
+    from .._core.database import create_engine_for, dispose_engine
+
+    engine = create_engine_for(database_url)
+    try:
+        click.echo(f"published {log.flush_outbox(engine, limit=limit)} events")
+    finally:
+        dispose_engine(engine)
 
 
 @click.group(help="Copy, verify, restore, and explicitly enable archive-before-prune.")
@@ -162,15 +224,15 @@ def run_sql(
         output({"receipt": asdict(receipt) if receipt else None, "status": worker.status()})
 
 
-@archive.command("export-s3", help="Copy one bounded S3 selection; original events remain.")
+@archive.command("export-s3", help="Copy a bounded S3 selection by id; original events remain.")
 @click.option("--source-bucket", required=True)
 @click.option("--source-prefix", default="firm-audit")
 @click.option("--stream", required=True)
 @click.option("--batch-id", required=True)
-@click.option("--start", required=True)
-@click.option("--end", required=True)
+@click.option("--limit", default=100, type=int)
+@click.option("--since", default=None)
+@click.option("--until", default=None)
 @click.option("--continuation", default=None)
-@click.option("--max-objects", default=100, type=int)
 @click.pass_obj
 def export_s3(
     storage: Any,
@@ -178,10 +240,10 @@ def export_s3(
     source_prefix: str,
     stream: str,
     batch_id: str,
-    start: str,
-    end: str,
+    limit: int,
+    since: str | None,
+    until: str | None,
     continuation: str | None,
-    max_objects: int,
 ) -> None:
     from .s3 import S3AuditLog
 
@@ -191,11 +253,11 @@ def export_s3(
     ) as source:
         receipt = storage.export_s3(
             source,
-            start=date.fromisoformat(start),
-            end=date.fromisoformat(end),
             batch_id=batch_id,
+            limit=limit,
+            since=datetime.fromisoformat(since) if since else None,
+            until=datetime.fromisoformat(until) if until else None,
             continuation=continuation,
-            max_objects=max_objects,
         )
     output(asdict(receipt))
 
@@ -263,4 +325,4 @@ def restore_s3(
     with S3AuditLog(
         target_bucket, stream=stream, prefix=target_prefix, client=storage.store.client
     ) as target:
-        output([asdict(receipt) for receipt in storage.restore_s3(manifest, target)])
+        output({"restored": storage.restore_s3(manifest, target)})

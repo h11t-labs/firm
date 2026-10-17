@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -129,22 +129,29 @@ def test_archive_corruption_and_input_conflict_fail(audit, archive, object_clien
         archive.read(receipt)
 
 
+def _backdated(log, action, **fields):
+    """An S3 event created at ``NOW`` (``record`` has AuditLog's signature: no timestamp)."""
+    return log.write(log.prepare(action, created_at=NOW, **fields))
+
+
 def test_s3_archive_restore_and_resume(s3_log, archive, object_client):
-    s3_log.record("one", created_at=NOW, data={"amount": Decimal("2.00")})
+    _backdated(s3_log, "one", data={"amount": Decimal("2.00")})
     batch_id = str(uuid4())
-    kwargs = {"start": date(2020, 1, 1), "end": date(2020, 1, 2), "batch_id": batch_id}
     object_client.fail_key = "manifest.json"
     with pytest.raises(UnknownWriteOutcome):
-        archive.export_s3(s3_log, **kwargs)
+        archive.export_s3(s3_log, batch_id=batch_id)
     object_client.fail_key = None
-    receipt = archive.export_s3(s3_log, **kwargs)
+    receipt = archive.export_s3(s3_log, batch_id=batch_id)
     from firm.audit.s3 import S3AuditLog
 
     target = S3AuditLog("restored", stream=STREAM, prefix="other", client=object_client)
-    restored = archive.restore_s3(receipt, target)
-    assert target.get(restored[0])["data"] == {"amount": Decimal("2.00")}
-    assert archive.restore_s3(receipt, target) == restored
-    assert s3_log.scan(start=date(2020, 1, 1), end=date(2020, 1, 2)).items
+    assert archive.restore_s3(receipt, target) == 1
+    # Same stream: the original id and row come back exactly, like a native SQL restore.
+    assert target.history() == s3_log.history()
+    assert target.history()[0]["data"] == {"amount": Decimal("2.00")}
+    with pytest.raises(ValueError, match="empty"):
+        archive.restore_s3(receipt, target)
+    assert s3_log.history()  # copy-only: the source keeps its events
 
 
 def test_policy_cannot_silently_switch_destinations(audit, archive):
@@ -230,16 +237,12 @@ def test_cross_backend_restore_preserves_origin(audit, archive, s3_log, tmp_path
 
     audit.record("sql-origin", data={"money": Decimal("4.00")})
     receipt = archive.export_sql(audit, stream=STREAM, batch_id=str(uuid4()))
-    restored = archive.restore_s3(receipt, s3_log)
-    origin = s3_log.get(restored[0])["provenance"]
+    assert archive.restore_s3(receipt, s3_log) == 1
+    origin = s3_log.import_provenance(s3_log.history()[0]["id"])
     assert origin["source"] == "sql" and origin["original_id"] == 1
-    assert archive.restore_s3(receipt, s3_log) == restored
-    timestamp = audit.history()[0]["created_at"].date()
-    from datetime import timedelta
-
-    converted = archive.export_s3(
-        s3_log, start=timestamp, end=timestamp + timedelta(days=1), batch_id=str(uuid4())
-    )
+    with pytest.raises(ValueError, match="empty"):
+        archive.restore_s3(receipt, s3_log)
+    converted = archive.export_s3(s3_log, batch_id=str(uuid4()))
     with AuditLog(f"sqlite:///{tmp_path / 'converted.db'}") as target:
         assert restore_sql(archive, [converted], target) == 1
         assert target.history()[0]["data"] == {"money": Decimal("4.00")}
@@ -329,10 +332,8 @@ def test_plain_prune_reports_rows_blocked_by_archive_guard(audit, archive, monke
 def test_restored_rows_with_import_provenance_archive_and_prune(audit, archive, s3_log):
     from firm.audit.sql_archive import import_provenance
 
-    s3_log.record("origin", created_at=NOW)
-    exported = archive.export_s3(
-        s3_log, start=date(2020, 1, 1), end=date(2020, 1, 2), batch_id=str(uuid4())
-    )
+    _backdated(s3_log, "origin")
+    exported = archive.export_s3(s3_log, batch_id=str(uuid4()))
     assert restore_sql(archive, [exported], audit) == 1
     with transaction(audit.engine) as conn:
         assert import_provenance(conn, audit.history()[0]["id"])["source"] == "s3"
@@ -346,11 +347,9 @@ def test_restored_rows_with_import_provenance_archive_and_prune(audit, archive, 
 
 def test_export_s3_reads_each_source_object_once(s3_log, archive, object_client):
     for _ in range(10):
-        s3_log.record("copied", created_at=NOW)
+        _backdated(s3_log, "copied")
     before = object_client.request_count
-    receipt = archive.export_s3(
-        s3_log, start=date(2020, 1, 1), end=date(2020, 1, 2), batch_id=str(uuid4())
-    )
+    receipt = archive.export_s3(s3_log, batch_id=str(uuid4()))
     # 1 LIST + 10 GET observe the source once. Publication then costs 8: PUT input, GET input
     # (resume), PUT data, GET data (verify), PUT manifest, and the read-back of manifest + data.
     assert object_client.request_count - before == 1 + 10 + 8
@@ -359,9 +358,8 @@ def test_export_s3_reads_each_source_object_once(s3_log, archive, object_client)
 
 def test_batches_page_through_summaries_in_key_order(s3_log, archive, object_client):
     for _ in range(3):
-        s3_log.record("listed", created_at=NOW)
-    kwargs = {"start": date(2020, 1, 1), "end": date(2020, 1, 2)}
-    published = [archive.export_s3(s3_log, batch_id=str(uuid4()), **kwargs) for _ in range(3)]
+        _backdated(s3_log, "listed")
+    published = [archive.export_s3(s3_log, batch_id=str(uuid4())) for _ in range(3)]
     staged = str(uuid4())  # input frozen, never published: resume() would complete it
     archive.store.put(f"{archive.prefix}{staged}/input.json", b"{}")
     pages, token = [], None

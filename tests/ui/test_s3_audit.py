@@ -1,11 +1,12 @@
-"""Read-only S3 dashboard queries use bounded storage capabilities without SQL engines."""
+"""An S3 audit log renders as the SQL audit page does: same cards, filters, sorting, integrity."""
 
 from __future__ import annotations
 
 import html
 import re
 import threading
-from datetime import UTC, date, datetime
+from datetime import timedelta
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -13,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from firm._core.clock import now_utc
 from firm.audit import AuditLog
 from firm.audit.archive import Archive
 from firm.audit.object_store import ObjectStore
@@ -21,30 +23,12 @@ from firm.ui import build_dashboard, create_server
 from firm.ui.app import DashboardApp, Headers, UIRequest
 from tests.audit.conftest import MemoryS3
 
-DAY = datetime(2026, 1, 1, tzinfo=UTC)
+STREAM = str(UUID(int=1))
+KEY = "dashboard-s3-row-and-seal-key-0123456789ab"
 
 
-@pytest.fixture
-def s3_dashboard_url():
-    client = MemoryS3()
-    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
-    receipt = log.record("<script>unsafe</script>", created_at=DAY)
-    archive = Archive(ObjectStore("archives", client=client))
-    archived = archive.export_s3(
-        log, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
-    )
-    dash = build_dashboard(audit_s3=log, audit_archive=archive)
-    assert dash.parts == ["audit"] and dash.audit is None
-    server = create_server(dash, "127.0.0.1", 0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_address[1]}", receipt.key, archived.key
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-        dash.close()
+def _log(client, **kwargs) -> S3AuditLog:
+    return S3AuditLog("events", stream=STREAM, client=client, **kwargs)
 
 
 def _get(app: DashboardApp, path: str, query: str = "", prefix: str = "") -> tuple[int, str]:
@@ -52,57 +36,131 @@ def _get(app: DashboardApp, path: str, query: str = "", prefix: str = "") -> tup
     return response.status, response.body.decode()
 
 
-def test_s3_history_and_detail_are_escaped(s3_dashboard_url):
-    base, key, _ = s3_dashboard_url
-    # "To" is inclusive in the form: one day selects that day's partition.
-    with urlopen(base + "/audit/s3?start=2026-01-01&end=2026-01-01") as response:
-        body = response.read().decode()
-        assert "1 matching event ·" in body
-        assert "&lt;script&gt;unsafe&lt;/script&gt;" in body
-        assert "<script>unsafe</script>" not in body
-        assert "end of selected range" in body
-    with urlopen(base + "/audit/object?" + urlencode({"key": key})) as response:
-        detail = response.read().decode()
-        assert "&lt;script&gt;unsafe&lt;/script&gt;" in detail
-        assert 'class="crumb" href="/audit/s3"' in detail
-
-
-def test_s3_only_audit_tab_lands_on_s3_history_with_its_query():
+@pytest.fixture
+def s3_dashboard_url():
     client = MemoryS3()
-    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
+    log = _log(client)
+    log.record("<script>unsafe</script>", subject=("Invoice", 42))
+    archive = Archive(ObjectStore("archives", client=client))
+    archived = archive.export_s3(log, batch_id=str(uuid4()))
+    dash = build_dashboard(audit_s3=log, audit_archive=archive)
+    assert dash.parts == ["audit"] and dash.audit is None
+    server = create_server(dash, "127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", archived.key
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        dash.close()
+
+
+def test_s3_page_is_the_audit_page_and_escapes(s3_dashboard_url):
+    base, _ = s3_dashboard_url
+    with urlopen(base + "/audit/s3") as response:
+        body = response.read().decode()
+    assert "&lt;script&gt;unsafe&lt;/script&gt;" in body and "<script>unsafe" not in body
+    assert '<div class="card"><div class="l">events</div><div class="n">1</div>' in body
+    assert 'Source</span> <span class="source-word"' in body and ">S3<" in body
+    assert 'action="/audit/s3"' in body and 'href="/audit/s3/1"' in body
+    assert "sort=action" in body  # the same sortable columns
+    with urlopen(base + "/audit/s3/1") as response:
+        detail = response.read().decode()
+    assert "&lt;script&gt;unsafe&lt;/script&gt;" in detail
+    assert 'class="crumb" href="/audit/s3"' in detail
+    with pytest.raises(HTTPError) as caught:
+        urlopen(base + "/audit/s3/99")
+    assert caught.value.code == 404
+
+
+def test_s3_page_filters_sorts_and_pages_like_sql(tmp_path):
+    client = MemoryS3()
+    log = _log(client)
+    url = f"sqlite:///{tmp_path / 'audit.db'}"
+    with AuditLog(url) as audit:
+        for index in range(30):
+            for target in (log, audit):
+                target.record(
+                    "invoice.paid" if index % 3 else "invoice.sent",
+                    subject=("Invoice", index % 5),
+                    actor=("User", index % 2),
+                )
+    dash_s3 = build_dashboard(audit_s3=log)
+    dash_sql = build_dashboard(audit_url=url)
+    try:
+        apps = DashboardApp(dash_sql), DashboardApp(dash_s3)
+
+        def ids(app, path, query):
+            _, body = _get(app, path, query)
+            return re.findall(r'href="/audit(?:/s3)?/(\d+)"', body)
+
+        for query in (
+            "",
+            "per_page=10&page=2",
+            "action=invoice.sent",
+            "subject=Invoice:3",
+            "actor=User:1&sort=subject&dir=asc",
+            "sort=action&dir=desc&per_page=10&page=3",
+            "sort=id&dir=asc&per_page=10",
+            "sort=created_at&dir=asc&per_page=10&page=2",
+        ):
+            assert ids(apps[1], "/audit/s3", query) == ids(apps[0], "/audit", query), query
+        _, body = _get(apps[1], "/audit/s3", "action=invoice.sent")
+        assert "Showing 1-10 of 10" in body
+    finally:
+        dash_s3.close()
+        dash_sql.close()
+
+
+def test_s3_integrity_strip_and_row_shields(monkeypatch):
+    client = MemoryS3()
+    log = _log(client, mac_key=KEY, grace=0.0, seal_batch_size=2)
+    old = now_utc() - timedelta(hours=1)
+    with patch("firm.audit.s3.now_utc", lambda: old):
+        for index in range(3):
+            log.record(f"e{index}")
+    log.sealer.run_once()
+    log.verify(full=True)
+    monkeypatch.setenv("FIRM_AUDIT_KEY", KEY)
     dash = build_dashboard(audit_s3=log)
     try:
+        _, body = _get(DashboardApp(dash), "/audit/s3")
+        assert 'class="integrity-word">OK<' in body
+        assert body.count('class="row-status-cell"') == 3
+    finally:
+        dash.close()
+
+
+def test_s3_only_audit_tab_lands_on_s3_with_its_query():
+    dash = build_dashboard(audit_s3=_log(MemoryS3()))
+    try:
         response = DashboardApp(dash).handle(
-            UIRequest("GET", "/audit", query="start=2026-01-01&end=2026-01-01", prefix="/ops")
+            UIRequest("GET", "/audit", query="action=x", prefix="/ops")
         )
         assert response.status == 303
-        assert dict(response.headers)["Location"] == "/ops/audit/s3?start=2026-01-01&end=2026-01-01"
+        assert dict(response.headers)["Location"] == "/ops/audit/s3?action=x"
         status, body = _get(DashboardApp(dash), "/audit/s3")
-        assert status == 200
-        assert '<nav class="sub">' not in body  # one view: nothing to switch between
-        assert "No matching events in this scan." in body
+        assert status == 200 and '<nav class="sub">' not in body
+        assert "No audit events match." in body
     finally:
         dash.close()
 
 
 def test_archive_view_batch_list_and_bad_cursors(s3_dashboard_url):
-    base, _, key = s3_dashboard_url
+    base, key = s3_dashboard_url
     with urlopen(base + "/audit/archive?" + urlencode({"key": key})) as response:
         body = response.read().decode()
         assert "1 verified event<" in body
-        assert 'Source</span> <span class="source-word">Archive' in body
-        assert '<span class="sig receipt"' in body and "SHA-256 receipt" in body
+        assert 'Source</span> <span class="source-word"' in body and ">Archive<" in body
+        assert '<span class="sig unsigned"' in body
     with urlopen(base + "/audit/archive") as response:
-        # Without a key the view lists batches, each linking to its verified view.
         listing = response.read().decode()
         assert 'href="/audit/archive?' + urlencode({"key": key}) + '"' in listing
         assert "1 batch on this page" in listing and ">complete<" in listing
-        assert ">S3 receipts<" in listing
     with pytest.raises(HTTPError) as caught:
         urlopen(base + "/audit/archive?continuation=bogus")
-    assert caught.value.code == 400
-    with pytest.raises(HTTPError) as caught:
-        urlopen(base + "/audit/s3?start=2026-01-01&end=2026-01-01&continuation=invalid")
     assert caught.value.code == 400
 
 
@@ -122,34 +180,21 @@ def test_sql_and_s3_audit_side_by_side(tmp_path):
     with AuditLog(url) as audit:
         audit.record("order.shipped", subject=("Order", 7))
     client = MemoryS3()
-    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
-    log.record("invoice.paid", subject=("Invoice", 42), actor=("User", 3), created_at=DAY)
-    log.record("invoice.sent", subject=("Invoice", 43), created_at=DAY)
+    log = _log(client)
+    log.record("invoice.paid", subject=("Invoice", 42))
     archive = Archive(ObjectStore("archives", client=client))
     dash = build_dashboard(audit_url=url, audit_s3=log, audit_archive=archive)
     try:
         assert dash.parts == ["audit"]
-        assert dash.audit is not None and dash.audit_s3 is not None
         app = DashboardApp(dash)
-        status, sql = _get(app, "/audit")
-        assert status == 200 and "order.shipped" in sql
+        _, sql = _get(app, "/audit")
+        assert "order.shipped" in sql and "invoice.paid" not in sql
         assert re.search(r'class="active" href="/audit" aria-current="page">Database<', sql)
         assert 'href="/audit/s3">S3<' in sql and 'href="/audit/archive">Archive<' in sql
-        assert 'class="source"' not in sql  # the SQL view keeps its own integrity strip
-
-        status, s3 = _get(app, "/audit/s3", "start=2026-01-01&end=2026-01-01")
-        assert status == 200 and "invoice.paid" in s3 and "order.shipped" not in s3
-        assert 'aria-current="page">S3<' in s3
-        assert "firm-audit/" in s3 and "…0001" in s3  # prefix and stream in the source strip
-        assert "SHA-256 per object; signatures not checked" in s3  # no key in this reader
-        # Type:id filters mean the same as on the SQL page, and row links build them.
-        assert 'href="/audit/s3?start=2026-01-01&end=2026-01-01&subject=Invoice%3A42"' in s3
-        status, filtered = _get(
-            app, "/audit/s3", "start=2026-01-01&end=2026-01-01&subject=Invoice:42"
-        )
-        assert "invoice.paid" in filtered and "invoice.sent" not in filtered
-        status, by_actor = _get(app, "/audit/s3", "start=2026-01-01&end=2026-01-01&actor=User:3")
-        assert "invoice.paid" in by_actor and "invoice.sent" not in by_actor
+        assert 'class="source"' not in sql
+        _, s3 = _get(app, "/audit/s3")
+        assert "invoice.paid" in s3 and "order.shipped" not in s3
+        assert 'aria-current="page">S3<' in s3 and 'class="source"' in s3
     finally:
         dash.close()
 
@@ -171,52 +216,38 @@ def test_mounted_s3_routes_keep_prefix_theme_and_authentication():
     from firm.ui.auth import BasicAuth
 
     client = MemoryS3()
-    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
-    for _ in range(26):
-        receipt = log.record("mounted", created_at=DAY)
+    log = _log(client)
+    for _ in range(30):
+        log.record("mounted")
     archive = Archive(ObjectStore("archives", client=client))
-    archived = archive.export_s3(
-        log, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
-    )
+    archived = archive.export_s3(log, batch_id=str(uuid4()))
     dash = build_dashboard(audit_s3=log, audit_archive=archive)
     try:
         app = DashboardApp(dash)
-        headers = Headers([("Cookie", "firm_theme=dark")])
         response = app.handle(
             UIRequest(
-                "GET",
-                "/audit/s3",
-                prefix="/ops",
-                query="start=2026-01-01&end=2026-01-01",
-                headers=headers,
+                "GET", "/audit/s3", prefix="/ops", headers=Headers([("Cookie", "firm_theme=dark")])
             )
         )
         assert response.status == 200
         body = response.body.decode()
         assert '<html data-theme="dark">' in body
-        assert 'href="/ops/audit/object?' in body
-        assert 'action="/ops/audit/s3"' in body
+        assert 'href="/ops/audit/s3/30"' in body and 'action="/ops/audit/s3"' in body
         assert 'href="/ops/audit/archive">Archive<' in body
-        # The continuation link resumes the same scan: the inclusive "To" maps to the same
-        # exclusive end on every page, so the library accepts the token.
-        match = re.search(r'href="/ops(/audit/s3)\?([^"]*continuation=[^"]*)">Continue scan', body)
+        match = re.search(r'href="/ops(/audit/s3)\?([^"]*page=2[^"]*)"', body)
         assert match is not None
         status, page_two = _get(app, match.group(1), html.unescape(match.group(2)), "/ops")
-        assert status == 200 and "1 matching event ·" in page_two
-        detail = app.handle(
-            UIRequest("GET", "/audit/object", prefix="/ops", query=urlencode({"key": receipt.key}))
-        )
-        assert detail.status == 200
-        assert 'href="/ops/audit/s3"' in detail.body.decode()
+        assert status == 200 and "Showing 26-30 of 30" in page_two
+        detail = app.handle(UIRequest("GET", "/audit/s3/1", prefix="/ops"))
+        assert detail.status == 200 and 'href="/ops/audit/s3"' in detail.body.decode()
         response = app.handle(
             UIRequest(
                 "GET", "/audit/archive", prefix="/ops", query=urlencode({"key": archived.key})
             )
         )
         assert response.status == 200
-        assert 'action="/ops/audit/archive"' in response.body.decode()
         protected = DashboardApp(dash, authenticator=BasicAuth("ops", password="test-password"))
-        for path in ("/audit", "/audit/s3", "/audit/object", "/audit/archive"):
+        for path in ("/audit", "/audit/s3", "/audit/s3/1", "/audit/archive"):
             assert protected.handle(UIRequest("GET", path)).status == 401
     finally:
         dash.close()
@@ -224,11 +255,11 @@ def test_mounted_s3_routes_keep_prefix_theme_and_authentication():
 
 def test_archive_batch_list_pages_and_flags_pending_batches():
     client = MemoryS3()
-    log = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
-    log.record("paged", created_at=DAY)
+    log = _log(client)
+    log.record("paged")
     archive = Archive(ObjectStore("archives", client=client))
     for _ in range(26):
-        archive.export_s3(log, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4()))
+        archive.export_s3(log, batch_id=str(uuid4()))
     archive.store.put(f"{archive.prefix}{'f' * 8}-ffff-4fff-8fff-{'f' * 12}/input.json", b"{}")
     dash = build_dashboard(audit_archive=archive)
     try:
@@ -245,67 +276,27 @@ def test_archive_batch_list_pages_and_flags_pending_batches():
 
 
 def test_archive_shows_recorded_row_signatures(tmp_path):
-    secret = "dashboard-archive-row-secret-0123456789"  # noqa: S105
     client = MemoryS3()
     archive = Archive(ObjectStore("archives", client=client))
-    with AuditLog(f"sqlite:///{tmp_path / 'signed.db'}", mac_key=secret) as signed:
+    with AuditLog(f"sqlite:///{tmp_path / 'signed.db'}", mac_key=KEY) as signed:
         signed.record("signed.one")
-        signed_batch = archive.export_sql(signed, stream=str(UUID(int=2)), batch_id=str(uuid4()))
-    with AuditLog(f"sqlite:///{tmp_path / 'plain.db'}") as plain:
-        plain.record("plain.one")
-        plain_batch = archive.export_sql(plain, stream=str(UUID(int=3)), batch_id=str(uuid4()))
+        sql_batch = archive.export_sql(signed, stream=str(UUID(int=2)), batch_id=str(uuid4()))
+    s3_signed = _log(client, mac_key=KEY)
+    s3_signed.record("signed.s3")
+    s3_batch = archive.export_s3(s3_signed, batch_id=str(uuid4()))
+    plain = S3AuditLog("events", stream=str(UUID(int=3)), client=client)
+    plain.record("plain.one")
+    plain_batch = archive.export_s3(plain, batch_id=str(uuid4()))
     dash = build_dashboard(audit_archive=archive)
     try:
         app = DashboardApp(dash)
-        _, body = _get(app, "/audit/archive", urlencode({"key": signed_batch.key}))
-        assert '<span class="sig signed"' in body and "signed · key " in body
+        for batch in (sql_batch, s3_batch):
+            _, body = _get(app, "/audit/archive", urlencode({"key": batch.key}))
+            assert '<span class="sig signed"' in body and "signed · key " in body
         _, body = _get(app, "/audit/archive", urlencode({"key": plain_batch.key}))
         assert '<span class="sig unsigned"' in body
         _, listing = _get(app, "/audit/archive")
-        assert '<span class="sig-all">1 / 1</span>' in listing
+        assert listing.count('<span class="sig-all">1 / 1</span>') == 2
         assert '<span class="muted">0 / 1</span>' in listing
-    finally:
-        dash.close()
-
-
-def test_signed_s3_events_show_their_check_in_list_detail_and_archive(monkeypatch):
-    key = "dashboard-s3-signing-key-0123456789abcdef"
-    client = MemoryS3()
-    writer = S3AuditLog("events", stream=str(UUID(int=1)), client=client, mac_key=key)
-    receipt = writer.record("signed.event", created_at=DAY)
-    S3AuditLog("events", stream=str(UUID(int=1)), client=client).record("plain", created_at=DAY)
-    archive = Archive(ObjectStore("archives", client=client))
-    batch = archive.export_s3(
-        writer, start=date(2026, 1, 1), end=date(2026, 1, 2), batch_id=str(uuid4())
-    )
-    window = "start=2026-01-01&end=2026-01-01"
-
-    # A dashboard holding the key verifies on read.
-    monkeypatch.setenv("FIRM_AUDIT_KEY", key)
-    reader = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
-    dash = build_dashboard(audit_s3=reader, audit_archive=archive)
-    try:
-        app = DashboardApp(dash)
-        _, body = _get(app, "/audit/s3", window)
-        assert "HMAC-signed events, verified on read" in body
-        assert '<span class="sig signed"' in body and f"signed · key {writer.key_id}" in body
-        assert '<span class="sig unsigned"' in body  # the event written without a key
-        _, detail = _get(app, "/audit/object", urlencode({"key": receipt.key}))
-        assert ">signature<" in detail and f"signed · key {writer.key_id}" in detail
-        _, archived = _get(app, "/audit/archive", urlencode({"key": batch.key}))
-        assert archived.count('<span class="sig signed"') == 1  # the plain event stays a receipt
-        _, listing = _get(app, "/audit/archive")
-        assert '<span class="text-warn">1 / 2</span>' in listing
-    finally:
-        dash.close()
-
-    # Without the key the same signature is visibly "not checked", distinct from unsigned.
-    monkeypatch.delenv("FIRM_AUDIT_KEY")
-    keyless = S3AuditLog("events", stream=str(UUID(int=1)), client=client)
-    dash = build_dashboard(audit_s3=keyless)
-    try:
-        _, body = _get(DashboardApp(dash), "/audit/s3", window)
-        assert "SHA-256 per object; signatures not checked" in body
-        assert '<span class="sig unverified"' in body and "not checked" in body
     finally:
         dash.close()

@@ -26,20 +26,34 @@ def test_cli_s3_prepare_write_and_get(object_client, tmp_path, monkeypatch):
     result = runner.invoke(main, [*base, "write", str(path)])
     assert result.exit_code == 0, result.output
     receipt = json.loads(result.output)
-    result = runner.invoke(
-        main,
-        [
-            *base,
-            "get",
-            receipt["key"],
-            "--sha256",
-            receipt["sha256"],
-            "--version-id",
-            receipt["version_id"],
-        ],
-    )
+    assert runner.invoke(main, [*base, "write", str(path)]).output == result.output  # idempotent
+    for locator in (["1"], [receipt["key"], "--sha256", receipt["sha256"]]):
+        result = runner.invoke(main, [*base, "get", *locator])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["data"] == {"x": 1}
+
+
+def test_cli_s3_has_the_sql_commands(object_client, monkeypatch):
+    boto3 = pytest.importorskip("boto3")
+    object_client.close = lambda: None
+    monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: object_client)
+    monkeypatch.setenv("FIRM_AUDIT_KEY", "cli-s3-row-and-seal-secret-0123456789abc")
+    from firm.audit.s3 import S3AuditLog
+
+    with S3AuditLog("events", stream=str(UUID(int=1)), client=object_client) as log:
+        log.record("invoice.paid", subject=("Invoice", 42))
+        log.record("user.login")
+    runner = CliRunner()
+    base = ["s3", "--bucket", "events", "--stream", str(UUID(int=1))]
+    assert runner.invoke(main, [*base, "stats"]).output == "events: 2\n"
+    result = runner.invoke(main, [*base, "history", "--subject-type", "Invoice"])
+    assert result.exit_code == 0 and "invoice.paid" in result.output
+    assert "user.login" not in result.output
+    assert runner.invoke(main, [*base, "seal"]).output.startswith("sealed ")
+    result = runner.invoke(main, [*base, "verify", "--full"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["data"] == {"x": 1}
+    assert result.output.startswith(("OK:", "WARNING:"))
+    assert runner.invoke(main, [*base, "prune"]).output == "pruned 0 events\n"
 
 
 def test_cli_copy_export_read_restore(object_client, audit, tmp_path, monkeypatch):

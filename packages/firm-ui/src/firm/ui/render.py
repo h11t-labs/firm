@@ -463,7 +463,7 @@ def _render(template_name: str, **context: Any) -> str:
     # The two URL builders templates call directly are bound to this render's mount point here;
     # as context values they shadow nothing else, and no template can build an unprefixed URL.
     ctx["jobs_href"] = _markup_fn(lambda *a, **kw: _jobs_href(urls, *a, **kw))
-    ctx["audit_href"] = _markup_fn(lambda *a, **kw: _audit_href(urls, *a, **kw))
+    ctx.setdefault("audit_href", _markup_fn(lambda *a, **kw: _audit_href(urls, *a, **kw)))
     ctx["header_tabs"] = _header_tabs(urls, ctx["parts"], ctx["active_part"])
     refresh = ctx["refresh"]
     ctx["refresh_label"] = _refresh_label(refresh) if refresh is not None else ""
@@ -786,6 +786,7 @@ def _audit_href(
     dir: str = AUDIT_DEFAULT_DIR,
     page: int = 1,
     per_page: int = AUDIT_DEFAULT_PER_PAGE,
+    base: str = "/audit",
 ) -> str:
     """Build an ``/audit`` URL carrying only the params that differ from their defaults, so a
     plain unsorted/unpaginated view still round-trips to the same short ``/audit?...`` links the
@@ -800,7 +801,7 @@ def _audit_href(
     if per_page != AUDIT_DEFAULT_PER_PAGE:
         params["per_page"] = str(per_page)
     query = f"?{urlencode(params, quote_via=quote)}" if params else ""
-    return urls.path(f"/audit{query}")
+    return urls.path(f"{base}{query}")
 
 
 def _ref_display(type_: str | None, id_: str | None, label: str | None) -> str | None:
@@ -819,7 +820,7 @@ def _ref_filter(type_: str, id_: str | None) -> str:
 
 
 def _sort_columns(
-    urls: Urls, filters: dict[str, str], sort: str, dir_: str, per_page: int
+    urls: Urls, filters: dict[str, str], sort: str, dir_: str, per_page: int, base: str = "/audit"
 ) -> list[dict[str, Any]]:
     """One entry per column header: its toggled sort URL, whether it is the active sort, and the
     arrow (``↑``/``↓``) to show when active. Clicking the active column flips its direction."""
@@ -831,7 +832,7 @@ def _sort_columns(
             {
                 "label": label,
                 "url": Markup(
-                    _audit_href(urls, filters, sort=key, dir=next_dir, per_page=per_page)
+                    _audit_href(urls, filters, sort=key, dir=next_dir, per_page=per_page, base=base)
                 ),
                 "active": active,
                 "arrow": ("↑" if dir_ == "asc" else "↓") if active else "",
@@ -904,7 +905,7 @@ def _cause_text(
     return cause
 
 
-def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
+def _affected_cells(urls: Urls, raw: str | None, base: str = "/audit") -> list[dict[str, Any]]:
     """Parse the verifier's ``affected_identifiers`` — a JSON list of
     ``{"kind", "label", "id"?, "message"?, "verdict"?}`` — into render-ready rows. Each row carries a
     ``chip`` (a link into ``/audit/<id>`` when the finding names a specific row id, else the plain
@@ -932,7 +933,7 @@ def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
             message = str(item["message"]) if item.get("message") else ""
             id_ = item.get("id")
             chip: Any = (
-                Markup(f'<a href="{escape(urls.path(f"/audit/{id_}"))}">{escape(label)}</a>')
+                Markup(f'<a href="{escape(urls.path(f"{base}/{id_}"))}">{escape(label)}</a>')
                 if isinstance(id_, int)
                 else label
             )
@@ -942,7 +943,9 @@ def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
     return cells
 
 
-def _integrity_view(urls: Urls, state: IntegrityState | None) -> dict[str, Any] | None:
+def _integrity_view(
+    urls: Urls, state: IntegrityState | None, base: str = "/audit"
+) -> dict[str, Any] | None:
     """Build the <Integrity/> component's ready-made data from a derived state, or ``None`` when
     there is no audit part to report on. The component stays dumb: every string, link, and colour
     token it renders is decided here."""
@@ -1004,7 +1007,7 @@ def _integrity_view(urls: Urls, state: IntegrityState | None) -> dict[str, Any] 
         # the generic ``meaning`` above to stand alone.
         view["findings"] = [
             {"ref": c["chip"], "why": c["message"]}
-            for c in _affected_cells(urls, s["affected_identifiers"])
+            for c in _affected_cells(urls, s["affected_identifiers"], base)
         ]
         # What to do: verify it yourself, and don't disturb the evidence.
         view["next_step"] = Markup(
@@ -1104,9 +1107,14 @@ def audit_page(
     refresh: int = 10,
     request_path: str = "/audit",
     views: list[dict[str, Any]] | None = None,
+    base: str = "/audit",
+    source: dict[str, Any] | None = None,
     theme: str = "system",
     urls: Urls = ROOT_URLS,
 ) -> str:
+    """The audit events page, for SQL tables (``base="/audit"``) or an S3 log
+    (``base="/audit/s3"``, with its ``source`` strip): the same cards, filters, sorting and
+    integrity column either way."""
     cards = [
         _card("events", _num(stats["events"])),
         _card("actions", _num(stats["actions"])),
@@ -1125,6 +1133,9 @@ def audit_page(
             r["status_icon"] = _row_status_icon(status) if status else Markup("")
     return _render(
         "audit.html",
+        audit_base=urls.path(base),
+        audit_href=_markup_fn(lambda *a, **kw: _audit_href(urls, *a, base=base, **kw)),
+        source=source,
         subnav_items=views,
         title="Audit",
         parts=parts,
@@ -1133,7 +1144,7 @@ def audit_page(
         request_path=request_path,
         theme=theme,
         urls=urls,
-        integrity_view=_integrity_view(urls, integrity),
+        integrity_view=_integrity_view(urls, integrity, base),
         integrity_active=integrity_active,
         cards=cards,
         rows=rows,
@@ -1141,15 +1152,18 @@ def audit_page(
         sort=sort,
         dir=dir,
         per_page=per_page,
-        columns=_sort_columns(urls, filters, sort, dir, per_page),
+        columns=_sort_columns(urls, filters, sort, dir, per_page, base),
         pagination=_pagination(
             page,
             per_page,
             total,
-            lambda n: _audit_href(urls, filters, sort=sort, dir=dir, page=n, per_page=per_page),
+            lambda n: _audit_href(
+                urls, filters, sort=sort, dir=dir, page=n, per_page=per_page, base=base
+            ),
         ),
         pagesize=_pagesize_options(
-            per_page, lambda n: _audit_href(urls, filters, sort=sort, dir=dir, per_page=n)
+            per_page,
+            lambda n: _audit_href(urls, filters, sort=sort, dir=dir, per_page=n, base=base),
         ),
     )
 
@@ -1174,9 +1188,6 @@ def audit_detail_page(
         ("correlation id", event["correlation_id"] if event["correlation_id"] else _dash()),
         ("recorded", _when(event["created_at"])),
     ]
-    # S3 events carry their read-time signature check; SQL rows use the integrity cell below.
-    if (sig := _event_signature(event.get("signature"))) is not None:
-        cells.append(("signature", _signature_markup(sig)))
     # The integrity cell only appears when tamper-evidence is in use (same gate as the table).
     if row_ctx is not None and row_ctx["active"]:
         status = row_status(event, row_ctx)
@@ -1254,68 +1265,16 @@ def _event_row(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def s3_audit_page(
-    parts: list[str],
-    page: Any,
-    log: Any,
-    start: Any,
-    end: Any,
-    filters: dict[str, str],
-    *,
-    views: list[dict[str, Any]] | None = None,
-    theme: str = "system",
-    urls: Urls = ROOT_URLS,
-) -> str:
-    """S3 history: one bounded scan over a date range (``end`` inclusive), styled like the SQL
-    events list but without totals or sorting, which an object listing cannot provide."""
-    dates = {"start": start.isoformat(), "end": end.isoformat()}
-
-    def href(extra: dict[str, str]) -> str:
-        params = {**dates, **{k: v for k, v in extra.items() if v}}
-        return urls.path("/audit/s3") + "?" + urlencode(params, quote_via=quote)
-
-    rows = [
-        {
-            **_event_row(item),
-            "href": urls.path("/audit/object") + "?" + urlencode({"key": item["key"]}),
-            "sig": _event_signature(item.get("signature")),
-        }
-        for item in page.items
-    ]
-    stream = log.stream
-    source = _source_view(
+def s3_source(log: Any) -> dict[str, Any]:
+    """The source strip over an S3 audit log's page: same log, objects as storage."""
+    return _source_view(
         "cloud",
         "S3",
-        ("HMAC-signed events, verified on read" if log.key_id else "signatures verified on read")
-        if log.verifies_signatures
-        else "SHA-256 per object; signatures not checked",
+        "stored as objects; counts and sorts read index objects",
         log.store,
-        ("stream", f"…{stream[-4:]}"),
-        *((("key", log.key_id),) if log.key_id else ()),
-        hint="Bounded scans in object-key order: no totals or sorting"
-        if log.verifies_signatures
-        else "No FIRM_AUDIT_KEY here: signed events show as not checked, and a forged unsigned "
-        "event cannot be told apart",
-    )
-    return _render(
-        "audit_s3.html",
-        title="Audit · S3",
-        parts=parts,
-        active_part="audit",
-        subnav_items=views,
-        theme=theme,
-        urls=urls,
-        source=source,
-        rows=rows,
-        page=page,
-        start=start,
-        end=end,
-        filters=filters,
-        filter_href=_markup_fn(href),
-        next_url=Markup(href({**filters, "continuation": page.continuation}))
-        if page.continuation
-        else None,
-        reset_url=urls.path("/audit/s3"),
+        ("stream", f"…{log.stream[-4:]}"),
+        hint="Ids come from one compare-and-swap counter; sealing, retention and verification "
+        "run under one maintenance lease",
     )
 
 
@@ -1386,60 +1345,9 @@ def archive_page(
     )
 
 
-def _event_signature(signature: dict[str, Any] | None) -> dict[str, Any] | None:
-    """How a live S3 event's signature checked out on read (see S3AuditLog._check_signature):
-    verified, signed by a key this dashboard does not hold, or unsigned."""
-    if signature is None:
-        return None
-    key_id = signature.get("key_id")
-    if signature["status"] == "valid":
-        return {
-            "kind": "signed",
-            "icon": Markup(_ICONS["shield-check"]),
-            "label": f"signed · key {key_id}",
-            "title": "HMAC verified with a configured key",
-        }
-    if signature["status"] == "unverified":
-        return {
-            "kind": "unverified",
-            "icon": Markup(_ICONS["shield-alert"]),
-            "label": f"key {key_id} · not checked",
-            "title": "Signed by a key this dashboard does not hold; set FIRM_AUDIT_KEY or "
-            "FIRM_AUDIT_RETIRED_KEYS to check it",
-        }
-    return {"kind": "unsigned", "icon": None, "label": "unsigned", "title": "No signature"}
-
-
-def _signature_markup(sig: dict[str, Any]) -> Markup:
-    """One signature as a ready-made ``.sig`` fragment for a detail-page cell."""
-    return Markup('<span class="sig {}" title="{}">{}{}</span>').format(
-        sig["kind"], sig["title"], sig["icon"] or "", sig["label"]
-    )
-
-
 def _signature(entry: dict[str, Any]) -> dict[str, Any]:
-    """How an archived event is protected: a SQL row signature as recorded (shown, not
-    re-checked here), no signature, or the S3 object's SHA-256 receipt."""
-    if entry["source"] == "s3":
-        receipt = entry.get("receipt") or {}
-        version = receipt.get("version_id")
-        sig = (entry.get("envelope") or {}).get("sig") or {}
-        if sig.get("mac"):
-            return {
-                "kind": "signed",
-                "icon": Markup(_ICONS["shield-check"]),
-                "label": f"signed · key {sig.get('key_id')}",
-                "title": "Event HMAC recorded when it was written; the S3 log verifies it on "
-                "read with the same key",
-            }
-        return {
-            "kind": "receipt",
-            "icon": Markup(_ICONS["shield"]),
-            "label": "SHA-256 receipt",
-            "title": f"sha256 {str(receipt.get('sha256', ''))[:16]}…"
-            + (f" · version {version}" if version else "")
-            + " · detects corruption; not a signature",
-        }
+    """An archived row's signature as recorded (shown, not re-checked here): the row MAC and
+    its key id, or none. SQL and S3 rows carry it the same way."""
     integrity = entry.get("integrity") or {}
     if integrity.get("row_mac"):
         key_id = integrity.get("key_id")
@@ -1447,8 +1355,8 @@ def _signature(entry: dict[str, Any]) -> dict[str, Any]:
             "kind": "signed",
             "icon": Markup(_ICONS["shield-check"]),
             "label": f"signed · key {key_id}" if key_id else "signed",
-            "title": "Row MAC recorded when the row was written; restore into SQL with the "
-            "original key to re-check it",
+            "title": "Row MAC recorded when the row was written; restore it with the original "
+            "key to re-check it",
         }
     return {
         "kind": "unsigned",
@@ -1459,10 +1367,8 @@ def _signature(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _batch_signing(batch: dict[str, Any]) -> dict[str, str] | None:
-    """The batch list's Signed cell: S3 receipts, or signed rows out of the batch's events."""
-    sources, signed, count = batch.get("sources"), batch.get("signed"), batch.get("count")
-    if sources == ["s3"] and not signed:
-        return {"cls": "secondary", "text": "S3 receipts"}
+    """The batch list's Signed cell: signed rows out of the batch's events."""
+    signed, count = batch.get("signed"), batch.get("count")
     if signed is None or count is None:
         return None  # pending, unreadable, or a manifest written before signing summaries
     cls = "sig-all" if signed == count else ("text-warn" if signed else "muted")

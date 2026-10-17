@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import func, select
 
 from .._core.cli import db_option, require_click, require_url
@@ -84,6 +86,10 @@ def history(
             )
     finally:
         dispose_engine(engine)
+    print_history(rows)
+
+
+def print_history(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         subject_s = _ref_str(row["subject_type"], row["subject_id"], row["subject_label"])
         actor_s = _ref_str(row["actor_type"], row["actor_id"], row["actor_label"])
@@ -99,39 +105,44 @@ def prune(database_url: str | None, max_age: float | None) -> None:
     engine = create_engine_for(_url(database_url))
     try:
         with AuditLog(engine=engine, create_schema=False) as audit:
-            if max_age is not None:
-                audit.max_age = max_age
-            pruned = audit.retention.run_once()
-            click.echo(f"pruned {pruned} events")
-            # With sealing active, expired rows past the last seal cannot be pruned (D15).
-            if audit.retention.last_skipped_unsealed:
-                click.echo(
-                    f"skipped {audit.retention.last_skipped_unsealed} expired but UNSEALED events "
-                    "— the sealer must catch up before they can be pruned"
-                )
-            # A sealed range that no longer verifies is refused, not pruned — retention will not
-            # delete tampered evidence (see `firm-audit verify --full`).
-            if audit.retention.last_refused_tampered:
-                click.echo(
-                    f"REFUSED to prune {audit.retention.last_refused_tampered} sealed range(s) "
-                    "that no longer verify — run `firm-audit verify --full` and preserve the DB",
-                    err=True,
-                )
-            # A two-key deployment: retention without the seal key cannot sign a floor.
-            if audit.retention.last_refused_no_seal_key:
-                click.echo(
-                    "REFUSED to prune: this host has no seal key (FIRM_AUDIT_SEAL_KEY) for the "
-                    "signed floor — run pruning on a sealer-role host in a two-key deployment",
-                    err=True,
-                )
-            if audit.retention.last_refused_no_activation:
-                click.echo(
-                    "REFUSED to prune: a seal key is configured but no signed activation marker "
-                    "exists — activate sealing before retention",
-                    err=True,
-                )
+            run_prune(audit, max_age)
     finally:
         dispose_engine(engine)
+
+
+def run_prune(audit: Any, max_age: float | None) -> None:
+    """Run one retention pass on any audit log (SQL or S3) and report it."""
+    if max_age is not None:
+        audit.max_age = max_age
+    pruned = audit.retention.run_once()
+    click.echo(f"pruned {pruned} events")
+    # With sealing active, expired rows past the last seal cannot be pruned (D15).
+    if audit.retention.last_skipped_unsealed:
+        click.echo(
+            f"skipped {audit.retention.last_skipped_unsealed} expired but UNSEALED events "
+            "— the sealer must catch up before they can be pruned"
+        )
+    # A sealed range that no longer verifies is refused, not pruned — retention will not
+    # delete tampered evidence (see `firm-audit verify --full`).
+    if audit.retention.last_refused_tampered:
+        click.echo(
+            f"REFUSED to prune {audit.retention.last_refused_tampered} sealed range(s) "
+            "that no longer verify — run `firm-audit verify --full` and preserve the DB",
+            err=True,
+        )
+    # A two-key deployment: retention without the seal key cannot sign a floor.
+    if audit.retention.last_refused_no_seal_key:
+        click.echo(
+            "REFUSED to prune: this host has no seal key (FIRM_AUDIT_SEAL_KEY) for the "
+            "signed floor — run pruning on a sealer-role host in a two-key deployment",
+            err=True,
+        )
+    if audit.retention.last_refused_no_activation:
+        click.echo(
+            "REFUSED to prune: a seal key is configured but no signed activation marker "
+            "exists — activate sealing before retention",
+            err=True,
+        )
 
 
 # Importing these command definitions never imports boto3 or contacts a bucket.
@@ -145,7 +156,7 @@ def seal(database_url: str | None) -> None:
     engine = create_engine_for(_url(database_url))
     try:
         with AuditLog(engine=engine, create_schema=False) as audit:
-            click.echo(f"sealed {audit.sealer.run_once()} events")
+            run_seal(audit)
     finally:
         dispose_engine(engine)
 
@@ -165,18 +176,9 @@ def anchor_compact(database_url: str | None, anchor_path: str | None) -> None:
     engine = create_engine_for(_url(database_url))
     try:
         with AuditLog(engine=engine, create_schema=False) as audit:
-            path = anchor_path if anchor_path is not None else audit._anchor_path
-            if path is None:
-                raise click.ClickException(
-                    "--anchor or FIRM_AUDIT_ANCHOR_PATH is required for anchor compaction"
-                )
-            try:
-                coverage, floor = audit.sealer.compact_anchor(path)
-            except RuntimeError as exc:
-                raise click.ClickException(str(exc)) from exc
+            run_anchor_compact(audit, anchor_path)
     finally:
         dispose_engine(engine)
-    click.echo(f"compacted anchor: coverage={coverage}, floor={floor}")
 
 
 @main.command(help="Verify row MACs, independent seals, markers, and anchor.")
@@ -190,7 +192,27 @@ def verify(database_url: str | None, anchor_path: str | None, full: bool) -> Non
             report = audit.verify(anchor_path=anchor_path, full=full)
     finally:
         dispose_engine(engine)
+    print_verify(report)
 
+
+def run_seal(audit: Any) -> None:
+    click.echo(f"sealed {audit.sealer.run_once()} events")
+
+
+def run_anchor_compact(audit: Any, anchor_path: str | None) -> None:
+    path = anchor_path if anchor_path is not None else audit._anchor_path
+    if path is None:
+        raise click.ClickException(
+            "--anchor or FIRM_AUDIT_ANCHOR_PATH is required for anchor compaction"
+        )
+    try:
+        coverage, floor = audit.sealer.compact_anchor(path)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"compacted anchor: coverage={coverage}, floor={floor}")
+
+
+def print_verify(report: Any) -> None:
     click.echo(
         f"{report.outcome.upper()}: {report.ok_count} ok, {report.warning_count} warning, "
         f"{report.unprotected_count} unprotected, {report.tampered_count} tampered "

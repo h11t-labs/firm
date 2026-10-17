@@ -6,7 +6,7 @@ import gzip
 import io
 import json
 from dataclasses import asdict
-from datetime import date
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -41,6 +41,43 @@ def sql_entry(stream: str, row: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def row_entry(source: str, stream: str, row: dict[str, Any]) -> dict[str, Any]:
+    """An archive entry for a stored row in SQL-column shape (an S3 event object): the stored
+    JSON strings verbatim (row MACs cover their exact bytes) plus any signature columns."""
+    from .s3_store import row_dict
+
+    event = row_dict(row)
+    if row.get("provenance") is not None:
+        event["provenance"] = row["provenance"]
+    entry = sql_entry(stream, event)
+    entry["source"] = source
+    for field in ("data", "changes", "context"):
+        entry["event"][field] = row.get(field)
+    entry["identity"] = f"{row['id']}:{digest(canonical(entry['event']))}"
+    signed = {name: row.get(name) for name in ("entry_id", "row_mac", "key_id")}
+    if any(value is not None for value in signed.values()):
+        entry["integrity"] = signed
+    return entry
+
+
+def _native_row(entry: dict[str, Any]) -> dict[str, Any]:
+    """An archived S3 row back in storage shape, with its original id and signature."""
+    from .integrity import canonical_created_at
+    from .s3_store import ROW_FIELDS
+
+    event = entry["event"]
+    created = datetime.fromisoformat(event["created_at"])
+    row = {name: event.get(name) for name in ROW_FIELDS}
+    row.update(
+        id=entry["original_id"],
+        created_at=canonical_created_at(created),
+        **(entry.get("integrity") or {}),
+    )
+    if event.get("provenance") is not None:
+        row["provenance"] = event["provenance"]
+    return row
+
+
 def provenance(entry: dict[str, Any]) -> dict[str, Any]:
     """Retain the original source identity through repeated backend conversions."""
     return entry.get("provenance") or {
@@ -57,12 +94,8 @@ def entry_key(entry: dict[str, Any]) -> tuple[str, str, str]:
 
 
 def signed_count(entries: list[dict[str, Any]]) -> int:
-    """Entries carrying a signature: a SQL row MAC or an S3 event envelope's ``sig``."""
-    return sum(
-        1
-        for entry in entries
-        if (entry.get("integrity") or {}).get("row_mac") or (entry.get("envelope") or {}).get("sig")
-    )
+    """Entries carrying a row signature (the MAC recorded when the row was written)."""
+    return sum(1 for entry in entries if (entry.get("integrity") or {}).get("row_mac"))
 
 
 def _signing_summary(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -111,29 +144,17 @@ class Archive:
             if entry.get("integrity") is not None:
                 integrity = entry["integrity"]
                 if (
-                    entry["source"] != "sql"
-                    or not isinstance(integrity, dict)
+                    not isinstance(integrity, dict)
                     or set(integrity) != {"entry_id", "row_mac", "key_id"}
                     or not all(
                         value is None or isinstance(value, str) for value in integrity.values()
                     )
                 ):
-                    raise ValueError("invalid SQL integrity metadata")
-            if entry["source"] == "sql":
-                expected = f"{entry['original_id']}:{digest(canonical(entry['event']))}"
-                if entry["identity"] != expected or not isinstance(entry["original_id"], int):
-                    raise ValueError("invalid SQL archive identity")
-            else:
-                receipt = Receipt(**entry["receipt"])
-                if entry["identity"] != receipt.key:
-                    raise ValueError("invalid S3 archive identity")
-                envelope = entry.get("envelope")
-                if envelope is not None and (
-                    envelope.get("v") != 1
-                    or envelope.get("stream") != entry["stream"]
-                    or digest(canonical({**envelope, "event": entry["event"]})) != receipt.sha256
-                ):
-                    raise ObjectConflict("S3 source envelope does not match its receipt")
+                    raise ValueError("invalid row integrity metadata")
+            # SQL and S3 rows share one entry shape: the id plus a fingerprint of the exact row.
+            expected = f"{entry.get('original_id')}:{digest(canonical(entry['event']))}"
+            if entry["identity"] != expected or not isinstance(entry["original_id"], int):
+                raise ValueError("invalid archive identity")
 
     def resume(self, batch_id: str) -> Receipt:
         base = self._base(batch_id)
@@ -350,82 +371,75 @@ class Archive:
         self,
         source: S3AuditLog,
         *,
-        start: date,
-        end: date,
         batch_id: str,
+        limit: int = 100,
+        since: Any = None,
+        until: Any = None,
         continuation: str | None = None,
-        max_objects: int = 100,
     ) -> Receipt:
-        """Copy one bounded selection. scope.continuation resumes the source traversal.
-
-        Reuse the batch ID after interruption. Concurrent LIST is explicitly not a snapshot.
-        """
-        base = self._base(batch_id)
+        """Copy a bounded selection of an S3 audit log by id, exactly like :meth:`export_sql`
+        (same entry shape, same continuation and resume rules)."""
+        if not 1 <= limit <= MAX_ARCHIVE_RECORDS:
+            raise ValueError("invalid S3 export limit")
         query = {
             "source": source.store.identity,
             "stream": source.stream,
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "continuation": continuation,
+            "since": since.isoformat() if since else None,
+            "until": until.isoformat() if until else None,
         }
+        after = token_decode(continuation, query) if continuation else 0
+        if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+            raise ValueError("invalid S3 export continuation")
+        request = {**query, "limit": limit, "continuation": continuation}
         try:
-            frozen, _ = self.store.read(base + "input.json")
+            frozen, _ = self.store.read(self._base(batch_id) + "input.json")
         except FileNotFoundError:
             frozen = None
         if frozen is not None:
-            if json.loads(frozen)["scope"]["query"] != query:
+            if json.loads(frozen)["scope"]["query"] != request:
                 raise ObjectConflict("batch belongs to another export query")
             return self.resume(batch_id)
-        page, stored = source._scan(
-            start=start,
-            end=end,
-            limit=1000,
-            max_objects=max_objects,
-            continuation=continuation,
-            max_requests=min(20000, max_objects + 1000),
-        )
-        entries = []
-        for row in page.items:
-            # The scan already read and decoded each object; its decoder proved the stored body
-            # is canonical and matches its key, so these bytes are the envelope to copy.
-            raw, version = stored[row["key"]]
-            envelope = json.loads(raw)
-            entries.append(
-                {
-                    "source": "s3",
-                    "stream": source.stream,
-                    "identity": row["key"],
-                    "event": envelope.pop("event"),
-                    "envelope": envelope,
-                    "receipt": asdict(Receipt(row["key"], digest(raw), version)),
-                }
-            )
+        selected = source.storage.rows_after(after, limit + 1, since=since, until=until)
+        entries = [row_entry("s3", source.stream, row) for row in selected[:limit]]
+        exhausted = len(selected) <= limit
+        next_token = None if exhausted else token_encode(query, entries[-1]["original_id"])
+        if not entries:
+            raise ValueError("export selection is empty")
         return self.publish(
             entries,
             batch_id=batch_id,
             scope={
-                "kind": "observed-selection",
-                "query": query,
-                "continuation": page.continuation,
-                "traversal_exhausted": page.exhausted,
+                "kind": "bounded-s3-selection",
+                "query": request,
+                "continuation": next_token,
+                "traversal_exhausted": exhausted,
             },
         )
 
-    def restore_s3(self, locator: Receipt | str, target: S3AuditLog) -> list[Receipt]:
-        """Restore S3 identities or map SQL identities with retained provenance."""
-        from uuid import UUID, uuid5
+    def restore_s3(self, locators: Receipt | str | list[Receipt | str], target: S3AuditLog) -> int:
+        """Restore archives into an empty S3 audit log, like :func:`~.sql_archive.restore_sql`.
 
+        Archives of the target's own stream keep their original ids and row signatures (so they
+        still verify under the original key); anything else gets fresh ids, is signed by the
+        target, and keeps its original identity as provenance.
+        """
+        receipts = locators if isinstance(locators, list) else [locators]
+        entries = self.read_many(receipts)
+        native = all(e["source"] == "s3" and e["stream"] == target.stream for e in entries)
+        ids = [e["original_id"] for e in entries] if native else []
+        if len(ids) != len(set(ids)):
+            raise ValueError("source reused ids; restore these batches into separate targets")
+        if not target.storage.is_empty():
+            raise ValueError("restore requires an empty target stream")
+        if native:
+            target.storage.restore_rows([_native_row(entry) for entry in entries])
+            return len(entries)
         from .events import Ref
-        from .s3 import PreparedEvent
 
-        entries = self.read(locator)
-        if any(e["source"] == "s3" and e["stream"] != target.stream for e in entries):
-            raise ValueError("S3-source restore requires its original target stream")
-        restored = []
         for entry in entries:
             row = read_event(entry["event"])
-            if entry["source"] == "sql":
-                prepared = target.prepare(
+            target.write(
+                target.prepare(
                     row["action"],
                     subject=Ref(row["subject_type"], row["subject_id"], row["subject_label"]),
                     actor=Ref(row["actor_type"], row["actor_id"], row["actor_label"]),
@@ -434,20 +448,10 @@ class Archive:
                     context=row["context"],
                     correlation_id=row["correlation_id"],
                     created_at=row["created_at"],
-                    event_id=str(uuid5(UUID(entry["stream"]), entry["identity"])),
                     provenance=provenance(entry),
                 )
-            else:
-                ident = entry["identity"].rsplit("/", 1)[-1].removesuffix(".json")
-                partition = row["created_at"].date().isoformat()
-                key = f"{target.event_prefix}{partition}/{uuid_text(ident)}.json"
-                header = entry.get("envelope") or {"v": 1, "stream": target.stream, "id": ident}
-                body = canonical({**header, "event": entry["event"]})
-                if digest(body) != entry["receipt"]["sha256"]:
-                    raise ObjectConflict("restored event differs from source digest")
-                prepared = PreparedEvent(key, body.decode())
-            restored.append(target.write(prepared))
-        return restored
+            )
+        return len(entries)
 
     def close(self) -> None:
         self.store.close()
