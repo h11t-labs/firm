@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from .event_format import canonical, read_event, token_decode, token_encode, uuid_text, wire_event
+from .log import AuditLog
 from .object_store import (
     MAX_OBJECT_BYTES,
     ObjectConflict,
@@ -19,7 +20,7 @@ from .object_store import (
     Receipt,
     digest,
 )
-from .s3 import S3AuditLog
+from .s3_store import S3Storage
 
 MAX_ARCHIVE_RECORDS = 1000
 
@@ -369,7 +370,7 @@ class Archive:
 
     def export_s3(
         self,
-        source: S3AuditLog,
+        source: AuditLog,
         *,
         batch_id: str,
         limit: int = 100,
@@ -381,9 +382,12 @@ class Archive:
         (same entry shape, same continuation and resume rules)."""
         if not 1 <= limit <= MAX_ARCHIVE_RECORDS:
             raise ValueError("invalid S3 export limit")
+        storage = source.storage
+        if not isinstance(storage, S3Storage):
+            raise ValueError("export_s3 requires S3Storage")
         query = {
-            "source": source.store.identity,
-            "stream": source.stream,
+            "source": storage.store.identity,
+            "stream": storage.stream,
             "since": since.isoformat() if since else None,
             "until": until.isoformat() if until else None,
         }
@@ -399,8 +403,8 @@ class Archive:
             if json.loads(frozen)["scope"]["query"] != request:
                 raise ObjectConflict("batch belongs to another export query")
             return self.resume(batch_id)
-        selected = source.storage.rows_after(after, limit + 1, since=since, until=until)
-        entries = [row_entry("s3", source.stream, row) for row in selected[:limit]]
+        selected = storage.rows_after(after, limit + 1, since=since, until=until)
+        entries = [row_entry("s3", storage.stream, row) for row in selected[:limit]]
         exhausted = len(selected) <= limit
         next_token = None if exhausted else token_encode(query, entries[-1]["original_id"])
         if not entries:
@@ -416,7 +420,7 @@ class Archive:
             },
         )
 
-    def restore_s3(self, locators: Receipt | str | list[Receipt | str], target: S3AuditLog) -> int:
+    def restore_s3(self, locators: Receipt | str | list[Receipt | str], target: AuditLog) -> int:
         """Restore archives into an empty S3 audit log, like :func:`~.sql_archive.restore_sql`.
 
         Archives of the target's own stream keep their original ids and row signatures (so they
@@ -425,14 +429,17 @@ class Archive:
         """
         receipts = locators if isinstance(locators, list) else [locators]
         entries = self.read_many(receipts)
-        native = all(e["source"] == "s3" and e["stream"] == target.stream for e in entries)
+        storage = target.storage
+        if not isinstance(storage, S3Storage):
+            raise ValueError("restore_s3 requires S3Storage")
+        native = all(e["source"] == "s3" and e["stream"] == storage.stream for e in entries)
         ids = [e["original_id"] for e in entries] if native else []
         if len(ids) != len(set(ids)):
             raise ValueError("source reused ids; restore these batches into separate targets")
-        if not target.storage.is_empty():
+        if not storage.is_empty():
             raise ValueError("restore requires an empty target stream")
         if native:
-            target.storage.restore_rows([_native_row(entry) for entry in entries])
+            storage.restore_rows([_native_row(entry) for entry in entries])
             return len(entries)
         from .events import Ref
 

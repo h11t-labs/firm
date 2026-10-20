@@ -1,4 +1,4 @@
-"""The transactional outbox behind ``S3AuditLog.record(conn=...)``.
+"""Transactional outbox delivery for AuditLog with S3 storage.
 
 S3 cannot take part in a SQL transaction, so an event recorded with ``conn`` is staged as a row
 in ``firm_audit_s3_outbox`` inside the caller's transaction: it commits or rolls back with the
@@ -20,7 +20,7 @@ from .._core.poller import InterruptiblePoller
 from . import schema
 
 if TYPE_CHECKING:
-    from .s3 import S3AuditLog
+    from .log import AuditLog
 
 _outbox = schema.s3_outbox
 
@@ -50,18 +50,21 @@ def pending(engine: Engine, stream: str) -> int:
         ).scalar_one()
 
 
-def flush(engine: Engine, log: S3AuditLog, *, limit: int = 1000) -> int:
+def flush(engine: Engine, log: AuditLog, *, limit: int = 1000) -> int:
     """Publish up to ``limit`` staged events of ``log``'s stream, oldest first.
 
     Each event is written to S3 and only then removed from the outbox, one short transaction per
     batch read and per delete; concurrent relays are safe because the write is idempotent.
     """
-    from .s3 import PreparedEvent
+    from .prepared import PreparedEvent
 
+    stream = log.storage.stream
+    if stream is None:
+        raise ValueError("this storage does not use a transactional outbox")
     with engine.connect() as conn:
         rows = conn.execute(
             select(_outbox.c.id, _outbox.c.body)
-            .where(_outbox.c.stream == log.stream)
+            .where(_outbox.c.stream == stream)
             .order_by(_outbox.c.id)
             .limit(limit)
         ).all()
@@ -79,7 +82,7 @@ class OutboxLoop(InterruptiblePoller):
 
     def __init__(
         self,
-        log: S3AuditLog,
+        log: AuditLog,
         engine: Engine,
         interval: float = 5.0,
         on_error: Callable[[BaseException], None] | None = None,

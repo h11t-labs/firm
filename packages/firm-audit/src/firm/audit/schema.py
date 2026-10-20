@@ -14,8 +14,9 @@ a column is a breaking change. Writes must go through :func:`~firm.audit.record`
 
 **Tamper-evidence runtime behavior is opt-in and inert without a key** (design review 4A).
 The columns and side tables always exist in the migrated schema. When no ``FIRM_AUDIT_KEY`` is
-configured, :mod:`.events` leaves ``entry_id``/``row_mac``/``key_id`` NULL and the side tables stay
-empty until the opt-in sealer or verifier writes to them:
+configured, ordinary SQL writes leave ``entry_id``/``row_mac``/``key_id`` NULL. Explicitly
+prepared retries use an ``entry_id`` even without a key, with no MAC or signer. The side tables
+stay empty until the opt-in sealer or verifier writes to them:
 
 * ``firm_audit_events.entry_id`` — client-generated ULID, unique index; identity + anti-replay.
 * ``firm_audit_events.row_mac`` — hex ``HMAC-SHA256`` over the canonical row (:mod:`.integrity`).
@@ -170,9 +171,9 @@ archive_imports = Table(
 )
 
 
-# Events an S3AuditLog staged inside a caller's SQL transaction (``record(conn=...)``), waiting
-# for the relay to publish them. It lives in the caller's database, which may hold no other audit
-# table; ``firm.audit.s3_outbox.create_outbox`` creates just this table.
+# Events an AuditLog with S3 storage staged in the caller's transaction (record(conn=...)),
+# waiting for the relay. The caller's database needs no other audit table;
+# firm.audit.s3_outbox.create_outbox creates just this table.
 s3_outbox = Table(
     "firm_audit_s3_outbox",
     metadata,

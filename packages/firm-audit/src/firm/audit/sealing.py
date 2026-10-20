@@ -38,7 +38,7 @@ from .verify import (
 )
 
 if TYPE_CHECKING:
-    from .log import TamperEvidentLog
+    from .log import AuditLog
 
 # A real event id is positive. Reserving this unique ``from_id`` gives concurrent activation
 # attempts the same database arbiter as concurrent range seals without adding another table/index.
@@ -63,7 +63,7 @@ def _is_young_seal_line(line: str, cutoff: datetime) -> bool:
 class Sealer:
     """Activate sealing once, then write independent seals over settled rows."""
 
-    def __init__(self, audit: TamperEvidentLog) -> None:
+    def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
 
     def run_once(self) -> int:

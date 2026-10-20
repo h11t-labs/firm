@@ -56,14 +56,16 @@ def main(argv: list[str] | None = None) -> None:
     if args.audit_s3_bucket:
         if not args.audit_s3_stream:
             parser.error("--audit-s3-stream is required for S3 audit")
-        from firm.audit.s3 import S3AuditLog
+        from firm.audit import AuditLog, S3Storage
 
-        audit_s3 = S3AuditLog(
-            args.audit_s3_bucket,
-            stream=args.audit_s3_stream,
-            prefix=args.audit_s3_prefix,
-            region=args.audit_s3_region,
-            endpoint_url=args.audit_s3_endpoint,
+        audit_s3 = AuditLog(
+            storage=S3Storage(
+                args.audit_s3_bucket,
+                stream=args.audit_s3_stream,
+                prefix=args.audit_s3_prefix,
+                region=args.audit_s3_region,
+                endpoint_url=args.audit_s3_endpoint,
+            )
         )
     audit_archive = None
     if args.audit_archive_bucket:

@@ -15,10 +15,9 @@ from uuid import UUID, uuid4
 import pytest
 
 from firm._core.clock import now_utc
-from firm.audit import AuditLog
+from firm.audit import AuditLog, S3Storage
 from firm.audit.archive import Archive
 from firm.audit.object_store import ObjectStore
-from firm.audit.s3 import S3AuditLog
 from firm.ui import build_dashboard, create_server
 from firm.ui.app import DashboardApp, Headers, UIRequest
 from tests.audit.conftest import MemoryS3
@@ -27,8 +26,8 @@ STREAM = str(UUID(int=1))
 KEY = "dashboard-s3-row-and-seal-key-0123456789ab"
 
 
-def _log(client, **kwargs) -> S3AuditLog:
-    return S3AuditLog("events", stream=STREAM, client=client, **kwargs)
+def _log(client, **kwargs) -> AuditLog:
+    return AuditLog(storage=S3Storage("events", stream=STREAM, client=client), **kwargs)
 
 
 def _get(app: DashboardApp, path: str, query: str = "", prefix: str = "") -> tuple[int, str]:
@@ -118,7 +117,7 @@ def test_s3_integrity_strip_and_row_shields(monkeypatch):
     client = MemoryS3()
     log = _log(client, mac_key=KEY, grace=0.0, seal_batch_size=2)
     old = now_utc() - timedelta(hours=1)
-    with patch("firm.audit.s3.now_utc", lambda: old):
+    with patch("firm.audit.events.now_utc", lambda: old):
         for index in range(3):
             log.record(f"e{index}")
     log.sealer.run_once()
@@ -284,7 +283,7 @@ def test_archive_shows_recorded_row_signatures(tmp_path):
     s3_signed = _log(client, mac_key=KEY)
     s3_signed.record("signed.s3")
     s3_batch = archive.export_s3(s3_signed, batch_id=str(uuid4()))
-    plain = S3AuditLog("events", stream=str(UUID(int=3)), client=client)
+    plain = AuditLog(storage=S3Storage("events", stream=str(UUID(int=3)), client=client))
     plain.record("plain.one")
     plain_batch = archive.export_s3(plain, batch_id=str(uuid4()))
     dash = build_dashboard(audit_archive=archive)

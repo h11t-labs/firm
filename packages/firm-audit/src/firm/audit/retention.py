@@ -47,7 +47,7 @@ from .verify import (
 )
 
 if TYPE_CHECKING:
-    from .log import TamperEvidentLog
+    from .log import AuditLog
     from .verify import SealRecord
 
 _BATCH_SIZE = 1000
@@ -58,7 +58,7 @@ _TRANSACTION_ATTEMPTS = 3
 class Retention:
     """Delete expired history only when doing so preserves the tamper-evidence invariant."""
 
-    def __init__(self, audit: TamperEvidentLog) -> None:
+    def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
         self.last_skipped_unsealed = 0
         self.last_blocked_unarchived = 0

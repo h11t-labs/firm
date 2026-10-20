@@ -125,7 +125,7 @@ class Archiver:
     """
 
     def __init__(self, audit: Any, archive: Archive, *, stream: str | None = None) -> None:
-        own = getattr(audit, "stream", None)
+        own = audit.storage.stream
         if stream is None and own is None:
             raise ValueError("a SQL audit log needs an archive stream")
         chosen = uuid_text(str(stream if stream is not None else own))

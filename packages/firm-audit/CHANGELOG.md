@@ -8,14 +8,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
-- `S3AuditLog` (`firm-audit[s3]`): the audit log with S3 objects as storage, for deployments
-  without a database or PVC. It takes `AuditLog`'s arguments and has the same `record()`,
+- `AuditLog(storage=...)` with typed `Storage` / `StorageView` contracts and `SqlStorage` /
+  `S3Storage` adapters. Event preparation and signing, sealing, verification, retention and
+  background loops belong to one audit log. Existing SQL construction remains supported;
+  `S3AuditLog` is a compatibility constructor with no separate audit logic.
+- `S3Storage` (`firm-audit[s3]`) stores events in S3 for deployments without a database or PVC.
+  It supports the same `record()`,
   `history()` (every filter, exact `since`), sequential ids, row MACs, sealing, anchors,
   `verify()`, retention and background loops — the sealer, verifier and retention code is shared
   through a storage seam. Ids come from one compare-and-swap counter per stream; maintenance runs
   under one lease (`StorageBusy`). `prepare()`/`write()` give idempotent retries across processes
   (`UnknownEventOutcome`), and `firm-audit s3` has the SQL commands' counterparts.
-- `record(conn=...)` on `S3AuditLog` stages the event in the caller's transaction (migration
+- `AuditLog.prepare()` / `write()` also support SQL with idempotent insertion under the unique
+  entry id; retries of changed bytes or provenance are rejected. `get()` and `import_provenance()`
+  are available on the same log with either storage.
+- `record(conn=...)` with S3 storage stages the event in the caller's transaction (migration
   `0004`, `firm_audit_s3_outbox`) and publishes it afterwards: `flush_outbox()`, a background
   relay via `outbox_engine=`, or `firm-audit s3 flush-outbox`.
 - Verified archives for SQL and S3 logs: resumable publication, deduplicated multi-batch reads,

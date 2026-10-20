@@ -1271,8 +1271,8 @@ def s3_source(log: Any) -> dict[str, Any]:
         "cloud",
         "S3",
         "stored as objects; counts and sorts read index objects",
-        log.store,
-        ("stream", f"…{log.stream[-4:]}"),
+        log.storage.store,
+        ("stream", f"…{log.storage.stream[-4:]}"),
         hint="Ids come from one compare-and-swap counter; sealing, retention and verification "
         "run under one maintenance lease",
     )

@@ -38,9 +38,11 @@ def test_cli_s3_has_the_sql_commands(object_client, monkeypatch):
     object_client.close = lambda: None
     monkeypatch.setattr(boto3, "client", lambda *args, **kwargs: object_client)
     monkeypatch.setenv("FIRM_AUDIT_KEY", "cli-s3-row-and-seal-secret-0123456789abc")
-    from firm.audit.s3 import S3AuditLog
+    from firm.audit import AuditLog, S3Storage
 
-    with S3AuditLog("events", stream=str(UUID(int=1)), client=object_client) as log:
+    with AuditLog(
+        storage=S3Storage("events", stream=str(UUID(int=1)), client=object_client)
+    ) as log:
         log.record("invoice.paid", subject=("Invoice", 42))
         log.record("user.login")
     runner = CliRunner()

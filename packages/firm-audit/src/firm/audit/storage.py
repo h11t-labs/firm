@@ -1,8 +1,8 @@
 """The storage seam under the tamper-evidence algorithms.
 
 Sealing, verification and retention decide *what* to read and write; a storage decides *how*.
-:class:`SqlStorage` is the audit tables as they have always been (every statement here moved
-verbatim out of :mod:`.sealing`, :mod:`.verify` and :mod:`.retention`); the S3 backend implements
+:class:`SqlStorage` persists the audit tables, including prepared writes and maintenance records;
+the S3 backend implements
 the same operations on objects. The algorithms only ever talk to a *view*: one consistent read or
 one exclusive write scope, handed out by the storage's context managers.
 
@@ -14,17 +14,20 @@ this id", "advance the floor to this id". Each storage keeps its own concurrency
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
-from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from contextlib import AbstractContextManager, contextmanager
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import Connection, delete, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from .._core.database import snapshot_transaction, transaction
+from .._core.database import create_engine_for, dispose_engine, snapshot_transaction, transaction
 from .._core.dialects import get_dialect
-from . import schema
+from .._core.dialects.base import inserted_count
+from . import events, schema
+from .object_store import ObjectConflict, Receipt
+from .prepared import PreparedEvent, decode_prepared
 
 if TYPE_CHECKING:
     from .verify import SealRecords
@@ -45,6 +48,125 @@ class SealConflict(Exception):
 
 class StorageBusy(RuntimeError):
     """Another process holds the storage's maintenance lease (S3); SQL never raises it."""
+
+
+class StorageView(Protocol):
+    """Row, seal and archive operations inside one adapter-controlled consistency scope."""
+
+    def seal_records(self) -> SealRecords: ...
+
+    def iter_rows(self, low: int, high: int | None) -> Iterator[Any]: ...
+
+    def any_seal_record(self) -> bool: ...
+
+    def activation_exists(self) -> bool: ...
+
+    def lock_activation(self) -> bool: ...
+
+    def signer_mismatch(self, allowed: Sequence[str]) -> tuple[bool, str | None]: ...
+
+    def seal_hwm(self) -> int: ...
+
+    def max_unsigned_settled_id(self, cutoff: datetime) -> int: ...
+
+    def settled_rows_after(self, hwm: int, cutoff: datetime, limit: int) -> list[Any]: ...
+
+    def insert_seal(self, **values: Any) -> None: ...
+
+    def any_row(self) -> bool: ...
+
+    def any_row_between(self, low: int, high: int) -> bool: ...
+
+    def rows_at_or_below(self, floor: int, limit: int) -> list[int]: ...
+
+    def duplicate_entry_ids(self, limit: int) -> list[str]: ...
+
+    def has_expired(self, cutoff: datetime) -> bool: ...
+
+    def count_rows(self, *, after: int, before: datetime, through: int | None = None) -> int: ...
+
+    def rows_between(self, low: int, high: int) -> list[Any]: ...
+
+    def archive_policy(self, *, schema_present: bool | None = None) -> Any: ...
+
+    def verified_ids(
+        self, stream: str, rows: Sequence[Any], *, span: tuple[int, int] | None = None
+    ) -> set[int]: ...
+
+    def set_archive_policy(self, stream: str, destination: str) -> None: ...
+
+    def pending_archive_batch(self) -> tuple[str, str | None] | None: ...
+
+    def unreserved_rows(self, limit: int) -> list[Any]: ...
+
+    def archive_entry(self, stream: str, row: Any) -> dict[str, Any]: ...
+
+    def reserve_archive_batch(
+        self, batch_id: str, body: str, members: Sequence[dict[str, Any]]
+    ) -> None: ...
+
+    def expired_batch(self, cutoff: datetime, offset: int, limit: int) -> list[Any]: ...
+
+    def delete_rows(self, ids: Sequence[int], *, archive_tables: bool) -> None: ...
+
+    def advance_floor(
+        self, floor: dict[str, Any], *, through: int, archive_tables: bool
+    ) -> int: ...
+
+    def status_prior(self) -> Any: ...
+
+
+class Storage(Protocol):
+    """Persistence required by AuditLog; keys and audit policy stay above this seam.
+
+    record stores fully formed values, optionally in a caller transaction; write retries a
+    frozen event. history/get return decoded public events. Maintenance scopes expose the
+    existing row/seal/archive view operations, with consistency enforced by the adapter.
+    AuditLog closes its adapter; adapters must preserve caller-owned engines and SDK clients.
+    """
+
+    @property
+    def requires_entry_id(self) -> bool: ...
+
+    @property
+    def stream(self) -> str | None: ...
+
+    def record(
+        self,
+        values: dict[str, Any],
+        *,
+        conn: Connection | None,
+        grace: float,
+    ) -> Receipt | None: ...
+
+    def write(self, prepared: PreparedEvent, *, grace: float) -> int | Receipt: ...
+
+    def get(self, locator: int | Receipt | str) -> dict[str, Any] | None: ...
+
+    def history(
+        self,
+        wanted: dict[str, str],
+        since: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]: ...
+
+    def import_provenance(self, event_id: int) -> dict[str, Any] | None: ...
+
+    def snapshot(self, *, write: bool = False) -> AbstractContextManager[StorageView]: ...
+
+    def claim(self) -> AbstractContextManager[StorageView]: ...
+
+    def connect(self) -> AbstractContextManager[StorageView]: ...
+
+    def prior_sealing_observed(self) -> bool: ...
+
+    def upsert_status(self, values: dict[str, Any]) -> None: ...
+
+    def acknowledge_archive_batch(self, batch_id: str, receipt: str) -> None: ...
+
+    def archive_status(self) -> dict[str, int]: ...
+
+    def close(self) -> None: ...
 
 
 class SqlView:
@@ -303,9 +425,108 @@ class SqlStorage:
     """The SQL audit tables behind the storage seam (the default for :class:`~.log.AuditLog`)."""
 
     sql = True
+    requires_entry_id = False
+    stream: str | None = None
 
-    def __init__(self, engine: Engine) -> None:
-        self.engine = engine
+    def __init__(
+        self,
+        engine: Engine | None = None,
+        *,
+        database_url: str | None = None,
+        create_schema: bool = True,
+    ) -> None:
+        if engine is not None:
+            self.engine = engine
+            self._owns_engine = False
+        elif database_url is not None:
+            self.engine = create_engine_for(database_url)
+            self._owns_engine = True
+        else:
+            raise ValueError("AuditLog requires either database_url or engine (or storage=)")
+        try:
+            if create_schema:
+                schema.create_all(self.engine)
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._owns_engine:
+            dispose_engine(self.engine)
+
+    def record(
+        self,
+        values: dict[str, Any],
+        *,
+        conn: Connection | None = None,
+        grace: float,
+    ) -> None:
+        """Insert the exact values already signed by the audit log."""
+        if conn is not None:
+            conn.execute(_audits.insert().values(**values))
+        else:
+            with transaction(self.engine) as own:
+                own.execute(_audits.insert().values(**values))
+
+    def write(self, prepared: PreparedEvent, *, grace: float) -> int:
+        """Idempotently insert a prepared event under its unique entry id, checking its bytes."""
+        import json
+
+        from .sql_archive import import_provenance
+
+        values = decode_prepared(prepared)
+        provenance = values.pop("provenance", None)
+        values["created_at"] = datetime.fromisoformat(values["created_at"])
+        dialect = get_dialect(self.engine)
+        with dialect.begin_claim_tx(self.engine) as conn:
+            result = conn.execute(
+                dialect.insert_ignore(_audits, values, index_elements=["entry_id"])
+            )
+            inserted = inserted_count(result)
+            row = conn.execute(
+                select(_audits).where(_audits.c.entry_id == values["entry_id"])
+            ).one()
+            if any(row._mapping[name] != value for name, value in values.items()):
+                raise ObjectConflict("prepared event identity already contains different bytes")
+            if inserted:
+                if provenance is not None:
+                    conn.execute(
+                        schema.archive_imports.insert().values(
+                            event_id=row.id,
+                            provenance=json.dumps(provenance),
+                        )
+                    )
+            elif import_provenance(conn, row.id) != provenance:
+                raise ObjectConflict("prepared event identity has different provenance")
+            return row.id
+
+    def get(self, locator: int | Receipt | str) -> dict[str, Any] | None:
+        if not isinstance(locator, int):
+            raise ValueError("SQL audit events are located by integer id")
+        with transaction(self.engine) as conn:
+            return events.get(conn, locator)
+
+    def history(
+        self,
+        wanted: dict[str, str],
+        since: datetime | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        stmt = select(_audits).order_by(_audits.c.id.desc()).limit(limit)
+        for name, value in wanted.items():
+            stmt = stmt.where(_audits.c[name] == value)
+        if since is not None:
+            if since.tzinfo is not None:
+                since = since.astimezone(UTC).replace(tzinfo=None)
+            stmt = stmt.where(_audits.c.created_at >= since)
+        with transaction(self.engine) as conn:
+            return [events._row_to_dict(row) for row in conn.execute(stmt)]
+
+    def import_provenance(self, event_id: int) -> dict[str, Any] | None:
+        from .sql_archive import import_provenance
+
+        with transaction(self.engine) as conn:
+            return import_provenance(conn, event_id)
 
     def view(self, conn: Connection) -> SqlView:
         return SqlView(conn)

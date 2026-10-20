@@ -1,4 +1,4 @@
-"""S3AuditLog behaves as AuditLog does: the same API and results, with S3 objects as storage."""
+"""AuditLog with S3Storage: event queries, durable retries and maintenance scopes."""
 
 from __future__ import annotations
 
@@ -11,18 +11,23 @@ from uuid import UUID
 import pytest
 
 from firm._core.clock import now_utc
-from firm.audit import AuditLog, Ref
+from firm.audit import AuditLog, PreparedEvent, Ref, S3Storage, UnknownEventOutcome
 from firm.audit.event_format import canonical
 from firm.audit.integrity import load_key, row_mac
 from firm.audit.object_store import Receipt
-from firm.audit.s3 import PreparedEvent, S3AuditLog, StorageBusy, UnknownEventOutcome
+from firm.audit.s3 import S3AuditLog, StorageBusy
 
 STREAM = str(UUID(int=1))
 KEY = "s3-parity-test-row-and-seal-key-0123456789"
 
 
-def _log(client, **kwargs) -> S3AuditLog:
-    return S3AuditLog("events", stream=STREAM, client=client, **kwargs)
+def _log(client, **kwargs) -> AuditLog:
+    storage_options = {
+        name: kwargs.pop(name) for name in ("workers", "lease_ttl", "lease_wait") if name in kwargs
+    }
+    return AuditLog(
+        storage=S3Storage("events", stream=STREAM, client=client, **storage_options), **kwargs
+    )
 
 
 def _record_same(log, audit) -> None:

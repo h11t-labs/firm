@@ -32,14 +32,13 @@ from sqlalchemy import Connection, String, case, cast, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from .._core.clock import now_utc
-from .._core.database import snapshot_transaction
 from .._core.poller import InterruptiblePoller
 from . import integrity, schema
 from .integrity import HmacSigner, Key, parse_keyring
 from .storage import StorageBusy
 
 if TYPE_CHECKING:
-    from .log import TamperEvidentLog
+    from .log import AuditLog
 
 _audits = schema.audit_events
 _seals = schema.seals
@@ -677,7 +676,7 @@ def _affected_json(findings: Sequence[Finding], total_tampered: int) -> str | No
 class Verifier:
     """Run the eight-point invariant for one :class:`~firm.audit.log.AuditLog`."""
 
-    def __init__(self, audit: TamperEvidentLog) -> None:
+    def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
 
     @property
@@ -1439,13 +1438,8 @@ class Verifier:
     @contextmanager
     def _snapshot(self) -> Iterator[Any]:
         """The run's consistent read view: a SQL snapshot transaction, or the storage's own."""
-        storage = self.audit.storage
-        if storage.sql:
-            with snapshot_transaction(storage.engine) as conn:
-                yield storage.view(conn)
-        else:
-            with storage.snapshot() as view:
-                yield view
+        with self.audit.storage.snapshot() as view:
+            yield view
 
 
 class VerifyLoop(InterruptiblePoller):

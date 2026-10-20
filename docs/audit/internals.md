@@ -1,5 +1,31 @@
 # Internals
 
+## Storage adapters
+
+`AuditLog` is the single audit implementation. `events.build_values` normalizes references,
+serializes typed payloads once, fixes the timestamp and signs the exact stored bytes. Both
+instance writes and the standalone SQL `record(conn, ...)` function use it. Adapters do not
+receive signing keys or implement signing, sealing, verification or retention policy.
+
+The typed `Storage` contract covers persistence (`record`, idempotent `write`, `get`, `history`,
+import provenance), maintenance scopes (`snapshot`, `claim`, `connect`), verify status,
+archive acknowledgements and lifetime. Scopes yield a `StorageView`: row and seal reads,
+seal insertion, archive membership, deletion and atomic-or-recoverable floor advancement.
+`SqlStorage` enforces these scopes with transactions and row locks; `S3Storage` uses a lease
+and a durable prune intent. The verifier asks only for a storage snapshot.
+
+An adapter's `requires_entry_id` indicates whether unsigned writes also need a client identity.
+SQL preserves its historical unsigned NULL metadata; S3 uses the identity for retry claims.
+`stream` identifies the storage's native event namespace for archiving and outbox delivery;
+SQL uses `None` because its archive stream is supplied separately. These are persistence
+requirements, not alternate audit policy.
+
+To support another storage, implement both contracts and run the shared policy scenarios against
+it. Tests exercise signing, history, sealing, verification and archive-before-prune through a
+wrapper that hides concrete adapter attributes. Storage-specific transaction, concurrency and
+crash-recovery behaviour still needs its own adapter tests. Schema tables remain SQL's supported
+read surface; the CLI and dashboard select storage without selecting another audit class.
+
 ## Schema
 
 The event table, `firm_audit_events`:
@@ -23,8 +49,9 @@ row_mac         VARCHAR(64) — hex HMAC over the canonical row (tamper-evidence
 key_id          VARCHAR(16) — which key signed the row, for rotation (tamper-evidence)
 ```
 
-The last three columns are **always present but nullable**: they stay NULL until a key is
-configured, so a no-key deployment behaves exactly as before. Enabling tamper-evidence adds no
+The last three columns are **always present but nullable**. Ordinary SQL writes leave them NULL
+until a key is configured. Explicit `prepare()` / `write()` retries also use an `entry_id`
+without a key, for idempotency; `row_mac` and `key_id` remain NULL in that case. Enabling tamper-evidence adds no
 columns — it only starts populating them, and starts writing the two side tables `firm_audit_seals`
 (independent range seals plus the signed activation and floor markers) and
 `firm_audit_verify_status` (the single row the verifier upserts, read by the dashboard). Those side

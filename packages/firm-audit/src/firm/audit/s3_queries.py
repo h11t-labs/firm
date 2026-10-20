@@ -1,4 +1,4 @@
-"""The :mod:`firm.audit.queries` read surface, over an :class:`~firm.audit.s3.S3AuditLog`.
+"""The :mod:`firm.audit.queries` read surface, over an :class:`~firm.audit.s3.AuditLog`.
 
 Every function here has the same name, arguments and result shape as its SQL counterpart, with
 the log in place of the connection, so a dashboard renders an S3 log exactly like a SQL one.
@@ -30,10 +30,10 @@ from .queries import (
     integrity_state,
     row_status,
 )
-from .s3_store import S3View, row_dict
+from .s3_store import S3Storage, S3View, row_dict
 
 if TYPE_CHECKING:
-    from .s3 import S3AuditLog
+    from .log import AuditLog
 
 __all__ = [
     "DEFAULT_SORT",
@@ -56,13 +56,19 @@ __all__ = [
 SORT_WINDOW = 10_000
 
 
+def _storage(log: AuditLog) -> S3Storage:
+    if not isinstance(log.storage, S3Storage):
+        raise ValueError("S3 queries require an AuditLog with S3Storage")
+    return log.storage
+
+
 def _event(row: dict[str, Any]) -> dict[str, Any]:
     return row_dict(row) | {"row_mac": row.get("row_mac")}
 
 
-def audit_stats(log: S3AuditLog) -> dict[str, Any]:
+def audit_stats(log: AuditLog) -> dict[str, Any]:
     """Log-wide totals: recorded ``events``, distinct ``actions``, and ``last_event_at``."""
-    storage = log.storage
+    storage = _storage(log)
     actions = set()
     prefix = f"{storage.layout.root}ix/f/action/"
     for key in storage.store.iter_keys(prefix):
@@ -100,9 +106,9 @@ def _filters(
     return {name: str(value) for name, value in values.items() if value is not None}
 
 
-def _single_index(log: S3AuditLog, wanted: dict[str, str]) -> str | None:
+def _single_index(log: AuditLog, wanted: dict[str, str]) -> str | None:
     """The index prefix that holds exactly the rows matching ``wanted``, if one does."""
-    layout = log.storage.layout
+    layout = _storage(log).layout
     if len(wanted) == 1:
         ((name, value),) = wanted.items()
         return layout.field(name, value)
@@ -114,7 +120,7 @@ def _single_index(log: S3AuditLog, wanted: dict[str, str]) -> str | None:
 
 
 def audit_count(
-    log: S3AuditLog,
+    log: AuditLog,
     *,
     action: str | None = None,
     subject: Reference = None,
@@ -137,17 +143,17 @@ def audit_count(
         correlation_id=correlation_id,
     )
     if not wanted:
-        return log.storage.count_events()
+        return _storage(log).count_events()
     prefix = _single_index(log, wanted)
     if prefix is not None:
-        entries = list(log.storage.index_entries(prefix))
-        present = S3View(log.storage, None)._existing_ids(event_id for event_id, _ in entries)
+        entries = list(_storage(log).index_entries(prefix))
+        present = S3View(_storage(log), None)._existing_ids(event_id for event_id, _ in entries)
         return len(present)
-    return len(log.matching(wanted, None, SORT_WINDOW))
+    return len(_storage(log).matching(wanted, None, SORT_WINDOW))
 
 
 def audit_search(
-    log: S3AuditLog,
+    log: AuditLog,
     *,
     action: str | None = None,
     subject: Reference = None,
@@ -181,7 +187,7 @@ def audit_search(
         dir = "desc"
     if limit == 0:
         return []
-    storage = log.storage
+    storage = _storage(log)
     if not wanted and sort in {"id", "created_at"}:
         entries = _ordered_entries(log, sort, dir)
         page: list[tuple[int, str]] = []
@@ -193,7 +199,7 @@ def audit_search(
                 break
         rows = storage.rows(page)
         return [_event(row) for row in rows[:limit]]
-    rows = log.matching(wanted, None, SORT_WINDOW)
+    rows = _storage(log).matching(wanted, None, SORT_WINDOW)
     if sort == "id":
         rows.sort(key=lambda row: row["id"], reverse=dir == "desc")
     else:
@@ -218,9 +224,9 @@ def _pair(row: dict[str, Any], name: str) -> tuple[str | None, str | None]:
     return row.get(f"{name}_type"), row.get(f"{name}_id")
 
 
-def _ordered_entries(log: S3AuditLog, sort: str, dir: str) -> Any:
+def _ordered_entries(log: AuditLog, sort: str, dir: str) -> Any:
     """``(id, entry_id)`` for every event in ``sort`` order, ties broken by id descending."""
-    storage = log.storage
+    storage = _storage(log)
     layout = storage.layout
     if sort == "id":
         if dir == "desc":
@@ -249,15 +255,15 @@ def _ordered_entries(log: S3AuditLog, sort: str, dir: str) -> Any:
     return ascending()
 
 
-def audit_detail(log: S3AuditLog, event_id: int) -> dict[str, Any] | None:
+def audit_detail(log: AuditLog, event_id: int) -> dict[str, Any] | None:
     """One event by id, plus ``row_mac``, or ``None`` when no such event exists."""
-    row = log.storage.read_row(event_id)
+    row = _storage(log).read_row(event_id)
     return None if row is None else _event(row)
 
 
-def verify_status_row(log: S3AuditLog) -> dict[str, Any] | None:
+def verify_status_row(log: AuditLog) -> dict[str, Any] | None:
     """The verify-status record the shared verifier writes, as the SQL helper returns it."""
-    status = log.storage.status()
+    status = _storage(log).status()
     if status is None or "outcome" not in status:
         return None
 
@@ -283,9 +289,9 @@ def verify_status_row(log: S3AuditLog) -> dict[str, Any] | None:
     }
 
 
-def row_integrity_context(log: S3AuditLog) -> dict[str, Any]:
+def row_integrity_context(log: AuditLog) -> dict[str, Any]:
     """The signals :func:`row_status` needs (see the SQL helper of the same name)."""
-    records = S3View(log.storage, None).seal_records()
+    records = S3View(_storage(log), None).seal_records()
     max_to = max((r.to_id for r in records if r.kind == "seal" and r.to_id is not None), default=0)
     status = verify_status_row(log)
     affected = status["affected_identifiers"] if status else None
@@ -298,11 +304,11 @@ def row_integrity_context(log: S3AuditLog) -> dict[str, Any]:
     }
 
 
-def integrity_config(log: S3AuditLog, *, key_configured: bool) -> IntegrityConfig:
+def integrity_config(log: AuditLog, *, key_configured: bool) -> IntegrityConfig:
     """Whether integrity is switched on (sealing state from the signed activation record)."""
     activations = [
         r.sealed_at
-        for r in S3View(log.storage, None).seal_records()
+        for r in S3View(_storage(log), None).seal_records()
         if r.kind == "activation" and r.sealed_at is not None
     ]
     since = min(activations, default=None)

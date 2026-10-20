@@ -1084,7 +1084,8 @@ channel = Channel(engine=engine)
 
 ## Database-free audit and archives
 
-For stateless Kubernetes audit logging, install `firm-audit[s3]` and use `S3AuditLog`.
+For stateless Kubernetes audit logging, install `firm-audit[s3]` and select
+`AuditLog(storage=S3Storage(...))`.
 For cold storage from either SQL or S3, use the explicit archive APIs. See
 [S3 backend and archival storage](audit/s3-and-archives.md) for complete examples, retry
 envelopes, bounded history, restore, and archive-before-prune configuration.

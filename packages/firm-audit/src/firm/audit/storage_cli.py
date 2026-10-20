@@ -34,9 +34,10 @@ def output(value: Any) -> None:
 @click.option("--stream", required=True, envvar="FIRM_AUDIT_S3_STREAM")
 @click.pass_context
 def s3(ctx: Any, stream: str, **config: Any) -> None:
-    from .s3 import S3AuditLog
+    from .log import AuditLog
+    from .s3_store import S3Storage
 
-    ctx.obj = S3AuditLog(stream=stream, **config)
+    ctx.obj = AuditLog(storage=S3Storage(stream=stream, **config))
     ctx.call_on_close(ctx.obj.close)
 
 
@@ -60,7 +61,7 @@ def prepare(log: Any, action: str, event_file: Path, data: str) -> None:
 @click.argument("event_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.pass_obj
 def write(log: Any, event_file: Path) -> None:
-    from .s3 import PreparedEvent
+    from .prepared import PreparedEvent
 
     output(asdict(log.write(PreparedEvent(**json.loads(event_file.read_text())))))
 
@@ -243,11 +244,14 @@ def run_s3(
     batch_size: int,
     enable_prune_guard: bool,
 ) -> None:
-    from .s3 import S3AuditLog
+    from .log import AuditLog
+    from .s3_store import S3Storage
     from .sql_archive import Archiver
 
-    with S3AuditLog(
-        source_bucket, stream=stream, prefix=source_prefix, client=storage.store.client
+    with AuditLog(
+        storage=S3Storage(
+            source_bucket, stream=stream, prefix=source_prefix, client=storage.store.client
+        )
     ) as source:
         worker = Archiver(source, storage)
         if enable_prune_guard:
@@ -277,11 +281,14 @@ def export_s3(
     until: str | None,
     continuation: str | None,
 ) -> None:
-    from .s3 import S3AuditLog
+    from .log import AuditLog
+    from .s3_store import S3Storage
 
     # Reuse the configured endpoint/client so compatible providers work on both sides.
-    with S3AuditLog(
-        source_bucket, stream=stream, prefix=source_prefix, client=storage.store.client
+    with AuditLog(
+        storage=S3Storage(
+            source_bucket, stream=stream, prefix=source_prefix, client=storage.store.client
+        )
     ) as source:
         receipt = storage.export_s3(
             source,
@@ -352,9 +359,12 @@ def restore_sql(storage: Any, manifests: tuple[str, ...], target_url: str) -> No
 def restore_s3(
     storage: Any, manifest: str, target_bucket: str, target_prefix: str, stream: str
 ) -> None:
-    from .s3 import S3AuditLog
+    from .log import AuditLog
+    from .s3_store import S3Storage
 
-    with S3AuditLog(
-        target_bucket, stream=stream, prefix=target_prefix, client=storage.store.client
+    with AuditLog(
+        storage=S3Storage(
+            target_bucket, stream=stream, prefix=target_prefix, client=storage.store.client
+        )
     ) as target:
         output({"restored": storage.restore_s3(manifest, target)})

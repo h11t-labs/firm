@@ -12,10 +12,11 @@ from uuid import UUID, uuid4
 import pytest
 
 from firm._core.clock import now_utc
+from firm.audit import AuditLog, S3Storage
 from firm.audit.archive import Archive
 from firm.audit.event_format import canonical
 from firm.audit.object_store import ObjectStore
-from firm.audit.s3 import S3AuditLog, StorageBusy
+from firm.audit.storage import StorageBusy
 
 KEY = "live-provider-row-and-seal-key-0123456789abc"
 STREAM = str(UUID(int=1))
@@ -41,10 +42,20 @@ def live():
         region_name=os.getenv("AWS_REGION", "us-east-1"),
     )
     prefix = "firm-integration/" + str(uuid4())
-    logs: list[S3AuditLog] = []
+    logs: list[AuditLog] = []
 
-    def make(**kwargs) -> S3AuditLog:
-        log = S3AuditLog(bucket, stream=STREAM, prefix=prefix, client=client, **kwargs)
+    def make(**kwargs) -> AuditLog:
+        storage_options = {
+            name: kwargs.pop(name)
+            for name in ("workers", "lease_ttl", "lease_wait")
+            if name in kwargs
+        }
+        log = AuditLog(
+            storage=S3Storage(
+                bucket, stream=STREAM, prefix=prefix, client=client, **storage_options
+            ),
+            **kwargs,
+        )
         logs.append(log)
         return log
 
@@ -84,7 +95,7 @@ def test_live_concurrent_writers_and_retries(live):
 def test_live_seal_verify_tamper_and_lease(live):
     make, _, client, bucket = live
     log = make(mac_key=KEY, grace=0.0, seal_batch_size=3)
-    with patch("firm.audit.s3.now_utc", lambda: now_utc() - timedelta(hours=1)):
+    with patch("firm.audit.events.now_utc", lambda: now_utc() - timedelta(hours=1)):
         for index in range(5):
             log.record(f"event.{index}")
     assert log.sealer.run_once() == 5
@@ -113,11 +124,13 @@ def test_live_export_restore_and_sql_outbox(live, tmp_path):
     assert log.flush_outbox(engine) == 1
     receipt = archive.export_s3(log, batch_id=str(uuid4()))
     assert len(archive.read(receipt)) == 2
-    target = S3AuditLog(
-        log.store.bucket,
-        stream=STREAM,
-        prefix=log.store.prefix + "restore",
-        client=log.store.client,
+    target = AuditLog(
+        storage=S3Storage(
+            log.storage.store.bucket,
+            stream=STREAM,
+            prefix=log.storage.store.prefix + "restore",
+            client=log.storage.store.client,
+        ),
         mac_key=KEY,
     )
     try:
@@ -139,9 +152,9 @@ def test_process_death_after_claim_converges_on_retry(live, tmp_path):
     path = tmp_path / "request-state.json"
     path.write_text(json.dumps({"body": prepared.body}))
     config = {
-        "bucket": log.store.bucket,
-        "stream": log.stream,
-        "prefix": log.store.prefix,
+        "bucket": log.storage.store.bucket,
+        "stream": log.storage.stream,
+        "prefix": log.storage.store.prefix,
         "endpoint_url": os.getenv("FIRM_TEST_S3_ENDPOINT"),
     }
     env = {
@@ -152,8 +165,8 @@ def test_process_death_after_claim_converges_on_retry(live, tmp_path):
     script = """
 import json, os
 from pathlib import Path
-from firm.audit.s3 import S3AuditLog, PreparedEvent
-log = S3AuditLog(**json.loads(os.environ["FIRM_S3_PROCESS_CONFIG"]))
+from firm.audit import AuditLog, S3Storage, PreparedEvent
+log = AuditLog(storage=S3Storage(**json.loads(os.environ["FIRM_S3_PROCESS_CONFIG"])))
 event = PreparedEvent(**json.loads(Path(os.environ["FIRM_S3_PROCESS_EVENTFILE"]).read_text()))
 if os.getenv("FIRM_S3_CRASH_AFTER_CLAIM"):
     original = log.storage._write_row

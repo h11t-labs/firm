@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from firm.audit import AuditLog
     from firm.audit.archive import Archive
-    from firm.audit.s3 import S3AuditLog
 
 from sqlalchemy import Engine, inspect
 from sqlalchemy.exc import SQLAlchemyError
@@ -57,7 +57,7 @@ class Dashboard:
     cache: Engine | None = None
     channel: Engine | None = None
     audit: Engine | None = None
-    audit_s3: S3AuditLog | None = None
+    audit_s3: AuditLog | None = None
     audit_archive: Archive | None = None
 
     @property
@@ -107,7 +107,7 @@ def build_dashboard(
     cache_url: str | None = None,
     channel_url: str | None = None,
     audit_url: str | None = None,
-    audit_s3: S3AuditLog | None = None,
+    audit_s3: AuditLog | None = None,
     audit_archive: Archive | None = None,
 ) -> Dashboard:
     dash = Dashboard(audit_s3=audit_s3, audit_archive=audit_archive)

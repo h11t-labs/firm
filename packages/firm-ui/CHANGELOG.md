@@ -8,7 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
-- An `S3AuditLog` is shown on the same audit page as SQL (`/audit/s3`): cards, filters,
+- An `AuditLog` configured with `S3Storage` is shown on the same audit page as SQL (`/audit/s3`): cards, filters,
   sorting, pagination, the integrity strip and per-row status, under a source strip naming the
   bucket, prefix and stream. Routes share dashboard authentication, themes, and mount prefixes.
 - A read-only archive view lists the archive's batches (status, event count, time range, signed

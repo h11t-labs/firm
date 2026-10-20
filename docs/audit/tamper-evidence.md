@@ -7,11 +7,13 @@ prevented (anyone with `DELETE` can delete), but impossible to do without leavin
 verification will find.
 
 It is off until you configure a key. **Without `FIRM_AUDIT_KEY`, the runtime behavior on this page
-is inert**: writes leave the evidence columns NULL and reads behave as before. The nullable columns
+is inert**: writes have no row MAC or signer and reads behave as before. A retry entry id alone
+is not cryptographic protection. The nullable columns
 and two side tables are always part of the migrated schema, independent of key configuration.
 
-Everything here applies unchanged to an [`S3AuditLog`](s3-and-archives.md#tamper-evidence-retention-and-verification):
-the same layers, keys, findings and retention, with S3 objects in place of the tables.
+These algorithms belong to `AuditLog`, independently of storage. They also run unchanged with
+[`S3Storage`](s3-and-archives.md#tamper-evidence-retention-and-verification): the same layers,
+keys, findings and retention, with S3 objects in place of the tables.
 
 ## Threat model
 
@@ -234,7 +236,7 @@ appearing inside a range whose exact membership was already sealed.
 ## Key management
 
 The key comes from `FIRM_AUDIT_KEY` (or `AuditLog(..., mac_key=...)`). No key means the feature is
-off: columns stay NULL and everything behaves as it did before tamper-evidence existed.
+off: no row MAC or signer is written, and ordinary SQL writes also leave the entry id NULL.
 
 - **The key must be a UTF-8 string of at least 32 characters.** A shorter key is a **hard error at
   startup**, not a warning — a weak key silently voids all three layers, so it fails loudly

@@ -131,6 +131,7 @@ audit_b = AuditLog(engine=engine, create_schema=False)
 
 ## Optional S3 storage
 
-The SQL storage remains the default. `firm-audit[s3]` adds `S3AuditLog` (the same log, stored in
-S3) and optional archives for SQL and S3 logs. See [S3 & archives](s3-and-archives.md) for configuration,
+SQL remains the default. Install `firm-audit[s3]` and select
+`AuditLog(storage=S3Storage(...))` to keep the audit log in S3. Optional archives work with
+either storage. See [S3 & archives](s3-and-archives.md) for configuration,
 retry guarantees, CLI commands, and retention requirements.

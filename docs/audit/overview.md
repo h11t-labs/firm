@@ -79,6 +79,6 @@ the cryptographic integrity layer.
 
 ## S3 backend and archives
 
-`S3AuditLog` is the same audit log with S3 objects as storage, for deployments without a
-database. See [S3 storage and archives](s3-and-archives.md), which also covers export, restore,
+`AuditLog(storage=S3Storage(...))` keeps the same audit log in S3 objects, for deployments
+without an audit database. Signing, sealing, verification and retention stay in `AuditLog`. See [S3 storage and archives](s3-and-archives.md), which also covers export, restore,
 and archive-before-prune for both storages. SQL remains the default.

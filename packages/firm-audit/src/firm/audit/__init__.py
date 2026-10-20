@@ -1,4 +1,4 @@
-"""firm-audit — an append-only, database-backed audit log for Python.
+"""firm-audit — an append-only, storage-independent audit log for Python.
 
 from firm.audit import AuditLog, record
 
@@ -16,8 +16,22 @@ from __future__ import annotations
 
 from .events import Ref
 from .log import AuditLog, record
+from .prepared import PreparedEvent, UnknownEventOutcome
+from .s3_store import S3Storage
+from .storage import SqlStorage, Storage
 from .verify import IntegrityAlert
 
 __version__ = "1.0.0"
 
-__all__ = ["AuditLog", "IntegrityAlert", "Ref", "__version__", "record"]
+__all__ = [
+    "AuditLog",
+    "IntegrityAlert",
+    "PreparedEvent",
+    "Ref",
+    "S3Storage",
+    "SqlStorage",
+    "Storage",
+    "UnknownEventOutcome",
+    "__version__",
+    "record",
+]

@@ -1,4 +1,4 @@
-"""The ``AuditLog`` — a database-backed, append-only audit log."""
+"""One append-only audit log, with interchangeable storage adapters."""
 
 from __future__ import annotations
 
@@ -12,14 +12,16 @@ from typing import Any
 
 from sqlalchemy import Connection, Engine
 
-from .._core.database import create_engine_for, dispose_engine, transaction
 from .._core.poller import default_on_error
-from . import events, schema
+from . import events
+from .event_format import uuid_text
 from .events import Reference
 from .integrity import Key, load_key
+from .object_store import Receipt
+from .prepared import PreparedEvent, freeze_values
 from .retention import Retention, RetentionLoop
 from .sealing import Sealer, SealLoop
-from .storage import SqlStorage
+from .storage import SqlStorage, Storage
 from .verify import IntegrityAlert, Verifier, VerifyLoop, VerifyReport, default_on_finding
 
 #: Anchor callback: ``(kind, from_id, to_id, mac, at)`` for a seal/floor/activation event.
@@ -77,15 +79,253 @@ def record(
     )
 
 
-class TamperEvidentLog:
-    """Keys, sealing, verification and retention shared by every audit-log storage.
+class AuditLog:
+    """Audit policy shared by SQL and object storage.
 
-    :class:`AuditLog` (SQL tables) and :class:`~firm.audit.s3.S3AuditLog` (S3 objects) differ only
-    in ``self.storage``; both configure tamper-evidence through these methods, so the same
-    arguments mean the same thing and run the same Sealer, Verifier and Retention code.
+    Pass storage= to select an adapter, or keep the existing database_url/engine shorthand.
+    The log owns the adapter's lifetime; injected engines and SDK clients remain caller-owned.
     """
 
-    storage: Any
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        engine: Engine | None = None,
+        storage: Storage | None = None,
+        create_schema: bool = True,
+        max_age: float | None = None,
+        background_retention: bool = False,
+        retention_interval: float = 3600.0,
+        mac_key: str | None = None,
+        seal_key: str | None = None,
+        background_sealing: bool = False,
+        seal_interval: float = 60.0,
+        grace: float = 60.0,
+        seal_batch_size: int = 10_000,
+        anchor_path: str | None = None,
+        on_anchor: AnchorCallback | None = None,
+        verify_cycle: int = 7,
+        background_verification: bool = False,
+        verify_interval: float = 3600.0,
+        verify_full_every: int = 24,
+        anchor_max_age: float | None = None,
+        unsealed_tail_max_age: float | None = None,
+        on_error: Callable[[BaseException], None] | None = None,
+        on_finding: FindingCallback | None = None,
+        outbox_engine: Engine | None = None,
+        outbox_interval: float = 5.0,
+        create_outbox: bool = True,
+    ) -> None:
+        if storage is not None and (database_url is not None or engine is not None):
+            raise ValueError("pass storage= or database_url/engine, not both")
+        if storage is not None and not create_schema:
+            raise ValueError("configure create_schema on SqlStorage when passing storage=")
+        try:
+            self._configure_integrity(
+                max_age=max_age,
+                mac_key=mac_key,
+                seal_key=seal_key,
+                seal_interval=seal_interval,
+                grace=grace,
+                seal_batch_size=seal_batch_size,
+                anchor_path=anchor_path,
+                on_anchor=on_anchor,
+                verify_cycle=verify_cycle,
+                anchor_max_age=anchor_max_age,
+                unsealed_tail_max_age=unsealed_tail_max_age,
+            )
+        except BaseException:
+            if storage is not None:
+                storage.close()
+            raise
+        self.storage: Storage = (
+            storage
+            if storage is not None
+            else SqlStorage(
+                engine,
+                database_url=database_url,
+                create_schema=create_schema,
+            )
+        )
+        self._closed = False
+        self._outbox_loop = None
+        self._loop = None
+        self._seal_loop = None
+        self._verify_loop = None
+        try:
+            if outbox_engine is not None and self.storage.stream is None:
+                raise ValueError("this storage does not use a transactional outbox")
+            self._start_maintenance(
+                background_retention=background_retention,
+                retention_interval=retention_interval,
+                background_sealing=background_sealing,
+                seal_interval=seal_interval,
+                background_verification=background_verification,
+                verify_interval=verify_interval,
+                verify_full_every=verify_full_every,
+                on_error=on_error,
+                on_finding=on_finding,
+            )
+
+            if outbox_engine is not None:
+                from .s3_outbox import OutboxLoop
+                from .s3_outbox import create_outbox as create_outbox_table
+
+                if create_outbox:
+                    create_outbox_table(outbox_engine)
+                self._outbox_loop = OutboxLoop(
+                    self, outbox_engine, outbox_interval, on_error=self.on_error
+                )
+                self._outbox_loop.start()
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def engine(self) -> Engine:
+        """The SQL engine, retained for existing SQL integrations."""
+        if not isinstance(self.storage, SqlStorage):
+            raise AttributeError("this audit log has no SQL engine")
+        return self.storage.engine
+
+    def record(
+        self,
+        action: str,
+        *,
+        subject: Reference = None,
+        actor: Reference = None,
+        data: dict[str, Any] | None = None,
+        changes: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        conn: Connection | None = None,
+    ) -> Receipt | None:
+        """Sign an event and persist it through the configured storage.
+
+        SQL joins a supplied connection's transaction. S3 stages in that transaction's outbox;
+        without conn it publishes immediately and returns an object receipt.
+        """
+        values = events.build_values(
+            action=action,
+            subject=subject,
+            actor=actor,
+            data=data,
+            changes=changes,
+            correlation_id=correlation_id,
+            context=context,
+            key=self._key,
+            identity=self.storage.requires_entry_id,
+        )
+        return self.storage.record(values, conn=conn, grace=self.grace)
+
+    def prepare(
+        self,
+        action: str,
+        *,
+        subject: Reference = None,
+        actor: Reference = None,
+        data: dict[str, Any] | None = None,
+        changes: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+        context: dict[str, Any] | None = None,
+        created_at: datetime | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> PreparedEvent:
+        """Freeze and sign once, before storage assigns a numeric id; persist body for retries."""
+        values = events.build_values(
+            action=action,
+            subject=subject,
+            actor=actor,
+            data=data,
+            changes=changes,
+            correlation_id=correlation_id,
+            context=context,
+            key=self._key,
+            created_at=created_at,
+            identity=True,
+        )
+        if provenance is not None:
+            if provenance.get("source") not in {"sql", "s3"} or not isinstance(
+                provenance.get("identity"), str
+            ):
+                raise ValueError("invalid source provenance")
+            uuid_text(provenance["stream"])
+            values["provenance"] = provenance
+        return freeze_values(values)
+
+    def write(self, prepared: PreparedEvent) -> int | Receipt:
+        """Persist frozen bytes idempotently; return the SQL id or S3 object receipt."""
+        return self.storage.write(prepared, grace=self.grace)
+
+    def get(self, locator: int | Receipt | str) -> dict[str, Any] | None:
+        """Fetch an event by id, or an S3 receipt/key when using object storage."""
+        return self.storage.get(locator)
+
+    def import_provenance(self, event_id: int) -> dict[str, Any] | None:
+        """The original identity of an imported event, when present."""
+        return self.storage.import_provenance(event_id)
+
+    def flush_outbox(self, engine: Engine, *, limit: int = 1000) -> int:
+        """Publish committed events staged for this storage's transactional outbox."""
+        from .s3_outbox import flush
+
+        return flush(engine, self, limit=limit)
+
+    def history(
+        self,
+        *,
+        subject: Reference = None,
+        subject_type: str | None = None,
+        subject_id: Any | None = None,
+        actor: Reference = None,
+        actor_type: str | None = None,
+        actor_id: Any | None = None,
+        action: str | None = None,
+        correlation_id: str | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Matching events, newest id first, using the same filters for every storage."""
+        if subject is not None and (subject_type is not None or subject_id is not None):
+            raise ValueError("pass either subject= or subject_type=/subject_id=, not both")
+        if actor is not None and (actor_type is not None or actor_id is not None):
+            raise ValueError("pass either actor= or actor_type=/actor_id=, not both")
+        if subject is not None:
+            subject_type, subject_id, _ = events._ref(subject)
+        if actor is not None:
+            actor_type, actor_id, _ = events._ref(actor)
+        wanted = {
+            name: str(value)
+            for name, value in (
+                ("subject_type", subject_type),
+                ("subject_id", subject_id),
+                ("actor_type", actor_type),
+                ("actor_id", actor_id),
+                ("action", action),
+                ("correlation_id", correlation_id),
+            )
+            if value is not None
+        }
+        if limit <= 0:
+            return []
+        return self.storage.history(wanted, since, limit)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._outbox_loop is not None:
+                self._outbox_loop.stop()
+            self._stop_maintenance()
+        finally:
+            self.storage.close()
+
+    def __enter__(self) -> AuditLog:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def _configure_integrity(
         self,
@@ -262,150 +502,3 @@ class TamperEvidentLog:
             self._seal_loop.stop()
         if self._verify_loop is not None:
             self._verify_loop.stop()
-
-
-class AuditLog(TamperEvidentLog):
-    def __init__(
-        self,
-        database_url: str | None = None,
-        *,
-        engine: Engine | None = None,
-        create_schema: bool = True,
-        max_age: float | None = None,
-        background_retention: bool = False,
-        retention_interval: float = 3600.0,
-        mac_key: str | None = None,
-        seal_key: str | None = None,
-        background_sealing: bool = False,
-        seal_interval: float = 60.0,
-        grace: float = 60.0,
-        seal_batch_size: int = 10_000,
-        anchor_path: str | None = None,
-        on_anchor: AnchorCallback | None = None,
-        verify_cycle: int = 7,
-        background_verification: bool = False,
-        verify_interval: float = 3600.0,
-        verify_full_every: int = 24,
-        anchor_max_age: float | None = None,
-        unsealed_tail_max_age: float | None = None,
-        on_error: Callable[[BaseException], None] | None = None,
-        on_finding: FindingCallback | None = None,
-    ) -> None:
-        if engine is not None:
-            self.engine = engine
-            self._owns_engine = False
-        elif database_url is not None:
-            self.engine = create_engine_for(database_url)
-            self._owns_engine = True
-        else:
-            raise ValueError("AuditLog requires either database_url or engine")
-        # Sealing, verification and retention reach the tables only through this seam.
-        self.storage = SqlStorage(self.engine)
-
-        self._configure_integrity(
-            max_age=max_age,
-            mac_key=mac_key,
-            seal_key=seal_key,
-            seal_interval=seal_interval,
-            grace=grace,
-            seal_batch_size=seal_batch_size,
-            anchor_path=anchor_path,
-            on_anchor=on_anchor,
-            verify_cycle=verify_cycle,
-            anchor_max_age=anchor_max_age,
-            unsealed_tail_max_age=unsealed_tail_max_age,
-        )
-        if create_schema:
-            schema.create_all(self.engine)
-        self._start_maintenance(
-            background_retention=background_retention,
-            retention_interval=retention_interval,
-            background_sealing=background_sealing,
-            seal_interval=seal_interval,
-            background_verification=background_verification,
-            verify_interval=verify_interval,
-            verify_full_every=verify_full_every,
-            on_error=on_error,
-            on_finding=on_finding,
-        )
-
-    def record(
-        self,
-        action: str,
-        *,
-        subject: Reference = None,
-        actor: Reference = None,
-        data: dict[str, Any] | None = None,
-        changes: dict[str, Any] | None = None,
-        correlation_id: str | None = None,
-        context: dict[str, Any] | None = None,
-        conn: Connection | None = None,
-    ) -> None:
-        """Record an event. Pass ``conn`` to join the caller's transaction (atomic, shared DB);
-        omit it to write durably in this ``AuditLog``'s own transaction (separate DB or
-        standalone — not atomic with anything else)."""
-        if conn is not None:
-            events.append(
-                conn,
-                action=action,
-                subject=subject,
-                actor=actor,
-                data=data,
-                changes=changes,
-                correlation_id=correlation_id,
-                context=context,
-                key=self._key,
-            )
-        else:
-            with transaction(self.engine) as own_conn:
-                events.append(
-                    own_conn,
-                    action=action,
-                    subject=subject,
-                    actor=actor,
-                    data=data,
-                    changes=changes,
-                    correlation_id=correlation_id,
-                    context=context,
-                    key=self._key,
-                )
-
-    def history(
-        self,
-        *,
-        subject: Reference = None,
-        subject_type: str | None = None,
-        subject_id: Any | None = None,
-        actor: Reference = None,
-        actor_type: str | None = None,
-        actor_id: Any | None = None,
-        action: str | None = None,
-        correlation_id: str | None = None,
-        since: datetime | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        with transaction(self.engine) as conn:
-            return events.history(
-                conn,
-                subject=subject,
-                subject_type=subject_type,
-                subject_id=subject_id,
-                actor=actor,
-                actor_type=actor_type,
-                actor_id=actor_id,
-                action=action,
-                correlation_id=correlation_id,
-                since=since,
-                limit=limit,
-            )
-
-    def close(self) -> None:
-        self._stop_maintenance()
-        if self._owns_engine:
-            dispose_engine(self.engine)
-
-    def __enter__(self) -> AuditLog:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()

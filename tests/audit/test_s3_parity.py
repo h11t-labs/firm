@@ -1,7 +1,7 @@
 """The S3 audit log's tamper-evidence is the SQL audit log's, scenario for scenario.
 
-Each scenario records the same events into an ``AuditLog`` (SQLite) and an ``S3AuditLog``
-(in-memory S3), seals, retires and tampers with both the same way — through each storage's own
+Each scenario records through AuditLog with SQL or in-memory S3 storage, then seals, retires
+and tampers with both the same way through each storage's own
 raw access, as an attacker with write access to it would — and requires the shared verifier,
 sealer and retention to reach the same verdict with the same findings on both.
 """
@@ -18,9 +18,8 @@ import pytest
 from sqlalchemy import delete, insert, select, update
 
 from firm._core.clock import now_utc
-from firm.audit import AuditLog, schema
+from firm.audit import AuditLog, S3Storage, schema
 from firm.audit.event_format import canonical
-from firm.audit.s3 import S3AuditLog
 from tests.audit.conftest import MemoryS3
 
 KEY = "parity-row-and-seal-secret-0123456789abcdef"
@@ -34,10 +33,7 @@ FORGED = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
 def written_at(delta: timedelta):
     """Record events (on both backends) as if ``delta`` ago."""
     moment = now_utc() - delta
-    with (
-        patch("firm.audit.events.now_utc", lambda: moment),
-        patch("firm.audit.s3.now_utc", lambda: moment),
-    ):
+    with patch("firm.audit.events.now_utc", lambda: moment):
         yield
 
 
@@ -99,7 +95,9 @@ class S3Side:
 
     def __init__(self, _db_url=None, **kwargs):
         self.client = MemoryS3()
-        self.log = S3AuditLog("events", stream=STREAM, client=self.client, **kwargs)
+        self.log = AuditLog(
+            storage=S3Storage("events", stream=STREAM, client=self.client), **kwargs
+        )
         self.layout = self.log.storage.layout
 
     def _event_key(self, event_id):
@@ -287,7 +285,9 @@ def test_rotated_keys_verify_identically(db_url, monkeypatch):
     monkeypatch.setenv("FIRM_AUDIT_RETIRED_SEAL_KEYS", f"old={KEY}")
     rotated = (
         AuditLog(sql.engine.url.render_as_string(hide_password=False), mac_key=OTHER, grace=0.0),
-        S3AuditLog("events", stream=STREAM, client=s3.client, mac_key=OTHER, grace=0.0),
+        AuditLog(
+            storage=S3Storage("events", stream=STREAM, client=s3.client), mac_key=OTHER, grace=0.0
+        ),
     )
     for log in rotated:
         log.record("after.rotation")

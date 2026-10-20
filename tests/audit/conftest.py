@@ -30,7 +30,7 @@ def _backend_params() -> list:
 @pytest.fixture(autouse=True)
 def _no_ambient_audit_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep a developer's shell FIRM_AUDIT_KEY / retired keys out of every test; a test that
-    wants a key sets it explicitly (AuditLog and S3AuditLog both read them from the env)."""
+    wants a key sets it explicitly (AuditLog reads it independently of storage)."""
     monkeypatch.delenv("FIRM_AUDIT_KEY", raising=False)
     monkeypatch.delenv("FIRM_AUDIT_RETIRED_KEYS", raising=False)
 
@@ -208,9 +208,16 @@ def object_client():
 
 @pytest.fixture
 def s3_log(object_client):
-    from firm.audit.s3 import S3AuditLog
+    from firm.audit import S3Storage
 
-    return S3AuditLog("events", stream="00000000-0000-0000-0000-000000000001", client=object_client)
+    with AuditLog(
+        storage=S3Storage(
+            "events",
+            stream="00000000-0000-0000-0000-000000000001",
+            client=object_client,
+        )
+    ) as log:
+        yield log
 
 
 @pytest.fixture

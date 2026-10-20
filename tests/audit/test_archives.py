@@ -142,9 +142,11 @@ def test_s3_archive_restore_and_resume(s3_log, archive, object_client):
         archive.export_s3(s3_log, batch_id=batch_id)
     object_client.fail_key = None
     receipt = archive.export_s3(s3_log, batch_id=batch_id)
-    from firm.audit.s3 import S3AuditLog
+    from firm.audit import S3Storage
 
-    target = S3AuditLog("restored", stream=STREAM, prefix="other", client=object_client)
+    target = AuditLog(
+        storage=S3Storage("restored", stream=STREAM, prefix="other", client=object_client)
+    )
     assert archive.restore_s3(receipt, target) == 1
     # Same stream: the original id and row come back exactly, like a native SQL restore.
     assert target.history() == s3_log.history()

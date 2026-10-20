@@ -40,28 +40,24 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from .._core.clock import now_utc
-from .event_format import canonical
+from .event_format import canonical, uuid_text
 from .integrity import canonical_created_at
-from .object_store import ObjectStore
+from .object_store import ObjectConflict, ObjectStore, Receipt, digest, error_code
+from .prepared import (
+    EVENT_FIELDS,
+    PreparedEvent,
+    UnknownEventOutcome,
+    decode_prepared,
+    freeze_values,
+)
 from .storage import ACTIVATION_FROM_ID, SealConflict, StorageBusy
 
 if TYPE_CHECKING:
     from .verify import SealRecords
 
 #: Signed scalar columns, in table order (``data``/``changes``/``context`` are stored JSON text).
-ROW_FIELDS = (
-    "action",
-    "subject_type",
-    "subject_id",
-    "subject_label",
-    "actor_type",
-    "actor_id",
-    "actor_label",
-    "correlation_id",
-    "data",
-    "changes",
-    "context",
-)
+ROW_FIELDS = EVENT_FIELDS
+
 #: History filters with their own index, most selective first.
 INDEXED_FILTERS = (
     "correlation_id",
@@ -891,25 +887,45 @@ class S3Storage:
     """One stream's objects behind the storage seam, plus the event write path."""
 
     sql = False
+    requires_entry_id = True
 
     def __init__(
         self,
-        store: ObjectStore,
+        bucket: ObjectStore | str,
         stream: str,
         *,
+        prefix: str = "firm-audit",
+        region: str | None = None,
+        endpoint_url: str | None = None,
+        client: Any = None,
         workers: int = 16,
         lease_ttl: float = 300.0,
-        lease_wait: float = 30.0,
+        lease_wait: float = 5.0,
     ) -> None:
-        self.store = store
-        self.stream = stream
-        self.layout = Layout(f"{store.prefix}audit/v2/{stream}/")
+        self._closed = False
+        self.stream = uuid_text(stream)
+        self.store = (
+            bucket
+            if isinstance(bucket, ObjectStore)
+            else ObjectStore(
+                bucket,
+                prefix=prefix,
+                region=region,
+                endpoint_url=endpoint_url,
+                client=client,
+            )
+        )
+        self.layout = Layout(f"{self.store.prefix}audit/v2/{self.stream}/")
         self.lease_ttl = lease_ttl
         self.lease_wait = lease_wait
         self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="firm-audit-s3")
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self._pool.shutdown(wait=True)
+        self.store.close()
 
     # -- concurrency scopes ------------------------------------------------------------------------
 
@@ -1061,7 +1077,15 @@ class S3Storage:
                 event_id = int(state["id"])
                 row = {**fields, "id": event_id}
                 event_key = self.layout.event(event_id, entry_id)
-                if self.store.exists(event_key):
+                try:
+                    stored, _ = self.store.read(event_key)
+                except FileNotFoundError:
+                    pass
+                else:
+                    if stored != encode_row(row):
+                        raise ObjectConflict(
+                            "prepared event identity already contains different bytes"
+                        )
                     return row
                 claimed_at = _when(state.get("at"))
                 fresh = claimed_at is not None and now_utc() - claimed_at <= timedelta(
@@ -1196,3 +1220,121 @@ class S3Storage:
             row = decode_row(body) if body is not None else None
             return row if row is not None and row["entry_id"] == entry_id else None
         return None
+
+    def record(self, values: dict[str, Any], *, conn: Any = None, grace: float) -> Receipt | None:
+        """Persist an already signed event, or stage it in the caller's SQL transaction."""
+        prepared = freeze_values(values)
+        if conn is not None:
+            from .s3_outbox import stage
+
+            stage(conn, self.stream, prepared.body)
+            return None
+        return self.write(prepared, grace=grace)
+
+    def write(self, prepared: PreparedEvent, *, grace: float) -> Receipt:
+        """Publish exact prepared bytes; preserve the retry token on ambiguous failures."""
+        fields = decode_prepared(prepared)
+        try:
+            row = self.publish(fields, grace=grace)
+        except ValueError:
+            raise
+        except Exception as exc:
+            if error_code(exc) in {
+                "AccessDenied",
+                "InvalidAccessKeyId",
+                "SignatureDoesNotMatch",
+                "NoSuchBucket",
+            }:
+                raise
+            raise UnknownEventOutcome(prepared) from exc
+        return Receipt(self.layout.event(row["id"], row["entry_id"]), digest(encode_row(row)))
+
+    def get(self, locator: int | Receipt | str) -> dict[str, Any] | None:
+        if isinstance(locator, int):
+            row = self.read_row(locator)
+            return row_dict(row) if row is not None else None
+        try:
+            body = (
+                self.store.verify(locator)
+                if isinstance(locator, Receipt)
+                else self.store.read(locator)[0]
+            )
+        except FileNotFoundError:
+            return None
+        row = decode_row(body)
+        if row is None:
+            raise ValueError("object is not an audit event")
+        return row_dict(row)
+
+    def import_provenance(self, event_id: int) -> dict[str, Any] | None:
+        row = self.read_row(event_id)
+        return row.get("provenance") if row is not None else None
+
+    def history(
+        self, wanted: dict[str, str], since: datetime | None, limit: int
+    ) -> list[dict[str, Any]]:
+        if since is not None and since.tzinfo is not None:
+            since = since.astimezone(UTC).replace(tzinfo=None)
+        return [row_dict(row) for row in self.matching(wanted, since, limit)]
+
+    def matching(
+        self, wanted: dict[str, str], since: datetime | None, limit: int
+    ) -> list[dict[str, Any]]:
+        """Raw rows matching exact column values (and ``since``), newest id first."""
+        probe = {**wanted}
+        if "subject_type" in wanted and "subject_id" in wanted:
+            probe["subject"] = f"{wanted['subject_type']}\x00{wanted['subject_id']}"
+        if "actor_type" in wanted and "actor_id" in wanted:
+            probe["actor"] = f"{wanted['actor_type']}\x00{wanted['actor_id']}"
+        layout = self.layout
+        index = next((name for name in _INDEX_ORDER if name in probe), None)
+        if index is not None:
+            entries = self.index_entries(layout.field(index, probe[index]))
+        elif since is not None:
+            # Every event since ``since``, ordered newest id first like the SQL query.
+            entries = iter(sorted(self.time_entries(since), reverse=True))
+        else:
+            entries = self.index_entries(layout.id_index)
+        found: list[dict[str, Any]] = []
+        page: list[tuple[int, str]] = []
+
+        def drain() -> bool:
+            for row in self.rows(page):
+                if _matches(row, wanted, since):
+                    found.append(row)
+                    if len(found) >= limit:
+                        return True
+            return False
+
+        for entry in entries:
+            page.append(entry)
+            if len(page) == _HISTORY_PAGE:
+                if drain():
+                    return found
+                page = []
+        if page:
+            drain()
+        return found[:limit]
+
+
+_HISTORY_PAGE = 100
+
+#: Index preference for ``history()``: the most selective filter that has its own index.
+_INDEX_ORDER = (
+    "correlation_id",
+    "subject",
+    "actor",
+    "subject_id",
+    "actor_id",
+    "action",
+    "subject_type",
+    "actor_type",
+)
+if set(_INDEX_ORDER) != set(index_values({})):  # every choosable index is written per event
+    raise RuntimeError("S3 history index order is out of step with the written indexes")
+
+
+def _matches(row: dict[str, Any], wanted: dict[str, str], since: datetime | None) -> bool:
+    if any(row.get(name) != value for name, value in wanted.items()):
+        return False
+    return since is None or datetime.fromisoformat(row["created_at"]) >= since
