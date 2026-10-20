@@ -113,7 +113,7 @@ fresh one (the old id stays a gap, like a rolled-back SQL insert).
 ```python
 from sqlalchemy import create_engine
 from firm.audit import AuditLog, S3Storage
-from firm.audit.s3_outbox import create_outbox
+from firm.audit.storage.s3.outbox import create_outbox
 
 engine = create_engine("sqlite:///app.db")
 create_outbox(engine)
@@ -248,7 +248,7 @@ verifies nothing; pages follow batch-ID order, not creation order.
 from firm.audit import AuditLog
 from firm.audit.archive import Archive
 from firm.audit.object_store import ObjectStore
-from firm.audit.sql_archive import restore_sql
+from firm.audit.storage.sql.archive import restore_sql
 
 archive = Archive(ObjectStore("my-archive-bucket"))
 with AuditLog("sqlite:///isolated-restored.db") as target:
@@ -279,7 +279,7 @@ each expired row sits in a verified archive batch. (`SQLArchiver` is the same cl
 from firm.audit.archive import Archive
 from firm.audit.object_store import ObjectStore
 from firm.audit import AuditLog, S3Storage
-from firm.audit.sql_archive import Archiver
+from firm.audit.archive import Archiver
 
 with AuditLog(
     storage=S3Storage("my-audit-bucket", stream="00000000-0000-0000-0000-000000000001"),

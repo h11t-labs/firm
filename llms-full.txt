@@ -4347,7 +4347,7 @@ fresh one (the old id stays a gap, like a rolled-back SQL insert).
 ```python
 from sqlalchemy import create_engine
 from firm.audit import AuditLog, S3Storage
-from firm.audit.s3_outbox import create_outbox
+from firm.audit.storage.s3.outbox import create_outbox
 
 engine = create_engine("sqlite:///app.db")
 create_outbox(engine)
@@ -4482,7 +4482,7 @@ verifies nothing; pages follow batch-ID order, not creation order.
 from firm.audit import AuditLog
 from firm.audit.archive import Archive
 from firm.audit.object_store import ObjectStore
-from firm.audit.sql_archive import restore_sql
+from firm.audit.storage.sql.archive import restore_sql
 
 archive = Archive(ObjectStore("my-archive-bucket"))
 with AuditLog("sqlite:///isolated-restored.db") as target:
@@ -4513,7 +4513,7 @@ each expired row sits in a verified archive batch. (`SQLArchiver` is the same cl
 from firm.audit.archive import Archive
 from firm.audit.object_store import ObjectStore
 from firm.audit import AuditLog, S3Storage
-from firm.audit.sql_archive import Archiver
+from firm.audit.archive import Archiver
 
 with AuditLog(
     storage=S3Storage("my-audit-bucket", stream="00000000-0000-0000-0000-000000000001"),
@@ -4761,6 +4761,39 @@ it. Tests exercise signing, history, sealing, verification and archive-before-pr
 wrapper that hides concrete adapter attributes. Storage-specific transaction, concurrency and
 crash-recovery behaviour still needs its own adapter tests. Schema tables remain SQL's supported
 read surface; the CLI and dashboard select storage without selecting another audit class.
+
+## Source organization
+
+The source follows the storage seam:
+
+```text
+firm/audit/
+  log.py, events.py, prepared.py        shared event preparation and public AuditLog
+  integrity.py, sealing.py, verify.py   shared signing and verification policy
+  retention.py                         shared pruning policy
+  storage/
+    base.py                            Storage and StorageView contracts
+    sql/
+      store.py                         SQL persistence and transaction scopes
+      projections.py                   bounded SQL verification reads
+      archive.py                       SQL archive ledger and restore
+    s3/
+      store.py                         S3 objects, indexes and maintenance leases
+      queries.py                       S3 dashboard reads
+      outbox.py                        optional transactional SQL-to-S3 delivery
+  archive/
+    store.py                           verified batch publication and archive reads
+    archiver.py                        archive-before-prune for either backend
+  object_store.py, event_format.py      shared object client and wire format
+  schema.py, queries.py, migrations/    stable SQL schema and read surfaces
+```
+
+`from firm.audit import AuditLog, SqlStorage, S3Storage` remains the public entry point.
+Archival policy lives in `firm.audit.archive.Archiver`; SQL ledger details stay with the SQL
+backend. The documented `s3_queries`, `s3_outbox` and `sql_archive` module paths forward to
+these implementations for compatibility. `firm.audit.s3.S3AuditLog` also remains a thin
+constructor over `AuditLog` and `S3Storage`. New storage adapters belong under `storage/`;
+they reuse the event, integrity, maintenance and archival policy above that seam.
 
 ## Schema
 
@@ -5863,17 +5896,17 @@ boto3.
 - `AuditLog.close()` closes its adapter and any resources the adapter created. Injected engines and SDK clients stay caller-owned. Context-manager exit does the same; closing the log twice is safe.
 - `firm.audit.Storage` is the typed persistence contract. Its consistent maintenance scopes implement `firm.audit.storage.StorageView`; see [internals](audit/internals.md#storage-adapters).
 - `firm.audit.s3.S3AuditLog(bucket, *, stream, ...)` remains a compatibility constructor for `AuditLog(storage=S3Storage(...))`. It inherits every audit operation without overriding signing or policy.
-- `firm.audit.s3_outbox`: `create_outbox(bind)`, `pending(engine, stream) -> int`, `flush(engine, log, *, limit=1000) -> int`.
-- `firm.audit.s3_queries` mirrors `firm.audit.queries` over an `AuditLog` configured with `S3Storage` (`audit_stats`, `audit_count`, `audit_search`, `audit_detail`, `verify_status_row`, `integrity_config`) for the dashboard.
+- `firm.audit.storage.s3.outbox`: `create_outbox(bind)`, `pending(engine, stream) -> int`, `flush(engine, log, *, limit=1000) -> int`.
+- `firm.audit.storage.s3.queries` mirrors `firm.audit.queries` over an `AuditLog` configured with `S3Storage` (`audit_stats`, `audit_count`, `audit_search`, `audit_detail`, `verify_status_row`, `integrity_config`) for the dashboard.
 - `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
 - `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`; `batches(*, limit=25, continuation=None) -> tuple[list, str | None]` (unverified summaries, batch-ID order).
 - `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`; `Archive.export_s3(source, *, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
-- `Archive.restore_s3(receipts, target) -> int` and `firm.audit.sql_archive.restore_sql(archive, receipts, target) -> int` require an empty target; same-storage archives keep ids and row signatures.
-- `firm.audit.sql_archive.Archiver(log, archive, *, stream=None)` for an `AuditLog` with either storage (SQL needs `stream`; S3 uses its configured stream); `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict` (`events`, `unarchived`, `pending_batches`). `SQLArchiver` is the same class.
+- `Archive.restore_s3(receipts, target) -> int` and `firm.audit.storage.sql.archive.restore_sql(archive, receipts, target) -> int` require an empty target; same-storage archives keep ids and row signatures.
+- `firm.audit.archive.Archiver(log, archive, *, stream=None)` for an `AuditLog` with either storage (SQL needs `stream`; S3 uses its configured stream); `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict` (`events`, `unarchived`, `pending_batches`). `SQLArchiver` is the same class.
 
 See [S3 & archives](audit/s3-and-archives.md) for guarantees, supported restore paths, and limits.
 
-Imported SQL event provenance is available through `firm.audit.sql_archive.import_provenance(conn, event_id)`. Cross-storage restores retain source identities separately from destination IDs.
+Imported SQL event provenance is available through `firm.audit.storage.sql.archive.import_provenance(conn, event_id)`. Cross-storage restores retain source identities separately from destination IDs.
 
 
 

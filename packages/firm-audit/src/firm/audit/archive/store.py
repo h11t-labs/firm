@@ -10,9 +10,9 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from .event_format import canonical, read_event, token_decode, token_encode, uuid_text, wire_event
-from .log import AuditLog
-from .object_store import (
+from ..event_format import canonical, read_event, token_decode, token_encode, uuid_text, wire_event
+from ..log import AuditLog
+from ..object_store import (
     MAX_OBJECT_BYTES,
     ObjectConflict,
     ObjectStore,
@@ -20,9 +20,14 @@ from .object_store import (
     Receipt,
     digest,
 )
-from .s3_store import S3Storage
+from ..storage.s3.store import S3Storage
 
 MAX_ARCHIVE_RECORDS = 1000
+
+
+def fingerprint(entry: dict[str, Any]) -> str:
+    """Identify the exact event bytes and provenance reserved for an archive batch."""
+    return digest(canonical(entry))
 
 
 def sql_entry(stream: str, row: dict[str, Any]) -> dict[str, Any]:
@@ -45,7 +50,7 @@ def sql_entry(stream: str, row: dict[str, Any]) -> dict[str, Any]:
 def row_entry(source: str, stream: str, row: dict[str, Any]) -> dict[str, Any]:
     """An archive entry for a stored row in SQL-column shape (an S3 event object): the stored
     JSON strings verbatim (row MACs cover their exact bytes) plus any signature columns."""
-    from .s3_store import row_dict
+    from ..storage.s3.store import row_dict
 
     event = row_dict(row)
     if row.get("provenance") is not None:
@@ -63,8 +68,8 @@ def row_entry(source: str, stream: str, row: dict[str, Any]) -> dict[str, Any]:
 
 def _native_row(entry: dict[str, Any]) -> dict[str, Any]:
     """An archived S3 row back in storage shape, with its original id and signature."""
-    from .integrity import canonical_created_at
-    from .s3_store import ROW_FIELDS
+    from ..integrity import canonical_created_at
+    from ..storage.s3.store import ROW_FIELDS
 
     event = entry["event"]
     created = datetime.fromisoformat(event["created_at"])
@@ -314,9 +319,9 @@ class Archive:
         """
         from sqlalchemy import inspect, select
 
-        from .._core.database import transaction
-        from . import schema
-        from .sql_archive import source_entry
+        from ..._core.database import transaction
+        from .. import schema
+        from ..storage.sql.archive import source_entry
 
         stream = uuid_text(stream)
         if not 1 <= limit <= MAX_ARCHIVE_RECORDS:
@@ -441,7 +446,7 @@ class Archive:
         if native:
             storage.restore_rows([_native_row(entry) for entry in entries])
             return len(entries)
-        from .events import Ref
+        from ..events import Ref
 
         for entry in entries:
             row = read_event(entry["event"])

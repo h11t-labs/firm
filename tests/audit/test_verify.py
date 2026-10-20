@@ -657,7 +657,7 @@ def test_anchor_is_read_after_snapshot_opens(db_url: str, tmp_path, monkeypatch)
     audit = _make(db_url)
     anchor = tmp_path / "anchor.log"
     order: list[str] = []
-    from firm.audit import storage as storage_mod
+    from firm.audit.storage.sql import store as storage_mod
 
     original_snapshot = storage_mod.snapshot_transaction
     original_read_anchor = verify_mod._read_anchor

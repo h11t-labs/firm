@@ -1,172 +1,30 @@
-"""The storage seam under the tamper-evidence algorithms.
-
-Sealing, verification and retention decide *what* to read and write; a storage decides *how*.
-:class:`SqlStorage` persists the audit tables, including prepared writes and maintenance records;
-the S3 backend implements
-the same operations on objects. The algorithms only ever talk to a *view*: one consistent read or
-one exclusive write scope, handed out by the storage's context managers.
-
-A view's methods are operations, not statements: "the highest seal coverage", "settled rows after
-this id", "advance the floor to this id". Each storage keeps its own concurrency story behind them
-(SQL: snapshot/claim transactions and row locks; S3: an exclusive maintenance lease).
-"""
+"""SQL persistence and transactional maintenance scopes for AuditLog."""
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Connection, delete, func, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from .._core.database import create_engine_for, dispose_engine, snapshot_transaction, transaction
-from .._core.dialects import get_dialect
-from .._core.dialects.base import inserted_count
-from . import events, schema
-from .object_store import ObjectConflict, Receipt
-from .prepared import PreparedEvent, decode_prepared
+from ...._core.database import create_engine_for, dispose_engine, snapshot_transaction, transaction
+from ...._core.dialects import get_dialect
+from ...._core.dialects.base import inserted_count
+from ... import events, schema
+from ...object_store import ObjectConflict, Receipt
+from ...prepared import PreparedEvent, decode_prepared
+from ..base import ACTIVATION_FROM_ID, STATUS_ID, SealConflict
 
 if TYPE_CHECKING:
-    from .verify import SealRecords
+    from ...verify import SealRecords
 
 _audits = schema.audit_events
 _seals = schema.seals
 _status = schema.verify_status
-
-#: The reserved ``from_id`` of the activation record (a real event id is positive).
-ACTIVATION_FROM_ID = -1
-#: The single verify-status row's primary key.
-STATUS_ID = 1
-
-
-class SealConflict(Exception):
-    """Another sealer already wrote a record at this coordinate (the portable race arbiter)."""
-
-
-class StorageBusy(RuntimeError):
-    """Another process holds the storage's maintenance lease (S3); SQL never raises it."""
-
-
-class StorageView(Protocol):
-    """Row, seal and archive operations inside one adapter-controlled consistency scope."""
-
-    def seal_records(self) -> SealRecords: ...
-
-    def iter_rows(self, low: int, high: int | None) -> Iterator[Any]: ...
-
-    def any_seal_record(self) -> bool: ...
-
-    def activation_exists(self) -> bool: ...
-
-    def lock_activation(self) -> bool: ...
-
-    def signer_mismatch(self, allowed: Sequence[str]) -> tuple[bool, str | None]: ...
-
-    def seal_hwm(self) -> int: ...
-
-    def max_unsigned_settled_id(self, cutoff: datetime) -> int: ...
-
-    def settled_rows_after(self, hwm: int, cutoff: datetime, limit: int) -> list[Any]: ...
-
-    def insert_seal(self, **values: Any) -> None: ...
-
-    def any_row(self) -> bool: ...
-
-    def any_row_between(self, low: int, high: int) -> bool: ...
-
-    def rows_at_or_below(self, floor: int, limit: int) -> list[int]: ...
-
-    def duplicate_entry_ids(self, limit: int) -> list[str]: ...
-
-    def has_expired(self, cutoff: datetime) -> bool: ...
-
-    def count_rows(self, *, after: int, before: datetime, through: int | None = None) -> int: ...
-
-    def rows_between(self, low: int, high: int) -> list[Any]: ...
-
-    def archive_policy(self, *, schema_present: bool | None = None) -> Any: ...
-
-    def verified_ids(
-        self, stream: str, rows: Sequence[Any], *, span: tuple[int, int] | None = None
-    ) -> set[int]: ...
-
-    def set_archive_policy(self, stream: str, destination: str) -> None: ...
-
-    def pending_archive_batch(self) -> tuple[str, str | None] | None: ...
-
-    def unreserved_rows(self, limit: int) -> list[Any]: ...
-
-    def archive_entry(self, stream: str, row: Any) -> dict[str, Any]: ...
-
-    def reserve_archive_batch(
-        self, batch_id: str, body: str, members: Sequence[dict[str, Any]]
-    ) -> None: ...
-
-    def expired_batch(self, cutoff: datetime, offset: int, limit: int) -> list[Any]: ...
-
-    def delete_rows(self, ids: Sequence[int], *, archive_tables: bool) -> None: ...
-
-    def advance_floor(
-        self, floor: dict[str, Any], *, through: int, archive_tables: bool
-    ) -> int: ...
-
-    def status_prior(self) -> Any: ...
-
-
-class Storage(Protocol):
-    """Persistence required by AuditLog; keys and audit policy stay above this seam.
-
-    record stores fully formed values, optionally in a caller transaction; write retries a
-    frozen event. history/get return decoded public events. Maintenance scopes expose the
-    existing row/seal/archive view operations, with consistency enforced by the adapter.
-    AuditLog closes its adapter; adapters must preserve caller-owned engines and SDK clients.
-    """
-
-    @property
-    def requires_entry_id(self) -> bool: ...
-
-    @property
-    def stream(self) -> str | None: ...
-
-    def record(
-        self,
-        values: dict[str, Any],
-        *,
-        conn: Connection | None,
-        grace: float,
-    ) -> Receipt | None: ...
-
-    def write(self, prepared: PreparedEvent, *, grace: float) -> int | Receipt: ...
-
-    def get(self, locator: int | Receipt | str) -> dict[str, Any] | None: ...
-
-    def history(
-        self,
-        wanted: dict[str, str],
-        since: datetime | None,
-        limit: int,
-    ) -> list[dict[str, Any]]: ...
-
-    def import_provenance(self, event_id: int) -> dict[str, Any] | None: ...
-
-    def snapshot(self, *, write: bool = False) -> AbstractContextManager[StorageView]: ...
-
-    def claim(self) -> AbstractContextManager[StorageView]: ...
-
-    def connect(self) -> AbstractContextManager[StorageView]: ...
-
-    def prior_sealing_observed(self) -> bool: ...
-
-    def upsert_status(self, values: dict[str, Any]) -> None: ...
-
-    def acknowledge_archive_batch(self, batch_id: str, receipt: str) -> None: ...
-
-    def archive_status(self) -> dict[str, int]: ...
-
-    def close(self) -> None: ...
 
 
 class SqlView:
@@ -180,14 +38,14 @@ class SqlView:
     # -- seal records and rows ------------------------------------------------------------------
 
     def seal_records(self) -> SealRecords:
-        from .verify import _sql_seal_records
+        from .projections import seal_records
 
-        return _sql_seal_records(self.conn)
+        return seal_records(self.conn)
 
     def iter_rows(self, low: int, high: int | None) -> Iterator[Any]:
-        from .verify import _sql_iter_rows
+        from .projections import iter_rows
 
-        return _sql_iter_rows(self.conn, low, high)
+        return iter_rows(self.conn, low, high)
 
     def any_seal_record(self) -> bool:
         return self.conn.execute(select(func.count()).select_from(_seals)).scalar_one() > 0
@@ -313,14 +171,14 @@ class SqlView:
     # -- archive-before-prune policy --------------------------------------------------------------
 
     def archive_policy(self, *, schema_present: bool | None = None) -> Any:
-        from .sql_archive import lock_policy
+        from .archive import lock_policy
 
         return lock_policy(self.conn, schema_present=schema_present)
 
     def verified_ids(
         self, stream: str, rows: Sequence[Any], *, span: tuple[int, int] | None = None
     ) -> set[int]:
-        from .sql_archive import verified_ids
+        from .archive import verified_ids
 
         return verified_ids(self.conn, stream, rows, span=span)
 
@@ -362,7 +220,7 @@ class SqlView:
         )
 
     def archive_entry(self, stream: str, row: Any) -> dict[str, Any]:
-        from .sql_archive import source_entry
+        from .archive import source_entry
 
         return source_entry(self.conn, stream, row)
 
@@ -472,7 +330,7 @@ class SqlStorage:
         """Idempotently insert a prepared event under its unique entry id, checking its bytes."""
         import json
 
-        from .sql_archive import import_provenance
+        from .archive import import_provenance
 
         values = decode_prepared(prepared)
         provenance = values.pop("provenance", None)
@@ -523,7 +381,7 @@ class SqlStorage:
             return [events._row_to_dict(row) for row in conn.execute(stmt)]
 
     def import_provenance(self, event_id: int) -> dict[str, Any] | None:
-        from .sql_archive import import_provenance
+        from .archive import import_provenance
 
         with transaction(self.engine) as conn:
             return import_provenance(conn, event_id)

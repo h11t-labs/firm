@@ -26,6 +26,39 @@ wrapper that hides concrete adapter attributes. Storage-specific transaction, co
 crash-recovery behaviour still needs its own adapter tests. Schema tables remain SQL's supported
 read surface; the CLI and dashboard select storage without selecting another audit class.
 
+## Source organization
+
+The source follows the storage seam:
+
+```text
+firm/audit/
+  log.py, events.py, prepared.py        shared event preparation and public AuditLog
+  integrity.py, sealing.py, verify.py   shared signing and verification policy
+  retention.py                         shared pruning policy
+  storage/
+    base.py                            Storage and StorageView contracts
+    sql/
+      store.py                         SQL persistence and transaction scopes
+      projections.py                   bounded SQL verification reads
+      archive.py                       SQL archive ledger and restore
+    s3/
+      store.py                         S3 objects, indexes and maintenance leases
+      queries.py                       S3 dashboard reads
+      outbox.py                        optional transactional SQL-to-S3 delivery
+  archive/
+    store.py                           verified batch publication and archive reads
+    archiver.py                        archive-before-prune for either backend
+  object_store.py, event_format.py      shared object client and wire format
+  schema.py, queries.py, migrations/    stable SQL schema and read surfaces
+```
+
+`from firm.audit import AuditLog, SqlStorage, S3Storage` remains the public entry point.
+Archival policy lives in `firm.audit.archive.Archiver`; SQL ledger details stay with the SQL
+backend. The documented `s3_queries`, `s3_outbox` and `sql_archive` module paths forward to
+these implementations for compatibility. `firm.audit.s3.S3AuditLog` also remains a thin
+constructor over `AuditLog` and `S3Storage`. New storage adapters belong under `storage/`;
+they reuse the event, integrity, maintenance and archival policy above that seam.
+
 ## Schema
 
 The event table, `firm_audit_events`:

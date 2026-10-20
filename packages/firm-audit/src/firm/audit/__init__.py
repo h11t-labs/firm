@@ -17,8 +17,8 @@ from __future__ import annotations
 from .events import Ref
 from .log import AuditLog, record
 from .prepared import PreparedEvent, UnknownEventOutcome
-from .s3_store import S3Storage
 from .storage import SqlStorage, Storage
+from .storage.s3 import S3Storage
 from .verify import IntegrityAlert
 
 __version__ = "1.0.0"

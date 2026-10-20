@@ -168,8 +168,8 @@ class AuditLog:
             )
 
             if outbox_engine is not None:
-                from .s3_outbox import OutboxLoop
-                from .s3_outbox import create_outbox as create_outbox_table
+                from .storage.s3.outbox import OutboxLoop
+                from .storage.s3.outbox import create_outbox as create_outbox_table
 
                 if create_outbox:
                     create_outbox_table(outbox_engine)
@@ -267,7 +267,7 @@ class AuditLog:
 
     def flush_outbox(self, engine: Engine, *, limit: int = 1000) -> int:
         """Publish committed events staged for this storage's transactional outbox."""
-        from .s3_outbox import flush
+        from .storage.s3.outbox import flush
 
         return flush(engine, self, limit=limit)
 

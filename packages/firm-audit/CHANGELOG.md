@@ -12,6 +12,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
   `S3Storage` adapters. Event preparation and signing, sealing, verification, retention and
   background loops belong to one audit log. Existing SQL construction remains supported;
   `S3AuditLog` is a compatibility constructor with no separate audit logic.
+- Storage implementations live under `firm.audit.storage.sql` / `firm.audit.storage.s3`;
+  shared archive policy lives under `firm.audit.archive`. Existing documented imports remain
+  available through compatibility modules.
 - `S3Storage` (`firm-audit[s3]`) stores events in S3 for deployments without a database or PVC.
   It supports the same `record()`,
   `history()` (every filter, exact `since`), sequential ids, row MACs, sealing, anchors,

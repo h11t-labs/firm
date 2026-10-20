@@ -11,8 +11,8 @@ from typing import Any
 from .log import AuditLog
 from .object_store import ObjectStore
 from .prepared import PreparedEvent, UnknownEventOutcome
-from .s3_store import S3Storage
 from .storage import StorageBusy
+from .storage.s3 import S3Storage
 
 __all__ = ["PreparedEvent", "S3AuditLog", "S3Storage", "StorageBusy", "UnknownEventOutcome"]
 

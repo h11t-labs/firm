@@ -35,7 +35,7 @@ def output(value: Any) -> None:
 @click.pass_context
 def s3(ctx: Any, stream: str, **config: Any) -> None:
     from .log import AuditLog
-    from .s3_store import S3Storage
+    from .storage.s3 import S3Storage
 
     ctx.obj = AuditLog(storage=S3Storage(stream=stream, **config))
     ctx.call_on_close(ctx.obj.close)
@@ -214,8 +214,8 @@ def export_sql(
 def run_sql(
     storage: Any, database_url: str, stream: str, batch_size: int, enable_prune_guard: bool
 ) -> None:
+    from .archive import SQLArchiver
     from .log import AuditLog
-    from .sql_archive import SQLArchiver
 
     with AuditLog(database_url, create_schema=False) as audit:
         worker = SQLArchiver(audit, storage, stream=stream)
@@ -244,9 +244,9 @@ def run_s3(
     batch_size: int,
     enable_prune_guard: bool,
 ) -> None:
+    from .archive import Archiver
     from .log import AuditLog
-    from .s3_store import S3Storage
-    from .sql_archive import Archiver
+    from .storage.s3 import S3Storage
 
     with AuditLog(
         storage=S3Storage(
@@ -282,7 +282,7 @@ def export_s3(
     continuation: str | None,
 ) -> None:
     from .log import AuditLog
-    from .s3_store import S3Storage
+    from .storage.s3 import S3Storage
 
     # Reuse the configured endpoint/client so compatible providers work on both sides.
     with AuditLog(
@@ -342,7 +342,7 @@ def read_many(storage: Any, manifests: tuple[str, ...], max_events: int) -> None
 @click.pass_obj
 def restore_sql(storage: Any, manifests: tuple[str, ...], target_url: str) -> None:
     from .log import AuditLog
-    from .sql_archive import restore_sql as restore
+    from .storage.sql.archive import restore_sql as restore
 
     with AuditLog(target_url) as target:
         output({"restored": restore(storage, list(manifests), target)})
@@ -360,7 +360,7 @@ def restore_s3(
     storage: Any, manifest: str, target_bucket: str, target_prefix: str, stream: str
 ) -> None:
     from .log import AuditLog
-    from .s3_store import S3Storage
+    from .storage.s3 import S3Storage
 
     with AuditLog(
         storage=S3Storage(

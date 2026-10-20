@@ -39,21 +39,21 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from .._core.clock import now_utc
-from .event_format import canonical, uuid_text
-from .integrity import canonical_created_at
-from .object_store import ObjectConflict, ObjectStore, Receipt, digest, error_code
-from .prepared import (
+from ...._core.clock import now_utc
+from ...event_format import canonical, uuid_text
+from ...integrity import canonical_created_at
+from ...object_store import ObjectConflict, ObjectStore, Receipt, digest, error_code
+from ...prepared import (
     EVENT_FIELDS,
     PreparedEvent,
     UnknownEventOutcome,
     decode_prepared,
     freeze_values,
 )
-from .storage import ACTIVATION_FROM_ID, SealConflict, StorageBusy
+from .. import ACTIVATION_FROM_ID, SealConflict, StorageBusy
 
 if TYPE_CHECKING:
-    from .verify import SealRecords
+    from ...verify import SealRecords
 
 #: Signed scalar columns, in table order (``data``/``changes``/``context`` are stored JSON text).
 ROW_FIELDS = EVENT_FIELDS
@@ -289,10 +289,10 @@ def decode_row(body: bytes) -> dict[str, Any] | None:
 
 
 def projection(key_id: int, key_entry: str, body: bytes | None) -> SimpleNamespace:
-    """The bounded row projection verification reads (mirrors ``verify._sql_iter_rows``):
+    """The bounded row projection verification reads, matching the SQL projection:
     strings cut one past their column limit, ``created_at`` as text, and ``oversized`` set for
     anything a well-formed row could not hold — which classifies it as tampered."""
-    from .verify import _MAX_JSON_CHARS, _MAX_SCALAR_CHARS
+    from ...verify import _MAX_JSON_CHARS, _MAX_SCALAR_CHARS
 
     limits = dict.fromkeys(ROW_FIELDS, _MAX_SCALAR_CHARS)
     limits.update(data=_MAX_JSON_CHARS, changes=_MAX_JSON_CHARS, context=_MAX_JSON_CHARS)
@@ -317,7 +317,7 @@ def projection(key_id: int, key_entry: str, body: bytes | None) -> SimpleNamespa
 
 def row_dict(row: dict[str, Any]) -> dict[str, Any]:
     """An event as ``history()`` returns it: the SQL ``_row_to_dict`` shape."""
-    from .serialization import load_json
+    from ...serialization import load_json
 
     created = datetime.fromisoformat(row["created_at"])
     return {
@@ -433,7 +433,7 @@ class S3View:
         return rows
 
     def seal_records(self) -> SealRecords:
-        from .verify import _MAX_SEAL_RECORDS, SealRecords, _parse_seal_record
+        from ...verify import _MAX_SEAL_RECORDS, SealRecords, _parse_seal_record
 
         def text(value: Any, chars: int) -> str | None:
             return None if value is None else str(value)[: chars + 1]
@@ -738,7 +738,7 @@ class S3View:
         return rows
 
     def archive_entry(self, stream: str, row: Any) -> dict[str, Any]:
-        from .archive import row_entry
+        from ...archive import row_entry
 
         return row_entry("s3", stream, row if isinstance(row, dict) else vars(row))
 
@@ -763,8 +763,8 @@ class S3View:
     ) -> set[int]:
         """Ids among ``rows`` whose exact content sits in an acknowledged batch (keys only,
         plus recomputing each row's fingerprint, as the SQL guard does)."""
-        from .archive import row_entry
-        from .sql_archive import fingerprint
+        from ...archive import row_entry
+        from ...archive.store import fingerprint
 
         if not rows:
             return set()
@@ -1225,7 +1225,7 @@ class S3Storage:
         """Persist an already signed event, or stage it in the caller's SQL transaction."""
         prepared = freeze_values(values)
         if conn is not None:
-            from .s3_outbox import stage
+            from .outbox import stage
 
             stage(conn, self.stream, prepared.body)
             return None

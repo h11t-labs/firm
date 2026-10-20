@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from firm._core.clock import now_utc
 from firm.audit import queries as audit_queries
-from firm.audit import s3_queries
+from firm.audit.storage.s3 import queries as s3_queries
 from firm.cache import queries as cache_queries
 from firm.channel import queries as channel_queries
 from firm.queue import queries as queue_queries

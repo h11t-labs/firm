@@ -133,7 +133,7 @@ def test_conflicting_storage_configuration_fails_before_adoption(storage):
 
 
 def test_failing_outbox_initialization_closes_storage(monkeypatch):
-    from firm.audit import s3_outbox
+    from firm.audit.storage.s3 import outbox as s3_outbox
 
     def unavailable(*args, **kwargs):
         raise RuntimeError("outbox unavailable")
