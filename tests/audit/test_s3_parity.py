@@ -29,6 +29,19 @@ OLD = timedelta(hours=3)
 FORGED = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
 
 
+@pytest.fixture(autouse=True)
+def policy_clock(monkeypatch):
+    """Compare both backends at the same policy instant, including diagnostic ages.
+
+    Setup and database I/O take different wall time; that must not make otherwise identical
+    findings differ by a second. Storage leases retain their real, advancing clock.
+    """
+    moment = now_utc()
+    monkeypatch.setattr(f"{__name__}.now_utc", lambda: moment)
+    for module in ("events", "sealing", "verify", "retention"):
+        monkeypatch.setattr(f"firm.audit.{module}.now_utc", lambda: moment)
+
+
 @contextmanager
 def written_at(delta: timedelta):
     """Record events (on both backends) as if ``delta`` ago."""
