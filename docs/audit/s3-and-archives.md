@@ -341,7 +341,7 @@ codes. Directory buckets (Express One Zone) are not supported. See AWS's
 [conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
 and [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
 documentation for these capabilities; verify any other endpoint by testing, not by its URL.
-CI runs the live tests against MinIO.
+CI runs the live tests against RustFS.
 
 Opt-in tests use `FIRM_TEST_S3_BUCKET` and optionally `FIRM_TEST_S3_ENDPOINT`, SDK credentials,
 and `FIRM_TEST_PG_URL`/`FIRM_TEST_MYSQL_URL` (setup in

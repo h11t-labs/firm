@@ -24,7 +24,7 @@ uv run pre-commit run --all-files            # ruff + ty + llms-full + hygiene
 
 Before finishing any change, run the suite + `ruff check` + `ty check`. Live PG/MySQL tests run
 when `FIRM_TEST_PG_URL` / `FIRM_TEST_MYSQL_URL` are set; live S3 tests when `FIRM_TEST_S3_BUCKET`
-is (MinIO setup: `docs/testing-and-contributing.md`).
+is (RustFS setup: `docs/testing-and-contributing.md`).
 
 ## Layout
 

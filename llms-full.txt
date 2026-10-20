@@ -4571,7 +4571,7 @@ codes. Directory buckets (Express One Zone) are not supported. See AWS's
 [conditional writes](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)
 and [ListObjectsV2](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html)
 documentation for these capabilities; verify any other endpoint by testing, not by its URL.
-CI runs the live tests against MinIO.
+CI runs the live tests against RustFS.
 
 Opt-in tests use `FIRM_TEST_S3_BUCKET` and optionally `FIRM_TEST_S3_ENDPOINT`, SDK credentials,
 and `FIRM_TEST_PG_URL`/`FIRM_TEST_MYSQL_URL` (setup in
@@ -5963,38 +5963,53 @@ Notes:
 - **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
   render correctly for Postgres/MySQL with no live database.
 
-## Running against S3 (MinIO)
+## Running against S3 (RustFS)
 
 The S3 tests run against an in-memory fake by default. `tests/audit/test_s3_integration.py` adds
-real round-trips (conditional writes, versions, pagination, export, restore) and skips unless
-`FIRM_TEST_S3_BUCKET` is set. CI runs it against MinIO; to do the same locally:
+real round-trips (concurrent writes, retries, sealing, verification, export, restore, and process
+recovery) and skips unless `FIRM_TEST_S3_BUCKET` is set. CI runs it against
+[RustFS](https://docs.rustfs.com/en/installation/container/docker); to do the same locally:
 
 ```bash
-# the image CI uses (minio/minio is no longer published on Docker Hub)
-docker run -d --name bb_minio -e MINIO_ROOT_USER=firm -e MINIO_ROOT_PASSWORD=firm-test-secret \
-  -p 9000:9000 ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z server /data
-docker exec bb_minio mc ready local    # waits until the server accepts requests
+# The same official image and readiness endpoint as CI; credentials are for this test server.
+docker run -d --rm --name bb_rustfs \
+  -e RUSTFS_ACCESS_KEY=firm -e RUSTFS_SECRET_KEY=firm-test-secret \
+  -e RUSTFS_VOLUMES=/data -e RUSTFS_CONSOLE_ENABLE=false \
+  -p 127.0.0.1:9000:9000 \
+  rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 \
+  --max-time 2 --retry-max-time 60 http://localhost:9000/health/ready
 
-# the library never creates buckets, and receipts carry version IDs only on a versioned one
-docker exec bb_minio mc alias set local http://localhost:9000 firm firm-test-secret
-docker exec bb_minio mc mb local/firm-test
-docker exec bb_minio mc version enable local/firm-test
-
+export FIRM_TEST_S3_REQUIRED=1
 export FIRM_TEST_S3_BUCKET=firm-test
 export FIRM_TEST_S3_ENDPOINT=http://localhost:9000
 export AWS_ACCESS_KEY_ID=firm AWS_SECRET_ACCESS_KEY=firm-test-secret AWS_REGION=us-east-1
 
-uv run pytest tests/audit/test_s3_integration.py -rs   # -rs reports a skip if the env is off
+# The library never creates buckets; enable versioning so receipts can carry version IDs.
+uv run python - <<'PYTHON'
+import os
+
+import boto3
+
+s3 = boto3.client("s3", endpoint_url=os.environ["FIRM_TEST_S3_ENDPOINT"])
+bucket = os.environ["FIRM_TEST_S3_BUCKET"]
+s3.create_bucket(Bucket=bucket)
+s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+PYTHON
+
+uv run pytest tests/audit/test_s3_integration.py -rs
+docker stop bb_rustfs
 ```
 
 Notes:
 
 - The tests write under a random prefix and delete only their own objects and versions, but use a
   dedicated **test** bucket anyway.
-- Any other S3-compatible endpoint works the same way. It must reject a second
-  `If-None-Match: *` PUT to an existing key; that is the property audit immutability rests on.
-- The SQL side of these tests also runs against Postgres/MySQL when `FIRM_TEST_PG_URL` /
-  `FIRM_TEST_MYSQL_URL` are set.
+- `FIRM_TEST_S3_REQUIRED=1` makes a missing bucket configuration fail instead of silently skipping
+  the live tests, both locally and in CI.
+- Other S3-compatible endpoints must support conditional creation (`If-None-Match: *`),
+  compare-and-swap (`If-Match`), and lexicographic listing with `StartAfter`. See
+  [S3 & archives](audit/s3-and-archives.md) for the full provider contract.
 
 ## Upstream test parity
 

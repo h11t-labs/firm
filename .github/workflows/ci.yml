@@ -1,6 +1,6 @@
 # Full CI: lint + types, the test suite on SQLite across supported Pythons, the same suite
 # against live PostgreSQL and MySQL (the conftests pick up FIRM_TEST_*_URL and run every
-# database-touching test against each backend), and the opt-in S3 tests against live MinIO.
+# database-touching test against each backend), and the opt-in S3 tests against live RustFS.
 name: CI
 
 on:
@@ -106,18 +106,18 @@ jobs:
   test-s3:
     runs-on: ubuntu-latest
     services:
-      minio:
-        # minio/minio was removed from Docker Hub (Sept 2026) and quay.io refuses anonymous
-        # pulls, so this is a from-source build of the last community release, pinned by digest.
-        image: ghcr.io/coollabsio/minio:RELEASE.2025-10-15T17-29-55Z@sha256:69b55a1c1c5dc285ce04db96689f5b2102317fc77a50680a1874ca6efd1c87f9
-        command: server /data
+      rustfs:
+        # Pin the official multi-platform image; the entrypoint uses RUSTFS_VOLUMES.
+        image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
         env:
-          MINIO_ROOT_USER: firm
-          MINIO_ROOT_PASSWORD: firm-test-secret
+          RUSTFS_ACCESS_KEY: firm
+          RUSTFS_SECRET_KEY: firm-test-secret
+          RUSTFS_VOLUMES: /data
+          RUSTFS_CONSOLE_ENABLE: "false"
         ports:
           - 9000:9000
         options: >-
-          --health-cmd "mc ready local"
+          --health-cmd "curl --fail --silent http://localhost:9000/health/ready"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
@@ -148,5 +148,5 @@ jobs:
           s3.create_bucket(Bucket=bucket)
           s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
           EOF
-      - name: Run live S3 tests (MinIO)
+      - name: Run live S3 tests (RustFS)
         run: uv run pytest tests/audit/test_s3_integration.py -rs
