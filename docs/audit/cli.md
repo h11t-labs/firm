@@ -1,7 +1,9 @@
 # CLI
 
-The `firm-audit` command operates an audit database. Pass the URL with `--database-url` or the
-`FIRM_AUDIT_DATABASE_URL` env var.
+The `firm-audit` command operates SQL or S3 audit storage and optional archives. The SQL
+commands below take `--database-url` or `FIRM_AUDIT_DATABASE_URL`. For S3, use
+`firm-audit s3 --bucket BUCKET --stream STREAM_UUID ...`; for archival, use
+`firm-audit archive --bucket ARCHIVE_BUCKET ...`. See [S3 and archive commands](s3-and-archives.md#cli-and-dashboard).
 
 ```bash
 firm-audit --help

@@ -260,8 +260,11 @@ archive.close()
 Both restores require an empty target. `restore_sql` into SQL and `archive.restore_s3(receipts,
 target_s3_log)` into S3 keep original ids, timestamps and row signatures when the archive comes
 from the same kind of storage (and, for S3, the same stream), so rows still verify under the
-original key. Anything else gets fresh ids, is signed by the target, and keeps its original
-identity as provenance (`import_provenance(conn, id)` in SQL, `log.import_provenance(id)` on S3).
+original key. A cross-source or cross-stream restore into S3 gets fresh ids, uses the target's
+configured row key when signing is enabled, and retains the source identity as provenance.
+A restore from S3 into SQL currently gets fresh SQL ids and preserves provenance but does **not**
+re-sign the imported rows; configuring a key on the SQL target does not change this restore path.
+Read provenance through `import_provenance(conn, id)` in SQL or `log.import_provenance(id)` on S3.
 Seals, floors, verify status and anchors belong to the original log and are not archived; keep
 a separate backup when that evidence must be recoverable.
 
@@ -273,7 +276,9 @@ for verified archival. Same-account copies are not independent backups.
 ## Archive-before-prune
 
 `Archiver` continuously archives an `AuditLog` with either storage and makes retention wait until
-each expired row sits in a verified archive batch. (`SQLArchiver` is the same class.)
+each expired row sits in a verified archive batch. (`SQLArchiver` is the same class.) The
+archiver itself never deletes events and archives all unreserved events, including recent ones;
+`max_age` controls the separate retention step.
 
 ```python
 from firm.audit.archive import Archive
@@ -293,6 +298,36 @@ with AuditLog(
     pruned_count = log.retention.run_once()
     archive.close()
 ```
+
+One `run_once()` does the following:
+
+1. Under the source's transaction or S3 lease, resume a pending batch or select up to
+   `batch_size` unreserved events (default 100, maximum 1,000). Freeze their exact payloads,
+   identities and row signatures, and persist batch membership with content fingerprints.
+2. Release that source scope and publish `input.json`, then `data.jsonl.gz`, then
+   `manifest.json` under one batch UUID. Verify stored payload hashes before completing the
+   manifest. Retrying a batch uses the same frozen input and conditional object writes.
+3. Read the completed batch back and compare it with the reserved input. Only then acknowledge
+   the batch in the source's ledger. A crash before acknowledgement leaves a pending batch
+   that a later run resumes; it does not make those events prunable.
+4. A separate retention run checks age, exact content fingerprints and acknowledged membership.
+   With signing enabled it also applies the usual seal verification and floor rules.
+
+Schedule `run_once()` yourself, for example with a Kubernetes CronJob or a worker loop. It
+returns `None` when there is no work. There is no automatic background archiver on `AuditLog`:
+`background_retention` starts only pruning, and `background_sealing` starts only sealing.
+The CLI commands `archive run-sql` and `archive run-s3` each process one batch per invocation;
+size the schedule or drain loop to exceed the event arrival rate. `status()` reports current
+source events, unarchived events and pending batches.
+
+Archival verification here means checksums, envelope structure and comparison with the source
+batch. It preserves row MACs but does **not** authenticate them with signing keys. Use the audit
+verifier on a restored log to validate row MACs, with the required original keys. Seals and
+anchors are not part of an event archive.
+
+The pruning guard consults the source ledger; it does not download every archived batch again
+before deletion. Protect and retain acknowledged archive objects separately: deleting an archive
+later does not revoke its recorded acknowledgement.
 
 For a SQL log pass `stream=`, and upgrade to audit migration `0003` first (auto-create includes
 it). **Upgrade every pruning process and pause pruning during activation and backfill.**

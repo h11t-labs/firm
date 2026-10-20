@@ -1,6 +1,6 @@
 # Cookbook
 
-The firm library bundles four database-backed primitives — a job **queue**, a key/value **cache**, a publish/subscribe **channel**, and an append-only **audit** log — that share one storage engine and compose freely. This cookbook walks each primitive on its own, then shows recipes that combine them, web-framework integrations for FastAPI and Flask, and the day-two operations you need to run firm in production. Every example uses the real `firm.*` API and is copy-pasteable; swap the `sqlite://` URLs for `postgresql://…` in production.
+The firm library bundles a job **queue**, a key/value **cache**, a publish/subscribe **channel**, and an append-only **audit** log. All four support SQL storage and compose freely; audit also supports database-free S3 storage and optional archives. This cookbook walks each primitive on its own, then shows recipes that combine them, web-framework integrations for FastAPI and Flask, and the day-two operations you need to run firm in production. Every example uses the real `firm.*` API and is copy-pasteable; swap the `sqlite://` URLs for `postgresql://…` in production.
 
 - [Queue: define, enqueue, schedule, run](#queue)
 - [Cache: store, fetch, counters, coders, encryption, eviction](#cache)
@@ -306,7 +306,7 @@ with Channel(database_url="sqlite:///channel.db") as ch:
 
 ## Audit: record events, query history, retention {#audit}
 
-`firm.audit` is an append-only, database-backed audit log — not a Solid port (there's no `solid_audit`), but the same "you already have a database" idea. The headline feature is the **same-transaction guarantee**: record the event inside the same transaction as the business change, and it can never exist without it (or vice versa).
+`firm.audit` is an append-only audit log with SQL and optional S3 storage. The SQL examples below use the **same-transaction guarantee**: record the event inside the same transaction as the business change, and it can never exist without it (or vice versa). [Database-free audit and archives](#database-free-audit-and-archives) uses the same `AuditLog` with `S3Storage`; transactional S3 delivery uses an outbox and is asynchronous.
 
 ```python
 from firm.audit import AuditLog, record

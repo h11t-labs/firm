@@ -13,7 +13,10 @@ and two side tables are always part of the migrated schema, independent of key c
 
 These algorithms belong to `AuditLog`, independently of storage. They also run unchanged with
 [`S3Storage`](s3-and-archives.md#tamper-evidence-retention-and-verification): the same layers,
-keys, findings and retention, with S3 objects in place of the tables.
+keys, findings and retention, with S3 objects in place of the tables. The SQL table, transaction
+and constraint descriptions below refer to SQL storage. S3 uses conditional object writes, an
+id counter, a maintenance lease and recoverable prune intents as described on that page. For
+either backend, compromising source storage must not grant write access to the external anchor.
 
 ## Threat model
 

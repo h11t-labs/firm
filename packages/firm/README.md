@@ -13,7 +13,9 @@ component is also published independently, so you can install only what you need
 | Audit log       | [`firm-audit`](https://pypi.org/project/firm-audit/)     | —               |
 | Web dashboard   | [`firm-ui`](https://pypi.org/project/firm-ui/)           | Mission Control |
 
-Everything runs on SQLite, PostgreSQL, or MySQL via SQLAlchemy.
+All four modules support SQLite, PostgreSQL, or MySQL via SQLAlchemy. Audit additionally
+supports S3 primary storage and archives through `firm[audit-s3]` or `firm-audit[s3]`,
+without an audit database or persistent volume.
 
 ## Install
 

@@ -5,8 +5,10 @@
 firm has three ported modules — queue, cache, channel — plus `audit`, an original append-only
 audit log; install only what you need (`pip install "firm[queue]"`, `[cache]`, `[channel]`,
 `[audit]`). Jobs are plain functions decorated with `@bq.job`; the cache is a `Cache` object;
-pub/sub is a `Channel` object; the audit log is an `AuditLog` object. The database is the single
-source of truth. Start with the Cookbook and the API cheatsheet, which together cover the whole
+pub/sub is a `Channel` object; the audit log is an `AuditLog` object. SQL is the default source
+of truth. Audit also supports database-free S3 storage and archives (`firm-audit[s3]`) through
+the same `AuditLog`, with shared signing, sealing, verification and retention. Start with the
+Cookbook and the API cheatsheet, which together cover the whole
 surface with copy-pasteable examples. (Paths below are repo-relative; replace with the published
 docs URLs once the site is hosted.)
 
@@ -32,7 +34,9 @@ docs URLs once the site is hosted.)
 ## Audit (append-only event log)
 
 Not a Solid port — an original firm module. Record who did what, to what, in the same database
-(and optionally the same transaction) as the change. Subject/actor references are flexible: a
+(and optionally the same transaction) as the change, or use `AuditLog(storage=S3Storage(...))`
+without an audit database. Signing, sealing and verification are shared; verified archives
+support either storage. Subject/actor references are flexible: a
 domain object, a `("Type", id)` tuple, a bare `"label"` role string, or a `Ref(type, id, name)` —
 type and id are each optional.
 

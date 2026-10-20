@@ -13,7 +13,9 @@ database you already run — no Redis, no extra broker, no new infrastructure.
 > Inspired by the Rails Solid stack from 37signals.
 
 The four packages are **independent** — install only what you need — but share a design: your
-database is the single source of truth, accessed through SQLAlchemy with per-dialect locking.
+database is the default source of truth, accessed through SQLAlchemy with per-dialect locking.
+Audit can instead use S3 primary storage with the same `AuditLog`, and can archive either
+storage to S3 — see [S3 storage and archives](audit/s3-and-archives.md).
 
 ## Why database-backed?
 

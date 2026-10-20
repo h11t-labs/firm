@@ -24,7 +24,9 @@ database you already run — no Redis, no extra broker, no new infrastructure.
 > Inspired by the Rails Solid stack from 37signals.
 
 The four packages are **independent** — install only what you need — but share a design: your
-database is the single source of truth, accessed through SQLAlchemy with per-dialect locking.
+database is the default source of truth, accessed through SQLAlchemy with per-dialect locking.
+Audit can instead use S3 primary storage with the same `AuditLog`, and can archive either
+storage to S3 — see [S3 storage and archives](audit/s3-and-archives.md).
 
 ## Why database-backed?
 
@@ -194,7 +196,7 @@ ImportError: The postgres driver "psycopg" is not installed. Install the postgre
 
 # Cookbook
 
-The firm library bundles four database-backed primitives — a job **queue**, a key/value **cache**, a publish/subscribe **channel**, and an append-only **audit** log — that share one storage engine and compose freely. This cookbook walks each primitive on its own, then shows recipes that combine them, web-framework integrations for FastAPI and Flask, and the day-two operations you need to run firm in production. Every example uses the real `firm.*` API and is copy-pasteable; swap the `sqlite://` URLs for `postgresql://…` in production.
+The firm library bundles a job **queue**, a key/value **cache**, a publish/subscribe **channel**, and an append-only **audit** log. All four support SQL storage and compose freely; audit also supports database-free S3 storage and optional archives. This cookbook walks each primitive on its own, then shows recipes that combine them, web-framework integrations for FastAPI and Flask, and the day-two operations you need to run firm in production. Every example uses the real `firm.*` API and is copy-pasteable; swap the `sqlite://` URLs for `postgresql://…` in production.
 
 - [Queue: define, enqueue, schedule, run](#queue)
 - [Cache: store, fetch, counters, coders, encryption, eviction](#cache)
@@ -500,7 +502,7 @@ with Channel(database_url="sqlite:///channel.db") as ch:
 
 ## Audit: record events, query history, retention {#audit}
 
-`firm.audit` is an append-only, database-backed audit log — not a Solid port (there's no `solid_audit`), but the same "you already have a database" idea. The headline feature is the **same-transaction guarantee**: record the event inside the same transaction as the business change, and it can never exist without it (or vice versa).
+`firm.audit` is an append-only audit log with SQL and optional S3 storage. The SQL examples below use the **same-transaction guarantee**: record the event inside the same transaction as the business change, and it can never exist without it (or vice versa). [Database-free audit and archives](#database-free-audit-and-archives) uses the same `AuditLog` with `S3Storage`; transactional S3 delivery uses an outbox and is asynchronous.
 
 ```python
 from firm.audit import AuditLog, record
@@ -3081,9 +3083,11 @@ CLI / a cron.
 
 # firm-audit — overview
 
-An append-only, database-backed audit log for Python. Record who did what, when, and to what — in
-the same database (and, if you want, the same transaction) as the change itself — on SQLite,
-PostgreSQL, or MySQL/MariaDB.
+An append-only audit log for Python. Record who did what, when, and to what. Choose SQL
+(SQLite, PostgreSQL, or MySQL/MariaDB), optionally in the same transaction as the business change,
+or [S3 storage](s3-and-archives.md) without an audit database or persistent volume. Both use one
+`AuditLog` with shared signing, sealing, verification and retention. Optional archives work with
+either storage.
 
 firm-audit is **not a port of a Rails Solid gem** — there is no `solid_audit`. It's an original
 firm module that shares the same "you already have a database" thesis as `firm.cache` and
@@ -3102,7 +3106,7 @@ no longer atomic with the business write. See [Configuration](configuration.md).
 
 ## The model
 
-The core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
+With SQL storage, the core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
 it plus two side tables — see [Tamper-evidence](tamper-evidence.md)):
 
 | Column | Purpose |
@@ -3178,6 +3182,7 @@ and archive-before-prune for both storages. SQL remains the default.
 pip install firm-audit              # or: uv add firm-audit
 pip install "firm-audit[postgres]"     # psycopg, for PostgreSQL
 pip install "firm-audit[mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install "firm-audit[s3]"           # S3 primary storage or archives
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -3190,9 +3195,23 @@ from firm.audit import AuditLog
 audit = AuditLog(database_url="sqlite:///audit.db")
 ```
 
-By default `AuditLog(...)` creates the `firm_audit_events` table if it's missing
+With the default SQL storage, `AuditLog(...)` creates the `firm_audit_events` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and
 pass `create_schema=False` — see [Database backends](../database-backends.md#migrations).
+
+For a database-free deployment, supply S3 storage instead:
+
+```python
+from firm.audit import AuditLog, S3Storage
+
+audit = AuditLog(
+    storage=S3Storage("audit-events", stream="00000000-0000-0000-0000-000000000001")
+)
+```
+
+The bucket must exist and SDK credentials must be configured. Share the stream UUID across
+replicas. The same event and integrity methods apply; see [S3 & archives](s3-and-archives.md)
+for conditional-write requirements, retries and archive-before-prune.
 
 ## Record events
 
@@ -3254,14 +3273,17 @@ with engine.begin() as conn:
 # both commit together, or both roll back — there is no in-between state
 ```
 
-`AuditLog.record(..., conn=...)` does the same thing through the facade — pass `conn` to join an
-existing transaction, or omit it to let `AuditLog` open and commit its own (a separate,
-non-atomic write — see [Configuration](configuration.md#two-topologies)).
+With SQL storage, `AuditLog.record(..., conn=...)` does the same thing through the facade —
+pass `conn` to join an existing transaction, or omit it for a separate audit write. With S3
+storage, `conn=` stages the event in an SQL outbox in the caller's transaction; a relay publishes
+it to S3 after commit. Atomic staging does not mean immediate S3 visibility. See
+[Configuration](configuration.md#two-topologies) and [the S3 outbox](s3-and-archives.md#recording-inside-your-transaction).
 
 ## Clean up
 
-An `AuditLog` owns a connection pool (and, optionally, a background retention thread). Close it
-when you're done, or use it as a context manager:
+An `AuditLog` closes its storage and stops its background loops. Storage closes any engine,
+SDK client or worker pool it created; explicitly injected engines and SDK clients remain
+caller-owned. Close the log when you're done, or use it as a context manager:
 
 ```python
 with AuditLog(database_url="sqlite:///audit.db") as audit:
@@ -3294,6 +3316,10 @@ Next: **[Retention & querying](retention-and-querying.md)** and
 ================================================================================
 
 # Retention & querying
+
+The same `AuditLog` query and retention methods work with `SqlStorage` and `S3Storage`.
+SQL examples below use the existing `database_url` shorthand; see [S3 & archives](s3-and-archives.md)
+for S3 setup and its object indexes.
 
 ## Querying with `history()`
 
@@ -3389,8 +3415,10 @@ boundaries and only prunes what verifies**:
   and a later `firm-audit verify` still reports it as `TAMPERED`.
 - When an anchor is configured, retention appends the `FLOOR` line **before** committing the floor
   row and deletions and fsyncs the file. If either anchor sink fails, pruning is refused. The signed
-  floor row, event deletion, and retired covering-seal deletion then commit in one write
-  transaction; serialization/deadlock failures get a bounded retry.
+  floor row, event deletion, and retired covering-seal deletion then commit in one SQL write
+  transaction; serialization/deadlock failures get a bounded retry. S3 records a durable prune
+  intent under its maintenance lease, then finishes the floor, event and seal changes; the next
+  lease holder completes an interrupted intent.
 - A host missing any current or retired seal key needed by existing records refuses loudly and
   sets `last_refused_no_seal_key`; it never categorizes the evidence as prunable tampering.
 - The refusal repeats on every subsequent run until you preserve the database and investigate with
@@ -3398,6 +3426,19 @@ boundaries and only prunes what verifies**:
 
 The one cost of the guarantee is a read: pre-prune verification re-reads (keyset-paginated) every
 row it is about to delete.
+
+
+### Require archival before pruning
+
+`Archiver(log, archive).enable()` persists an archive-before-prune guard for either storage
+(SQL also needs an explicit `stream`). Retention then deletes only expired events whose exact
+content belongs to an acknowledged, verified archive batch. An unarchived event holds back its
+whole sealed range. `last_blocked_unarchived` counts expired events kept by this guard.
+
+Run the archiver separately on a schedule; configuring `max_age` or `background_retention`
+does not start archival. Manual `export_sql`/`export_s3` copies do not satisfy the guard's batch
+membership ledger. See [Archive-before-prune](s3-and-archives.md#archive-before-prune) for
+activation, recovery and scheduling.
 
 
 
@@ -3420,7 +3461,10 @@ and two side tables are always part of the migrated schema, independent of key c
 
 These algorithms belong to `AuditLog`, independently of storage. They also run unchanged with
 [`S3Storage`](s3-and-archives.md#tamper-evidence-retention-and-verification): the same layers,
-keys, findings and retention, with S3 objects in place of the tables.
+keys, findings and retention, with S3 objects in place of the tables. The SQL table, transaction
+and constraint descriptions below refer to SQL storage. S3 uses conditional object writes, an
+id counter, a maintenance lease and recoverable prune intents as described on that page. For
+either backend, compromising source storage must not grant write access to the external anchor.
 
 ## Threat model
 
@@ -4096,7 +4140,8 @@ Every `AuditLog(...)` option, with its default:
 AuditLog(
     database_url=None,              # SQLAlchemy URL (or pass engine=)
     engine=None,                    # a pre-built SQLAlchemy Engine, instead of database_url
-    create_schema=True,             # create firm_audit_events if missing
+    storage=None,                   # SqlStorage or S3Storage; instead of database_url/engine
+    create_schema=True,             # SQL shorthand only; explicit SqlStorage owns this option
     max_age=None,                   # prune events older than this many seconds; None = keep forever
     background_retention=False,     # run a retention loop on a timer
     retention_interval=3600.0,      # seconds between background retention runs
@@ -4116,13 +4161,18 @@ AuditLog(
     unsealed_tail_max_age=None,     # warn if the oldest unsealed row is older; None = derived
     on_error=None,                  # callback(exc) for background/anchor failures; None = stderr
     on_finding=None,                # callback(IntegrityAlert) on a tampered/warning verify run
+    outbox_engine=None,             # SQL engine for the optional background S3 outbox relay
+    outbox_interval=5.0,            # seconds between outbox delivery runs
+    create_outbox=True,             # create its outbox table when outbox_engine is supplied
 )
 ```
 
 | Option | Default | Notes |
 |---|---|---|
-| `database_url` / `engine` | — | Provide one. `engine` lets the audit log share a pool with your application — see [Two topologies](#two-topologies). |
-| `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
+| `database_url` / `engine` | — | SQL shorthand: provide one unless passing `storage`. `engine` shares your application's pool — see [Two topologies](#two-topologies). |
+| `storage` | `None` | Explicit `SqlStorage(...)` or `S3Storage(...)`; cannot be combined with `database_url` or `engine`. Signing and maintenance options stay on `AuditLog`. |
+| `create_schema` | `True` | SQL shorthand: set `False` for Alembic. When passing explicit storage, configure this on `SqlStorage` instead; `AuditLog(storage=..., create_schema=False)` is rejected. |
+| `outbox_engine` / `outbox_interval` / `create_outbox` | `None` / `5.0` / `True` | Optional background delivery of committed S3 outbox events from your application database. Injected engines remain caller-owned. See [S3 outbox](s3-and-archives.md#recording-inside-your-transaction). |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
 | `background_verification` / `verify_interval` / `verify_full_every` | `False` / `3600.0` / `24` | Opt-in in-process verify loop — see [Scheduling verification](tamper-evidence.md#scheduling-verification-run-it-continuously). |
@@ -4179,9 +4229,12 @@ verify status is undetectable.
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
 | `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 
-Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
+Call `audit.close()` (or use the `with` form) to stop background loops and close storage-owned
+resources. Injected SQL engines and SDK clients remain caller-owned.
 
 ## Two topologies
+
+These two topologies describe SQL storage. The S3 alternative is described below.
 
 **Shared database** — pass `engine=` pointing at your application's own engine (or the same
 `database_url`). By default `AuditLog.record(...)` writes durably in its own short transaction.
@@ -4197,9 +4250,9 @@ audit = AuditLog(engine=app_engine)          # same database as the rest of the 
 
 **Separate database** — point `database_url` at a dedicated audit database. Writes are durable
 but **not atomic** with the business change (they're different databases — no single transaction
-can span both). `record()` raises on failure; the caller decides what to do. A transactional
-outbox (atomic append into a local table, relayed to the remote audit database) would close this
-gap, but firm-audit doesn't build one — it's out of scope for now.
+can span both). `record()` raises on failure; the caller decides what to do. An SQL-to-SQL
+transactional outbox is not provided. The optional outbox below delivers to S3; it does not relay
+to a separate SQL audit database.
 
 ```python
 audit = AuditLog(database_url="postgresql://audit-host/audit_db")  # independent durable write
@@ -4223,8 +4276,11 @@ audit_b = AuditLog(engine=engine, create_schema=False)
 
 SQL remains the default. Install `firm-audit[s3]` and select
 `AuditLog(storage=S3Storage(...))` to keep the audit log in S3. Optional archives work with
-either storage. See [S3 & archives](s3-and-archives.md) for configuration,
-retry guarantees, CLI commands, and retention requirements.
+either storage. Configure bucket, stream, prefix, endpoint and lease options on `S3Storage`;
+configure integrity, retention and optional outbox relay on `AuditLog`. `record(conn=...)` stages
+an event atomically in an SQL outbox, and the relay publishes it afterwards. Direct S3 writes
+need no SQL database. See [S3 & archives](s3-and-archives.md) for configuration, retry guarantees,
+CLI commands and retention requirements.
 
 
 
@@ -4494,8 +4550,11 @@ archive.close()
 Both restores require an empty target. `restore_sql` into SQL and `archive.restore_s3(receipts,
 target_s3_log)` into S3 keep original ids, timestamps and row signatures when the archive comes
 from the same kind of storage (and, for S3, the same stream), so rows still verify under the
-original key. Anything else gets fresh ids, is signed by the target, and keeps its original
-identity as provenance (`import_provenance(conn, id)` in SQL, `log.import_provenance(id)` on S3).
+original key. A cross-source or cross-stream restore into S3 gets fresh ids, uses the target's
+configured row key when signing is enabled, and retains the source identity as provenance.
+A restore from S3 into SQL currently gets fresh SQL ids and preserves provenance but does **not**
+re-sign the imported rows; configuring a key on the SQL target does not change this restore path.
+Read provenance through `import_provenance(conn, id)` in SQL or `log.import_provenance(id)` on S3.
 Seals, floors, verify status and anchors belong to the original log and are not archived; keep
 a separate backup when that evidence must be recoverable.
 
@@ -4507,7 +4566,9 @@ for verified archival. Same-account copies are not independent backups.
 ## Archive-before-prune
 
 `Archiver` continuously archives an `AuditLog` with either storage and makes retention wait until
-each expired row sits in a verified archive batch. (`SQLArchiver` is the same class.)
+each expired row sits in a verified archive batch. (`SQLArchiver` is the same class.) The
+archiver itself never deletes events and archives all unreserved events, including recent ones;
+`max_age` controls the separate retention step.
 
 ```python
 from firm.audit.archive import Archive
@@ -4527,6 +4588,36 @@ with AuditLog(
     pruned_count = log.retention.run_once()
     archive.close()
 ```
+
+One `run_once()` does the following:
+
+1. Under the source's transaction or S3 lease, resume a pending batch or select up to
+   `batch_size` unreserved events (default 100, maximum 1,000). Freeze their exact payloads,
+   identities and row signatures, and persist batch membership with content fingerprints.
+2. Release that source scope and publish `input.json`, then `data.jsonl.gz`, then
+   `manifest.json` under one batch UUID. Verify stored payload hashes before completing the
+   manifest. Retrying a batch uses the same frozen input and conditional object writes.
+3. Read the completed batch back and compare it with the reserved input. Only then acknowledge
+   the batch in the source's ledger. A crash before acknowledgement leaves a pending batch
+   that a later run resumes; it does not make those events prunable.
+4. A separate retention run checks age, exact content fingerprints and acknowledged membership.
+   With signing enabled it also applies the usual seal verification and floor rules.
+
+Schedule `run_once()` yourself, for example with a Kubernetes CronJob or a worker loop. It
+returns `None` when there is no work. There is no automatic background archiver on `AuditLog`:
+`background_retention` starts only pruning, and `background_sealing` starts only sealing.
+The CLI commands `archive run-sql` and `archive run-s3` each process one batch per invocation;
+size the schedule or drain loop to exceed the event arrival rate. `status()` reports current
+source events, unarchived events and pending batches.
+
+Archival verification here means checksums, envelope structure and comparison with the source
+batch. It preserves row MACs but does **not** authenticate them with signing keys. Use the audit
+verifier on a restored log to validate row MACs, with the required original keys. Seals and
+anchors are not part of an event archive.
+
+The pruning guard consults the source ledger; it does not download every archived batch again
+before deletion. Protect and retain acknowledged archive objects separately: deleting an archive
+later does not revoke its recorded acknowledgement.
 
 For a SQL log pass `stream=`, and upgrade to audit migration `0003` first (auto-create includes
 it). **Upgrade every pruning process and pause pruning during activation and backfill.**
@@ -4612,8 +4703,10 @@ production IAM and Object Lock policies need deployment-specific validation.
 
 # CLI
 
-The `firm-audit` command operates an audit database. Pass the URL with `--database-url` or the
-`FIRM_AUDIT_DATABASE_URL` env var.
+The `firm-audit` command operates SQL or S3 audit storage and optional archives. The SQL
+commands below take `--database-url` or `FIRM_AUDIT_DATABASE_URL`. For S3, use
+`firm-audit s3 --bucket BUCKET --stream STREAM_UUID ...`; for archival, use
+`firm-audit archive --bucket ARCHIVE_BUCKET ...`. See [S3 and archive commands](s3-and-archives.md#cli-and-dashboard).
 
 ```bash
 firm-audit --help
@@ -5427,8 +5520,10 @@ read/maintenance functions — so skipping it costs nothing, and the rest of fir
 
 # Database backends
 
-Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick with the
-`database_url` you pass to `bq.configure(...)` or `Cache(...)`.
+All four modules support **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick with the
+`database_url` passed to the module, or supply an existing SQLAlchemy engine. Audit additionally
+supports [S3 storage and archives](audit/s3-and-archives.md), without an audit SQL database;
+the SQL driver, locking and migration guidance below applies to SQL-backed instances.
 
 ## Drivers
 
@@ -5901,7 +5996,7 @@ boto3.
 - `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
 - `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`; `batches(*, limit=25, continuation=None) -> tuple[list, str | None]` (unverified summaries, batch-ID order).
 - `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`; `Archive.export_s3(source, *, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
-- `Archive.restore_s3(receipts, target) -> int` and `firm.audit.storage.sql.archive.restore_sql(archive, receipts, target) -> int` require an empty target; same-storage archives keep ids and row signatures.
+- `Archive.restore_s3(receipts, target) -> int` and `firm.audit.storage.sql.archive.restore_sql(archive, receipts, target) -> int` require an empty target; native SQL archives and native S3 archives of the same stream keep ids and row signatures. Cross-source restores into S3 use its configured signing key; S3-to-SQL restores currently preserve provenance without re-signing imported rows.
 - `firm.audit.archive.Archiver(log, archive, *, stream=None)` for an `AuditLog` with either storage (SQL needs `stream`; S3 uses its configured stream); `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict` (`events`, `unarchived`, `pending_batches`). `SQLArchiver` is the same class.
 
 See [S3 & archives](audit/s3-and-archives.md) for guarantees, supported restore paths, and limits.
