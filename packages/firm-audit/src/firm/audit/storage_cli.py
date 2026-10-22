@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .._core.cli import require_click
-from .event_format import canonical
+from .event_format import canonical, uuid_text
 
 click = require_click("audit")
 
@@ -25,13 +25,27 @@ def storage_options(function: Any) -> Any:
     return function
 
 
+def _stream(_ctx: Any, _param: Any, value: str | None) -> str | None:
+    """Validate ``--stream`` before anything connects, so a typo is a usage error."""
+    if value is None:
+        return None
+    try:
+        return uuid_text(value)
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is not a UUID") from None
+
+
+def stream_option(**kwargs: Any) -> Any:
+    return click.option("--stream", required=True, callback=_stream, **kwargs)
+
+
 def output(value: Any) -> None:
     click.echo(json.dumps(value, default=str, ensure_ascii=True))
 
 
 @click.group(help="Database-free S3 audit operations. Existing bucket required.")
 @storage_options
-@click.option("--stream", required=True, envvar="FIRM_AUDIT_S3_STREAM")
+@stream_option(envvar="FIRM_AUDIT_S3_STREAM")
 @click.pass_context
 def s3(ctx: Any, stream: str, **config: Any) -> None:
     from .log import AuditLog
@@ -169,7 +183,7 @@ def archive(ctx: Any, **config: Any) -> None:
 
 @archive.command("export-sql", help="Copy a bounded SQL selection without changing retention.")
 @click.option("--database-url", required=True, envvar="FIRM_AUDIT_DATABASE_URL")
-@click.option("--stream", required=True)
+@stream_option()
 @click.option("--batch-id", required=True)
 @click.option("--limit", default=100, type=int)
 @click.option("--since", default=None)
@@ -203,7 +217,7 @@ def export_sql(
 
 @archive.command("run-sql", help="Publish one durable SQL batch, optionally activate prune guard.")
 @click.option("--database-url", required=True, envvar="FIRM_AUDIT_DATABASE_URL")
-@click.option("--stream", required=True)
+@stream_option()
 @click.option("--batch-size", default=100, type=int)
 @click.option(
     "--enable-prune-guard",
@@ -228,7 +242,7 @@ def run_sql(
 @archive.command("run-s3", help="Publish one durable batch of an S3 audit log's events.")
 @click.option("--source-bucket", required=True)
 @click.option("--source-prefix", default="firm-audit")
-@click.option("--stream", required=True)
+@stream_option()
 @click.option("--batch-size", default=100, type=int)
 @click.option(
     "--enable-prune-guard",
@@ -263,7 +277,7 @@ def run_s3(
 @archive.command("export-s3", help="Copy a bounded S3 selection by id; original events remain.")
 @click.option("--source-bucket", required=True)
 @click.option("--source-prefix", default="firm-audit")
-@click.option("--stream", required=True)
+@stream_option()
 @click.option("--batch-id", required=True)
 @click.option("--limit", default=100, type=int)
 @click.option("--since", default=None)
@@ -354,7 +368,7 @@ def restore_sql(storage: Any, manifests: tuple[str, ...], target_url: str) -> No
 @click.argument("manifest")
 @click.option("--target-bucket", required=True)
 @click.option("--target-prefix", default="firm-audit")
-@click.option("--stream", required=True)
+@stream_option()
 @click.pass_obj
 def restore_s3(
     storage: Any, manifest: str, target_bucket: str, target_prefix: str, stream: str

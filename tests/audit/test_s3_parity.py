@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from datetime import timedelta
+from enum import Enum
 from unittest.mock import patch
 from uuid import UUID
 
@@ -411,3 +412,38 @@ def test_an_s3_log_archives_under_its_own_stream():
     with pytest.raises(ValueError, match="another stream/destination"):
         Archiver(s3.log, other).enable()
     s3.log.close()
+
+
+def test_a_late_write_never_pulls_fresher_lower_ids_into_a_seal(db_url):
+    """A prepared event retried after ``grace`` lands at the highest id with an old timestamp.
+    Sealing stops at the first unsettled row instead of sealing around it."""
+    sides = _both(db_url, grace=60.0)
+    for side in sides:
+        with written_at(timedelta(seconds=30)):
+            side.log.record("fresh.1")
+            side.log.record("fresh.2")
+        side.log.write(side.log.prepare("late", created_at=now_utc() - timedelta(minutes=10)))
+    assert [side.log.sealer.run_once() for side in sides] == [0, 0]
+    assert _verdict(sides[1]) == _verdict(sides[0])
+    assert _verdict(sides[0])[0] != "tampered"
+    for side in sides:
+        side.log.grace = 10.0  # time passes: the fresh rows settle too
+    assert [side.log.sealer.run_once() for side in sides] == [3, 3]
+    assert _verdict(sides[1]) == _verdict(sides[0])
+    assert _verdict(sides[0])[0] == "ok"
+
+
+# Deliberately (str, Enum), not StrEnum: str() of a member is "Kind.PAID", not its value.
+class Kind(str, Enum):  # noqa: UP042
+    PAID = "invoice.paid"
+    REQUEST = "req-7"
+
+
+def test_history_filters_match_str_enum_members_as_recorded(db_url):
+    for side in _both(db_url):
+        side.log.record(Kind.PAID, subject=("Invoice", 1), correlation_id=Kind.REQUEST)
+        side.log.record("other", correlation_id="req-8")
+        assert [e["action"] for e in side.log.history(action=Kind.PAID)] == ["invoice.paid"]
+        assert [e["action"] for e in side.log.history(correlation_id=Kind.REQUEST)] == [
+            "invoice.paid"
+        ]

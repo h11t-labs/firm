@@ -87,3 +87,28 @@ def test_cli_copy_export_read_restore(object_client, audit, tmp_path, monkeypatc
     result = runner.invoke(main, [*base, "restore-sql", key, "--target-url", target])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["restored"] == 1
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["s3", "--bucket", "events", "--stream", "not-a-uuid", "history"],
+        [
+            "archive",
+            "--bucket",
+            "cold",
+            "export-s3",
+            "--source-bucket",
+            "events",
+            "--stream",
+            "not-a-uuid",
+            "--batch-id",
+            str(uuid4()),
+        ],
+    ],
+)
+def test_a_malformed_stream_is_a_usage_error(args):
+    result = CliRunner().invoke(main, args)
+    assert result.exit_code == 2
+    assert "'not-a-uuid' is not a UUID" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

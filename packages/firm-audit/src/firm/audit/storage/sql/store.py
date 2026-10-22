@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from itertools import takewhile
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import Connection, delete, func, or_, select, update
@@ -98,14 +99,13 @@ class SqlView:
         )
 
     def settled_rows_after(self, hwm: int, cutoff: datetime, limit: int) -> list[Any]:
-        return list(
-            self.conn.execute(
-                select(_audits.c.id, _audits.c.row_mac)
-                .where(_audits.c.id > hwm, _audits.c.created_at <= cutoff)
-                .order_by(_audits.c.id)
-                .limit(limit)
-            ).all()
-        )
+        rows = self.conn.execute(
+            select(_audits.c.id, _audits.c.row_mac, _audits.c.created_at)
+            .where(_audits.c.id > hwm)
+            .order_by(_audits.c.id)
+            .limit(limit)
+        ).all()
+        return list(takewhile(lambda row: row.created_at <= cutoff, rows))
 
     def insert_seal(self, **values: Any) -> None:
         try:

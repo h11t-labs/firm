@@ -57,6 +57,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Fixed
 
+- The sealer seals only a contiguous run of settled rows. A row created after the grace cutoff
+  now holds back the rows above it instead of being skipped, so a late write with an old
+  `created_at` (a retried prepared event, a delayed outbox relay) or a clock-skewed writer no
+  longer seals over fresher lower ids and produces a permanent false `TAMPERED`.
 - An interrupted anchored prune no longer wedges retention and verify into a permanent false
   `TAMPERED`. Retention appends its anchor `FLOOR` line before its database commit (the anchor
   is the hard gate), so a crash or serialization rollback in between left the anchor floor

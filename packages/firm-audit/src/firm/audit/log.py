@@ -294,6 +294,8 @@ class AuditLog:
             subject_type, subject_id, _ = events._ref(subject)
         if actor is not None:
             actor_type, actor_id, _ = events._ref(actor)
+        # Match the stored text: reference parts are stored via str(), while action and
+        # correlation_id are stored as given, so a (str, Enum) member is its value, not str().
         wanted = {
             name: str(value)
             for name, value in (
@@ -301,11 +303,12 @@ class AuditLog:
                 ("subject_id", subject_id),
                 ("actor_type", actor_type),
                 ("actor_id", actor_id),
-                ("action", action),
-                ("correlation_id", correlation_id),
             )
             if value is not None
         }
+        for name, value in (("action", action), ("correlation_id", correlation_id)):
+            if value is not None:
+                wanted[name] = str.__str__(value) if isinstance(value, str) else str(value)
         if limit <= 0:
             return []
         return self.storage.history(wanted, since, limit)

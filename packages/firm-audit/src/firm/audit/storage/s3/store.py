@@ -601,32 +601,34 @@ class S3View:
         rows: list[Any] = []
         page: list[tuple[int, str, str]] = []
 
-        def drain() -> None:
+        def drain() -> bool:
+            """Append the page's settled rows; ``True`` once the settled prefix has ended."""
             self._renew()
             bodies = dict(self.storage.fetch([key for _, _, key in page]))
             for event_id, _, key in page:
                 body = bodies.get(key)
                 row = decode_row(body) if body is not None else None
                 created = _when(row["created_at"]) if row is not None else None
-                if created is None or created <= cutoff:
-                    # A malformed object reads as unsigned, so the sealer refuses it loudly.
-                    mac = row.get("row_mac") if row is not None else None
-                    rows.append(SimpleNamespace(id=event_id, row_mac=mac))
-                    if len(rows) >= limit:
-                        return
+                if created is not None and created > cutoff:
+                    return True
+                # A malformed object reads as unsigned, so the sealer refuses it loudly.
+                mac = row.get("row_mac") if row is not None else None
+                rows.append(SimpleNamespace(id=event_id, row_mac=mac))
+                if len(rows) >= limit:
+                    return True
+            return False
 
         for event_id, entry_id, key in self._event_keys(max(hwm, 0)):
             if event_id <= hwm:
                 continue
             page.append((event_id, entry_id, key))
             if len(page) == 1000:
-                drain()
-                page = []
-                if len(rows) >= limit:
+                if drain():
                     return rows
+                page = []
         if page:
             drain()
-        return rows[:limit]
+        return rows
 
     # -- time-based reads --------------------------------------------------------------------------
 
