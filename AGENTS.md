@@ -77,7 +77,7 @@ module carries its own.
 - **Retention patterns (pick deliberately):** cache and channel trim probabilistically on
   write; audit prunes only on explicit opt-in (never delete audit data silently). Concurrent
   delete sweeps select victims with the skip-locked seam (see `channel/trim.py`,
-  `audit/retention.py`).
+  `audit/storage/sql/store.py`).
 - **Style:** ruff (`E,F,I,UP,B,SIM,C4,RUF,S` with `S101`/`S311` ignored, line-length 100) +
   ruff format; full type hints; a module docstring per file. `migrations/*` are ruff-excluded.
 - **New sibling module:** create `packages/firm-<m>/` mirroring `firm-cache` (its `pyproject.toml`

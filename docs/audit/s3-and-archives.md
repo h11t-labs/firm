@@ -154,6 +154,10 @@ log.close()
 Rows are stored with the SQL columns verbatim (entry id, stored JSON, timestamp, row MAC, key
 id), so a row MAC is the same recipe as in SQL. The sealer's `grace` assumption carries over:
 a write must finish within `grace` of taking its id, or a sealed range may already cover it.
+Sealing stops at the first row that has not settled, so a late write with an old `created_at`
+(a prepared event retried later, an outbox relay that fell behind) never pulls fresher lower ids
+into a seal. That row is eligible as soon as it lands, though, so `grace` does not shield a lower
+id still in flight at that moment: see [sizing the grace window](tamper-evidence.md#sizing-the-grace-window).
 Retiring a range touches many objects, so the floor advance is recorded as an intent first
 and finished by whichever process next holds the lease; a crash mid-way never leaves a false
 TAMPERED behind.
@@ -264,7 +268,7 @@ original key. A cross-source or cross-stream restore into S3 gets fresh ids, use
 configured row key when signing is enabled, and retains the source identity as provenance.
 A restore from S3 into SQL currently gets fresh SQL ids and preserves provenance but does **not**
 re-sign the imported rows; configuring a key on the SQL target does not change this restore path.
-Read provenance through `import_provenance(conn, id)` in SQL or `log.import_provenance(id)` on S3.
+Read provenance through `log.import_provenance(id)`, on either storage.
 Seals, floors, verify status and anchors belong to the original log and are not archived; keep
 a separate backup when that evidence must be recoverable.
 
@@ -278,7 +282,8 @@ for verified archival. Same-account copies are not independent backups.
 `Archiver` continuously archives an `AuditLog` with either storage and makes retention wait until
 each expired row sits in a verified archive batch. (`SQLArchiver` is the same class.) The
 archiver itself never deletes events and archives all unreserved events, including recent ones;
-`max_age` controls the separate retention step.
+`max_age` controls the separate retention step. One `run_once` batch must fit in 8 MiB of frozen
+input; lower `batch_size` if it reports "batch exceeds 8 MiB".
 
 ```python
 from firm.audit.archive import Archive

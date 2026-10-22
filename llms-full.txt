@@ -3657,6 +3657,12 @@ water mark: no later sealer pass and no `verify --full` run can self-heal it. Ea
 the rows its `row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification.
 `AuditLog` emits a startup hint restating this when sealing is enabled.
 
+Sealing stops at the first row that has not settled yet, so a row whose `created_at` is already
+older than `grace` when it is written (a prepared event retried later with `write()`, an S3
+outbox relay that fell behind) never pulls fresher lower ids into a seal. Such a row is eligible
+the moment it lands, however, so the window does not protect a slower lower id that is still in
+flight at that moment: if that row commits after the sealer ran, it lands inside a sealed range.
+
 `grace` also bounds the anchor's truncation guard: the coverage watermark only enforces seals older
 than `grace` (so a just-committed seal that a verifier's snapshot cannot yet see is not read as a
 truncation). The flip side is that deleting a seal **younger than `grace`** is not caught by the
@@ -4444,6 +4450,10 @@ log.close()
 Rows are stored with the SQL columns verbatim (entry id, stored JSON, timestamp, row MAC, key
 id), so a row MAC is the same recipe as in SQL. The sealer's `grace` assumption carries over:
 a write must finish within `grace` of taking its id, or a sealed range may already cover it.
+Sealing stops at the first row that has not settled, so a late write with an old `created_at`
+(a prepared event retried later, an outbox relay that fell behind) never pulls fresher lower ids
+into a seal. That row is eligible as soon as it lands, though, so `grace` does not shield a lower
+id still in flight at that moment: see [sizing the grace window](tamper-evidence.md#sizing-the-grace-window).
 Retiring a range touches many objects, so the floor advance is recorded as an intent first
 and finished by whichever process next holds the lease; a crash mid-way never leaves a false
 TAMPERED behind.
@@ -4554,7 +4564,7 @@ original key. A cross-source or cross-stream restore into S3 gets fresh ids, use
 configured row key when signing is enabled, and retains the source identity as provenance.
 A restore from S3 into SQL currently gets fresh SQL ids and preserves provenance but does **not**
 re-sign the imported rows; configuring a key on the SQL target does not change this restore path.
-Read provenance through `import_provenance(conn, id)` in SQL or `log.import_provenance(id)` on S3.
+Read provenance through `log.import_provenance(id)`, on either storage.
 Seals, floors, verify status and anchors belong to the original log and are not archived; keep
 a separate backup when that evidence must be recoverable.
 
@@ -4568,7 +4578,8 @@ for verified archival. Same-account copies are not independent backups.
 `Archiver` continuously archives an `AuditLog` with either storage and makes retention wait until
 each expired row sits in a verified archive batch. (`SQLArchiver` is the same class.) The
 archiver itself never deletes events and archives all unreserved events, including recent ones;
-`max_age` controls the separate retention step.
+`max_age` controls the separate retention step. One `run_once` batch must fit in 8 MiB of frozen
+input; lower `batch_size` if it reports "batch exceeds 8 MiB".
 
 ```python
 from firm.audit.archive import Archive
@@ -5941,7 +5952,8 @@ enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```python
 from firm.ui import BasicAuth, build_dashboard, serve, static_dir
 dash = build_dashboard(database_url=None, queue_url=None, cache_url=None,
-                       channel_url=None, audit_url=None)   # -> Dashboard (close() when done)
+                       channel_url=None, audit_url=None,
+                       audit_s3=None, audit_archive=None)   # -> Dashboard (close() when done)
 serve(dash, host="127.0.0.1", port=8787, authenticator=None, channel_trim_retention=None)
 
 # the dashboard without a transport: handle(UIRequest) -> UIResponse
@@ -5977,8 +5989,9 @@ Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. 
 
 ## Optional S3 audit and archival APIs
 
-Install `firm-audit[s3]`. These APIs live in optional submodules; importing `firm.audit` loads no
-boto3.
+`firm.audit` exports `AuditLog`, `SqlStorage`, `S3Storage`, `Storage`, `PreparedEvent` and
+`UnknownEventOutcome`; archives live in `firm.audit.archive`. Importing `firm.audit` loads no boto3;
+`S3Storage` and archives need `firm-audit[s3]`.
 
 - `firm.audit.AuditLog(database_url=None, *, engine=None, storage=None, ...)` selects persistence with a `Storage` adapter. Without `storage`, the existing SQL shorthand remains supported. Keys, sealing, verification and retention options always belong to this one log; `storage` cannot be combined with `database_url` or `engine`.
 - `firm.audit.SqlStorage(engine=None, *, database_url=None, create_schema=True)` stores events and integrity records in SQL tables. Configure schema creation here when passing it explicitly to `AuditLog`.

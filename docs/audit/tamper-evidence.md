@@ -209,6 +209,12 @@ water mark: no later sealer pass and no `verify --full` run can self-heal it. Ea
 the rows its `row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification.
 `AuditLog` emits a startup hint restating this when sealing is enabled.
 
+Sealing stops at the first row that has not settled yet, so a row whose `created_at` is already
+older than `grace` when it is written (a prepared event retried later with `write()`, an S3
+outbox relay that fell behind) never pulls fresher lower ids into a seal. Such a row is eligible
+the moment it lands, however, so the window does not protect a slower lower id that is still in
+flight at that moment: if that row commits after the sealer ran, it lands inside a sealed range.
+
 `grace` also bounds the anchor's truncation guard: the coverage watermark only enforces seals older
 than `grace` (so a just-committed seal that a verifier's snapshot cannot yet see is not read as a
 truncation). The flip side is that deleting a seal **younger than `grace`** is not caught by the

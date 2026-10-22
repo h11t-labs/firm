@@ -271,7 +271,8 @@ enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```python
 from firm.ui import BasicAuth, build_dashboard, serve, static_dir
 dash = build_dashboard(database_url=None, queue_url=None, cache_url=None,
-                       channel_url=None, audit_url=None)   # -> Dashboard (close() when done)
+                       channel_url=None, audit_url=None,
+                       audit_s3=None, audit_archive=None)   # -> Dashboard (close() when done)
 serve(dash, host="127.0.0.1", port=8787, authenticator=None, channel_trim_retention=None)
 
 # the dashboard without a transport: handle(UIRequest) -> UIResponse
@@ -307,8 +308,9 @@ Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. 
 
 ## Optional S3 audit and archival APIs
 
-Install `firm-audit[s3]`. These APIs live in optional submodules; importing `firm.audit` loads no
-boto3.
+`firm.audit` exports `AuditLog`, `SqlStorage`, `S3Storage`, `Storage`, `PreparedEvent` and
+`UnknownEventOutcome`; archives live in `firm.audit.archive`. Importing `firm.audit` loads no boto3;
+`S3Storage` and archives need `firm-audit[s3]`.
 
 - `firm.audit.AuditLog(database_url=None, *, engine=None, storage=None, ...)` selects persistence with a `Storage` adapter. Without `storage`, the existing SQL shorthand remains supported. Keys, sealing, verification and retention options always belong to this one log; `storage` cannot be combined with `database_url` or `engine`.
 - `firm.audit.SqlStorage(engine=None, *, database_url=None, create_schema=True)` stores events and integrity records in SQL tables. Configure schema creation here when passing it explicitly to `AuditLog`.
