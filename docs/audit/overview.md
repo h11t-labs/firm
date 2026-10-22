@@ -1,8 +1,10 @@
 # firm-audit — overview
 
-An append-only, database-backed audit log for Python. Record who did what, when, and to what — in
-the same database (and, if you want, the same transaction) as the change itself — on SQLite,
-PostgreSQL, or MySQL/MariaDB.
+An append-only audit log for Python. Record who did what, when, and to what. Choose SQL
+(SQLite, PostgreSQL, or MySQL/MariaDB), optionally in the same transaction as the business change,
+or [S3 storage](s3-and-archives.md) without an audit database or persistent volume. Both use one
+`AuditLog` with shared signing, sealing, verification and retention. Optional archives work with
+either storage.
 
 firm-audit is **not a port of a Rails Solid gem** — there is no `solid_audit`. It's an original
 firm module that shares the same "you already have a database" thesis as `firm.cache` and
@@ -21,7 +23,7 @@ no longer atomic with the business write. See [Configuration](configuration.md).
 
 ## The model
 
-The core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
+With SQL storage, the core is one table, `firm_audit_events` (opt-in tamper-evidence adds three nullable columns to
 it plus two side tables — see [Tamper-evidence](tamper-evidence.md)):
 
 | Column | Purpose |
@@ -76,3 +78,9 @@ log.history(action="user.login")
 
 Read on: **[Getting started](getting-started.md)**, or **[Tamper-evidence](tamper-evidence.md)** for
 the cryptographic integrity layer.
+
+## S3 backend and archives
+
+`AuditLog(storage=S3Storage(...))` keeps the same audit log in S3 objects, for deployments
+without an audit database. Signing, sealing, verification and retention stay in `AuditLog`. See [S3 storage and archives](s3-and-archives.md), which also covers export, restore,
+and archive-before-prune for both storages. SQL remains the default.

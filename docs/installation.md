@@ -32,6 +32,7 @@ Database drivers and optional features are extras on the module packages:
 | `firm-queue[fastapi]` | `fastapi` | the FastAPI integration ([`firm.queue.contrib.fastapi`](contrib.md)) |
 | `firm-cache[encryption]` | `cryptography` | cache at-rest encryption (Fernet) |
 | `firm-cache[msgpack]` | `msgpack` | the cache msgpack value coder |
+| `firm-audit[s3]` | `boto3` | [database-free audit and archives](audit/s3-and-archives.md) |
 
 The driver extras (`postgres`, `mysql`) exist on every module (they resolve to
 `firm-core[postgres]` / `firm-core[mysql]` under the hood), so add them to whichever module you

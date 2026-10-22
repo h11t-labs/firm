@@ -1,7 +1,9 @@
 # Database backends
 
-Both packages run on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick with the
-`database_url` you pass to `bq.configure(...)` or `Cache(...)`.
+All four modules support **SQLite**, **PostgreSQL**, and **MySQL/MariaDB**. Pick with the
+`database_url` passed to the module, or supply an existing SQLAlchemy engine. Audit additionally
+supports [S3 storage and archives](audit/s3-and-archives.md), without an audit SQL database;
+the SQL driver, locking and migration guidance below applies to SQL-backed instances.
 
 ## Drivers
 

@@ -40,7 +40,9 @@ It points at existing databases — it never creates or migrates a schema.
 - **Audit** — total event count, a search/feed over recorded events filterable by subject, actor,
   action, and correlation id, and a detail page per event with the full (pretty-printed)
   `data`/`changes`/`context` payloads. Read-only — there's no delete action in the dashboard;
-  pruning is a deliberate CLI/cron operation, not a click away.
+  pruning is a deliberate CLI/cron operation, not a click away. An [S3 audit log and verified archives](audit/s3-and-archives.md#cli-and-dashboard)
+  appear as extra views in the same tab, with a Database / S3 / Archive switcher when more than
+  one is configured.
 
 Queue actions reuse the library's own helpers (`queues.pause/resume`, `maintenance.retry_failed`),
 so the UI applies exactly the same semantics as the library and CLIs.

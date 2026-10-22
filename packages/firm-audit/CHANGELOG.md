@@ -8,6 +8,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
+- `AuditLog(storage=...)` with typed `Storage` / `StorageView` contracts and `SqlStorage` /
+  `S3Storage` adapters. Event preparation and signing, sealing, verification, retention and
+  background loops belong to one audit log. Existing SQL construction remains supported;
+  `S3AuditLog` is a compatibility constructor with no separate audit logic.
+- Storage implementations live under `firm.audit.storage.sql` / `firm.audit.storage.s3`;
+  shared archive policy lives under `firm.audit.archive`. Existing documented imports remain
+  available through compatibility modules.
+- `S3Storage` (`firm-audit[s3]`) stores events in S3 for deployments without a database or PVC.
+  It supports the same `record()`,
+  `history()` (every filter, exact `since`), sequential ids, row MACs, sealing, anchors,
+  `verify()`, retention and background loops — the sealer, verifier and retention code is shared
+  through a storage seam. Ids come from one compare-and-swap counter per stream; maintenance runs
+  under one lease (`StorageBusy`). `prepare()`/`write()` give idempotent retries across processes
+  (`UnknownEventOutcome`), and `firm-audit s3` has the SQL commands' counterparts.
+- `AuditLog.prepare()` / `write()` also support SQL with idempotent insertion under the unique
+  entry id; retries of changed bytes or provenance are rejected. `get()` and `import_provenance()`
+  are available on the same log with either storage.
+- `record(conn=...)` with S3 storage stages the event in the caller's transaction (migration
+  `0004`, `firm_audit_s3_outbox`) and publishes it afterwards: `flush_outbox()`, a background
+  relay via `outbox_engine=`, or `firm-audit s3 flush-outbox`.
+- Verified archives for SQL and S3 logs: resumable publication, deduplicated multi-batch reads,
+  `export_sql`/`export_s3` by id, and isolated restores (`restore_sql`, `Archive.restore_s3`).
+  Same-storage restores keep ids and row signatures; others keep the source identity as
+  provenance. Event archives do not recreate seals or external anchors.
+- `Archive.batches()` pages through an archive's batches with unverified manifest summaries
+  (count, time range, signed rows) and flags staged-but-unpublished (`pending`) batches.
+  Manifests record `signed`/`sources`, and `read()` rejects a summary that disagrees with the data.
+- Migration `0003` adds an opt-in persisted archive-before-prune policy; `Archiver` (also
+  `SQLArchiver`) enforces it for SQL and S3 logs (`firm-audit archive run-sql`/`run-s3`). Both plain and
+  seal-aligned retention keep unarchived rows, including the pre-activation prefix. Eligibility
+  is one query per batch or seal range; `Retention.last_blocked_unarchived` counts the expired
+  rows a run kept for the guard, with an "archiver looks stalled" `on_error` alert past 1,000.
+
 - `firm.audit.queries`: the read-query layer the dashboard used to keep to itself, now a supported
   surface for your own dashboards, exporters, and health checks. Paginated, sortable
   `audit_search`/`audit_count` (where `history()` is a plain filtered read), `audit_stats`,
@@ -24,6 +57,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Fixed
 
+- The sealer seals only a contiguous run of settled rows. A row created after the grace cutoff
+  now holds back the rows above it instead of being skipped, so a late write with an old
+  `created_at` (a retried prepared event, a delayed outbox relay) or a clock-skewed writer no
+  longer seals over fresher lower ids and produces a permanent false `TAMPERED`.
 - An interrupted anchored prune no longer wedges retention and verify into a permanent false
   `TAMPERED`. Retention appends its anchor `FLOOR` line before its database commit (the anchor
   is the hard gate), so a crash or serialization rollback in between left the anchor floor

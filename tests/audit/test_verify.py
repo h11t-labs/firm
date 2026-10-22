@@ -657,20 +657,22 @@ def test_anchor_is_read_after_snapshot_opens(db_url: str, tmp_path, monkeypatch)
     audit = _make(db_url)
     anchor = tmp_path / "anchor.log"
     order: list[str] = []
-    original_snapshot = verify_mod.snapshot_transaction
+    from firm.audit.storage.sql import store as storage_mod
+
+    original_snapshot = storage_mod.snapshot_transaction
     original_read_anchor = verify_mod._read_anchor
 
     @contextmanager
-    def tracked_snapshot(engine):
+    def tracked_snapshot(engine, **kwargs):
         order.append("snapshot")
-        with original_snapshot(engine) as conn:
+        with original_snapshot(engine, **kwargs) as conn:
             yield conn
 
     def tracked_read_anchor(path: str, **kwargs):
         order.append("anchor")
         return original_read_anchor(path, **kwargs)
 
-    monkeypatch.setattr(verify_mod, "snapshot_transaction", tracked_snapshot)
+    monkeypatch.setattr(storage_mod, "snapshot_transaction", tracked_snapshot)
     monkeypatch.setattr(verify_mod, "_read_anchor", tracked_read_anchor)
     try:
         audit.verify(anchor_path=str(anchor), full=True)

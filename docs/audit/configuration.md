@@ -6,7 +6,8 @@ Every `AuditLog(...)` option, with its default:
 AuditLog(
     database_url=None,              # SQLAlchemy URL (or pass engine=)
     engine=None,                    # a pre-built SQLAlchemy Engine, instead of database_url
-    create_schema=True,             # create firm_audit_events if missing
+    storage=None,                   # SqlStorage or S3Storage; instead of database_url/engine
+    create_schema=True,             # SQL shorthand only; explicit SqlStorage owns this option
     max_age=None,                   # prune events older than this many seconds; None = keep forever
     background_retention=False,     # run a retention loop on a timer
     retention_interval=3600.0,      # seconds between background retention runs
@@ -26,13 +27,18 @@ AuditLog(
     unsealed_tail_max_age=None,     # warn if the oldest unsealed row is older; None = derived
     on_error=None,                  # callback(exc) for background/anchor failures; None = stderr
     on_finding=None,                # callback(IntegrityAlert) on a tampered/warning verify run
+    outbox_engine=None,             # SQL engine for the optional background S3 outbox relay
+    outbox_interval=5.0,            # seconds between outbox delivery runs
+    create_outbox=True,             # create its outbox table when outbox_engine is supplied
 )
 ```
 
 | Option | Default | Notes |
 |---|---|---|
-| `database_url` / `engine` | — | Provide one. `engine` lets the audit log share a pool with your application — see [Two topologies](#two-topologies). |
-| `create_schema` | `True` | Set `False` if you manage the schema with Alembic. |
+| `database_url` / `engine` | — | SQL shorthand: provide one unless passing `storage`. `engine` shares your application's pool — see [Two topologies](#two-topologies). |
+| `storage` | `None` | Explicit `SqlStorage(...)` or `S3Storage(...)`; cannot be combined with `database_url` or `engine`. Signing and maintenance options stay on `AuditLog`. |
+| `create_schema` | `True` | SQL shorthand: set `False` for Alembic. When passing explicit storage, configure this on `SqlStorage` instead; `AuditLog(storage=..., create_schema=False)` is rejected. |
+| `outbox_engine` / `outbox_interval` / `create_outbox` | `None` / `5.0` / `True` | Optional background delivery of committed S3 outbox events from your application database. Injected engines remain caller-owned. See [S3 outbox](s3-and-archives.md#recording-inside-your-transaction). |
 | `max_age` | `None` (keep forever) | Pruning is opt-in — see [Retention & querying](retention-and-querying.md). |
 | `background_retention` / `retention_interval` | `False` / `3600.0` | Opt-in timer-based pruning. |
 | `background_verification` / `verify_interval` / `verify_full_every` | `False` / `3600.0` / `24` | Opt-in in-process verify loop — see [Scheduling verification](tamper-evidence.md#scheduling-verification-run-it-continuously). |
@@ -89,9 +95,12 @@ verify status is undetectable.
 | `FIRM_AUDIT_ANCHOR_PATH` | sealer, verify | Local anchor file path. |
 | `FIRM_AUDIT_DATABASE_URL` | CLI | Default `--database-url` for `firm-audit` — see [CLI](cli.md). |
 
-Call `audit.close()` (or use the `with` form) to stop the background loop and dispose the engine.
+Call `audit.close()` (or use the `with` form) to stop background loops and close storage-owned
+resources. Injected SQL engines and SDK clients remain caller-owned.
 
 ## Two topologies
+
+These two topologies describe SQL storage. The S3 alternative is described below.
 
 **Shared database** — pass `engine=` pointing at your application's own engine (or the same
 `database_url`). By default `AuditLog.record(...)` writes durably in its own short transaction.
@@ -107,9 +116,9 @@ audit = AuditLog(engine=app_engine)          # same database as the rest of the 
 
 **Separate database** — point `database_url` at a dedicated audit database. Writes are durable
 but **not atomic** with the business change (they're different databases — no single transaction
-can span both). `record()` raises on failure; the caller decides what to do. A transactional
-outbox (atomic append into a local table, relayed to the remote audit database) would close this
-gap, but firm-audit doesn't build one — it's out of scope for now.
+can span both). `record()` raises on failure; the caller decides what to do. An SQL-to-SQL
+transactional outbox is not provided. The optional outbox below delivers to S3; it does not relay
+to a separate SQL audit database.
 
 ```python
 audit = AuditLog(database_url="postgresql://audit-host/audit_db")  # independent durable write
@@ -127,3 +136,14 @@ engine = create_engine_for("postgresql://localhost/myapp")
 audit_a = AuditLog(engine=engine)
 audit_b = AuditLog(engine=engine, create_schema=False)
 ```
+
+
+## Optional S3 storage
+
+SQL remains the default. Install `firm-audit[s3]` and select
+`AuditLog(storage=S3Storage(...))` to keep the audit log in S3. Optional archives work with
+either storage. Configure bucket, stream, prefix, endpoint and lease options on `S3Storage`;
+configure integrity, retention and optional outbox relay on `AuditLog`. `record(conn=...)` stages
+an event atomically in an SQL outbox, and the relay publishes it afterwards. Direct S3 writes
+need no SQL database. See [S3 & archives](s3-and-archives.md) for configuration, retry guarantees,
+CLI commands and retention requirements.

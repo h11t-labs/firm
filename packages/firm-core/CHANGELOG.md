@@ -6,6 +6,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- A dialect-owned identity reset after isolated audit restores that preserve integer IDs;
+  PostgreSQL reconciles its generated-ID sequence before recording resumes. Audit restores
+  using this seam require the updated core and audit distributions to ship together.
+
+
 ### Fixed
 
 - `create_engine_for` no longer crashes on in-memory SQLite (`sqlite://`,

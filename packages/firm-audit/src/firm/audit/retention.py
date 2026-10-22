@@ -15,6 +15,13 @@ between leaves the anchor floor leading the database — with the rows and their
 still fully present. Both retention and verify recognize that state as an interrupted prune
 (rather than tampering): retention resumes it from the database floor after re-validating the
 ranges, and verify reports a warning until it does.
+
+With a persisted archive policy (``firm.audit.sql_archive.SQLArchiver.enable``), both paths keep
+every expired row whose exact content is not yet in a verified archive batch; the aligned path
+stops at the first range holding such a row. Eligibility is one query per batch or range.
+``last_blocked_unarchived`` reports how many expired rows a run kept for that reason, and past
+``_SKIP_ALERT_THRESHOLD`` the run routes an "archiver looks stalled" alert through ``on_error``,
+like the unsealed-row alert — so a stalled archiver never silently halts pruning.
 """
 
 from __future__ import annotations
@@ -25,16 +32,13 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, select
 from sqlalchemy.exc import DBAPIError
 
 from .._core.clock import now_utc
-from .._core.database import snapshot_transaction
-from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
-from . import integrity, schema
+from . import integrity
 from .integrity import HmacSigner
-from .sealing import _ACTIVATION_FROM_ID
+from .storage import StorageBusy
 from .verify import (
     _read_anchor,
     load_seal_records,
@@ -46,8 +50,6 @@ if TYPE_CHECKING:
     from .log import AuditLog
     from .verify import SealRecord
 
-_audits = schema.audit_events
-_seals = schema.seals
 _BATCH_SIZE = 1000
 _SKIP_ALERT_THRESHOLD = 1000
 _TRANSACTION_ATTEMPTS = 3
@@ -59,53 +61,63 @@ class Retention:
     def __init__(self, audit: AuditLog) -> None:
         self.audit = audit
         self.last_skipped_unsealed = 0
+        self.last_blocked_unarchived = 0
         self.last_refused_tampered = 0
         self.last_refused_no_seal_key = False
         self.last_refused_no_activation = False
 
     def run_once(self) -> int:
         self.last_skipped_unsealed = 0
+        self.last_blocked_unarchived = 0
         self.last_refused_tampered = 0
         self.last_refused_no_seal_key = False
         self.last_refused_no_activation = False
         if self.audit.max_age is None:
             return 0
         cutoff = now_utc() - timedelta(seconds=self.audit.max_age)
-        if self._sealing_active():
-            return self._run_aligned(cutoff)
-        if self.audit._seal_key is not None and self._has_expired_events(cutoff):
-            self._refuse_no_activation()
-            return 0
-        return self._run_plain(cutoff)
+        try:
+            if self._sealing_active():
+                return self._run_aligned(cutoff)
+            if self.audit._seal_key is not None and self._has_expired_events(cutoff):
+                self._refuse_no_activation()
+                return 0
+            return self._run_plain(cutoff)
+        except StorageBusy:
+            return 0  # another process holds the maintenance lease; the next run retries
 
     def _sealing_active(self) -> bool:
         """Any activation/seal/floor record makes plain pruning unsafe."""
-        with self.audit.engine.connect() as conn:
-            return conn.execute(select(func.count()).select_from(_seals)).scalar_one() > 0
+        with self.audit.storage.connect() as conn:
+            return conn.any_seal_record()
 
     def _has_expired_events(self, cutoff: datetime) -> bool:
-        with self.audit.engine.connect() as conn:
-            return (
-                conn.execute(
-                    select(_audits.c.id).where(_audits.c.created_at < cutoff).limit(1)
-                ).first()
-                is not None
-            )
+        with self.audit.storage.connect() as conn:
+            return conn.has_expired(cutoff)
 
     def _run_plain(self, cutoff: datetime) -> int:
-        engine = self.audit.engine
-        dialect = get_dialect(engine)
         total = 0
+        offset = 0
+        schema_present: bool | None = None  # inspected once, on the first batch
         while True:
-            with dialect.begin_claim_tx(engine) as conn:
-                stmt = dialect.with_skip_locked(
-                    select(_audits.c.id).where(_audits.c.created_at < cutoff).limit(_BATCH_SIZE)
-                )
-                ids = [row.id for row in conn.execute(stmt)]
+            with self.audit.storage.claim() as conn:
+                policy = conn.archive_policy(schema_present=schema_present)
+                schema_present = policy is not None
+                rows = conn.expired_batch(cutoff, offset, _BATCH_SIZE)
+                if policy is not None and policy.stream:
+                    # One unlocked eligibility read per batch; the archive tables never join the
+                    # SKIP LOCKED select (PostgreSQL rejects FOR UPDATE on an outer join's
+                    # nullable side).
+                    archived = conn.verified_ids(policy.stream, rows)
+                    ids = [row.id for row in rows if row.id in archived]
+                else:
+                    ids = [row.id for row in rows]
+                offset += len(rows) - len(ids)
+                self.last_blocked_unarchived += len(rows) - len(ids)
                 if ids:
-                    conn.execute(delete(_audits).where(_audits.c.id.in_(ids)))
+                    conn.delete_rows(ids, archive_tables=policy is not None)
             total += len(ids)
-            if len(ids) < _BATCH_SIZE:
+            if len(rows) < _BATCH_SIZE:
+                self._alert_if_blocked_over_threshold()
                 return total
 
     def _run_aligned(self, cutoff: datetime) -> int:
@@ -128,16 +140,11 @@ class Retention:
             return 0
 
         deleted = 0
-        with snapshot_transaction(self.audit.engine, write=True) as conn:
-            dialect = get_dialect(self.audit.engine)
+        with self.audit.storage.snapshot(write=True) as conn:
+            policy = conn.archive_policy()
             # SQLite is serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL lock the never-deleted
             # activation row before either side computes a shared high-water mark / floor.
-            activation_lock = dialect.with_row_lock(
-                # Lock by the reserved, uniquely-indexed ``from_id`` (not the un-indexed ``kind``):
-                # on MySQL a FOR UPDATE over a non-indexed predicate escalates to a table/gap lock.
-                select(_seals.c.id).where(_seals.c.from_id == _ACTIVATION_FROM_ID).limit(1)
-            )
-            conn.execute(activation_lock).first()
+            conn.lock_activation()
             # The first database read fixes the snapshot before the external anchor is consumed.
             records = load_seal_records(conn)
             if records.capped:
@@ -196,22 +203,10 @@ class Retention:
                 if present_coverage < anchor.coverage_watermark:
                     self._refuse_tampered(floors[-1] if floors else None)
                     return 0
-            if (
-                database_floor > 0
-                and conn.execute(
-                    select(_audits.c.id).where(_audits.c.id <= database_floor).limit(1)
-                ).first()
-            ):
+            if database_floor > 0 and conn.rows_at_or_below(database_floor, 1):
                 self._refuse_tampered(floors[-1] if floors else None)
                 return 0
-            if (
-                floor > database_floor
-                and conn.execute(
-                    select(_audits.c.id)
-                    .where(_audits.c.id > database_floor, _audits.c.id <= floor)
-                    .limit(1)
-                ).first()
-            ):
+            if floor > database_floor and conn.any_row_between(database_floor, floor):
                 # An earlier prune appended its anchor FLOOR line but its database transaction
                 # never committed (crash, or the serialization rollback this method retries on):
                 # the rows *and their covering seals* in (database_floor, floor] are all still
@@ -241,14 +236,12 @@ class Retention:
                     return 0
 
             max_sealed = max([origin, *(record.to_id or origin for record in covering)])
-            self.last_skipped_unsealed = conn.execute(
-                select(func.count())
-                .select_from(_audits)
-                .where(_audits.c.id > max_sealed, _audits.c.created_at < cutoff)
-            ).scalar_one()
+            self.last_skipped_unsealed = conn.count_rows(after=max_sealed, before=cutoff)
             self._alert_if_over_threshold()
 
             through = floor
+            archive_checked_through = 0
+            blocked_by_archive = False
             for record in covering:
                 assert record.sealed_at is not None
                 if record.sealed_at >= cutoff:
@@ -257,7 +250,25 @@ class Retention:
                     self._refuse_tampered(record)
                     return 0
                 assert record.to_id is not None
+                if policy is not None and policy.stream:
+                    # Include the pre-activation prefix too: the eventual delete covers every
+                    # row through the new floor, not just rows belonging to the newest seal.
+                    span = (archive_checked_through, record.to_id)
+                    candidates = conn.rows_between(span[0], span[1])
+                    if len(conn.verified_ids(policy.stream, candidates, span=span)) != len(
+                        candidates
+                    ):
+                        blocked_by_archive = True
+                        break
+                    archive_checked_through = record.to_id
                 through = record.to_id
+            if blocked_by_archive:
+                # Everything expired between the stop point and the sealed high-water mark is
+                # held back by the guard — the counterpart of ``last_skipped_unsealed`` above.
+                self.last_blocked_unarchived = conn.count_rows(
+                    after=through, through=max_sealed, before=cutoff
+                )
+                self._alert_if_blocked_over_threshold()
             if through <= floor:
                 return 0
 
@@ -275,20 +286,20 @@ class Retention:
             ):
                 return 0
 
-            conn.execute(
-                _seals.insert().values(
-                    kind="floor",
-                    from_id=None,
-                    to_id=through,
-                    row_count=None,
-                    rows_mac=None,
-                    seal_mac=mac,
-                    sealed_at=retired_at,
-                    key_id=seal_key.id,
-                )
+            deleted = conn.advance_floor(
+                {
+                    "kind": "floor",
+                    "from_id": None,
+                    "to_id": through,
+                    "row_count": None,
+                    "rows_mac": None,
+                    "seal_mac": mac,
+                    "sealed_at": retired_at,
+                    "key_id": seal_key.id,
+                },
+                through=through,
+                archive_tables=policy is not None,
             )
-            deleted = conn.execute(delete(_audits).where(_audits.c.id <= through)).rowcount
-            conn.execute(delete(_seals).where(_seals.c.kind == "seal", _seals.c.to_id <= through))
 
         return deleted
 
@@ -346,6 +357,15 @@ class Retention:
                 RuntimeError(
                     f"audit retention skipped {self.last_skipped_unsealed} expired but UNSEALED "
                     "rows; the sealer looks stalled"
+                )
+            )
+
+    def _alert_if_blocked_over_threshold(self) -> None:
+        if self.last_blocked_unarchived > _SKIP_ALERT_THRESHOLD:
+            self.audit.on_error(
+                RuntimeError(
+                    f"audit retention kept {self.last_blocked_unarchived} expired rows that are "
+                    "not yet in a verified archive batch; the archiver looks stalled"
                 )
             )
 

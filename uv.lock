@@ -20,6 +20,7 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
+    { name = "boto3", specifier = ">=1.36" },
     { name = "click", specifier = ">=8.1" },
     { name = "croniter", specifier = ">=6.2.4" },
     { name = "cryptography", specifier = ">=50.0.0" },
@@ -99,6 +100,34 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/21/28/9b3f50ce0e048515135495f198351908d99540d69bfdc8c1d15b73dc55ce/blinker-1.9.0.tar.gz", hash = "sha256:b4ce2265a7abece45e7cc896e98dbebe6cead56bcf805a3d23136d145f5445bf", size = 22460, upload-time = "2024-11-08T17:25:47.436Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/cb/f2ad4230dc2eb1a74edf38f1a38b9b52277f75bef262d8908e60d957e13c/blinker-1.9.0-py3-none-any.whl", hash = "sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc", size = 8458, upload-time = "2024-11-08T17:25:46.184Z" },
+]
+
+[[package]]
+name = "boto3"
+version = "1.43.114"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "jmespath" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e2/8c/f6f884dc947789317e73ed6fce85e18580d22e9f90e48d67c2367b02667e/boto3-1.43.114.tar.gz", hash = "sha256:be704857751564a5cf69c5bbaadbfa01c22806409815c73563db42fbffe583a2", size = 112653, upload-time = "2026-10-14T19:24:22.561Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/f8/0799a101e6f65c8b687f50c218654cef1e44658e946c7d33d362e2572621/boto3-1.43.114-py3-none-any.whl", hash = "sha256:d9cac2eb921ce674970cef1c9ad750f85ee3a846aedcf188d18368fb9eb6da23", size = 140043, upload-time = "2026-10-14T19:24:21.038Z" },
+]
+
+[[package]]
+name = "botocore"
+version = "1.43.114"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jmespath" },
+    { name = "python-dateutil" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ce/c8/b508359d1f3846a918c06807a9ae27eee063f904559269e42ccde9de09ea/botocore-1.43.114.tar.gz", hash = "sha256:f366fa4db518775632ad1eb128cd8203ca46396cecf37209d904f0bbc049ce90", size = 16369844, upload-time = "2026-10-14T19:24:17.683Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9a/41/7c6fa7ac5fcfd5ea3c6f32aab001942da32b184a210f39042778cb1ad8ed/botocore-1.43.114-py3-none-any.whl", hash = "sha256:d1c441a22e93e158de5b1e026205f5d6d67a4545d10540c5090c62dccb3a9eca", size = 16067885, upload-time = "2026-10-14T19:24:14.629Z" },
 ]
 
 [[package]]
@@ -470,6 +499,7 @@ source = { editable = "packages/firm" }
 
 [package.optional-dependencies]
 all = [
+    { name = "firm-audit", extra = ["s3"] },
     { name = "firm-cache", extra = ["encryption", "msgpack"] },
     { name = "firm-core", extra = ["mysql", "postgres"] },
     { name = "firm-queue", extra = ["fastapi", "flask"] },
@@ -477,6 +507,9 @@ all = [
 ]
 audit = [
     { name = "firm-audit" },
+]
+audit-s3 = [
+    { name = "firm-audit", extra = ["s3"] },
 ]
 cache = [
     { name = "firm-cache" },
@@ -512,6 +545,8 @@ ui = [
 [package.metadata]
 requires-dist = [
     { name = "firm-audit", marker = "extra == 'audit'", editable = "packages/firm-audit" },
+    { name = "firm-audit", extras = ["s3"], marker = "extra == 'all'", editable = "packages/firm-audit" },
+    { name = "firm-audit", extras = ["s3"], marker = "extra == 'audit-s3'", editable = "packages/firm-audit" },
     { name = "firm-cache", marker = "extra == 'cache'", editable = "packages/firm-cache" },
     { name = "firm-cache", extras = ["encryption"], marker = "extra == 'encryption'", editable = "packages/firm-cache" },
     { name = "firm-cache", extras = ["encryption", "msgpack"], marker = "extra == 'all'", editable = "packages/firm-cache" },
@@ -527,7 +562,7 @@ requires-dist = [
     { name = "firm-ui", marker = "extra == 'all'", editable = "packages/firm-ui" },
     { name = "firm-ui", marker = "extra == 'ui'", editable = "packages/firm-ui" },
 ]
-provides-extras = ["queue", "cache", "channel", "audit", "ui", "flask", "fastapi", "postgres", "mysql", "encryption", "msgpack", "all"]
+provides-extras = ["audit-s3", "queue", "cache", "channel", "audit", "ui", "flask", "fastapi", "postgres", "mysql", "encryption", "msgpack", "all"]
 
 [[package]]
 name = "firm-audit"
@@ -545,15 +580,19 @@ mysql = [
 postgres = [
     { name = "firm-core", extra = ["postgres"] },
 ]
+s3 = [
+    { name = "boto3" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3", marker = "extra == 's3'", specifier = ">=1.36" },
     { name = "click", specifier = ">=8.1" },
     { name = "firm-core", editable = "packages/firm-core" },
     { name = "firm-core", extras = ["mysql"], marker = "extra == 'mysql'", editable = "packages/firm-core" },
     { name = "firm-core", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/firm-core" },
 ]
-provides-extras = ["postgres", "mysql"]
+provides-extras = ["s3", "postgres", "mysql"]
 
 [[package]]
 name = "firm-cache"
@@ -684,6 +723,7 @@ source = { editable = "packages/firm-stack" }
 
 [package.optional-dependencies]
 all = [
+    { name = "firm-audit", extra = ["s3"] },
     { name = "firm-cache", extra = ["encryption", "msgpack"] },
     { name = "firm-core", extra = ["mysql", "postgres"] },
     { name = "firm-queue", extra = ["fastapi", "flask"] },
@@ -691,6 +731,9 @@ all = [
 ]
 audit = [
     { name = "firm-audit" },
+]
+audit-s3 = [
+    { name = "firm-audit", extra = ["s3"] },
 ]
 cache = [
     { name = "firm-cache" },
@@ -726,6 +769,8 @@ ui = [
 [package.metadata]
 requires-dist = [
     { name = "firm-audit", marker = "extra == 'audit'", editable = "packages/firm-audit" },
+    { name = "firm-audit", extras = ["s3"], marker = "extra == 'all'", editable = "packages/firm-audit" },
+    { name = "firm-audit", extras = ["s3"], marker = "extra == 'audit-s3'", editable = "packages/firm-audit" },
     { name = "firm-cache", marker = "extra == 'cache'", editable = "packages/firm-cache" },
     { name = "firm-cache", extras = ["encryption"], marker = "extra == 'encryption'", editable = "packages/firm-cache" },
     { name = "firm-cache", extras = ["encryption", "msgpack"], marker = "extra == 'all'", editable = "packages/firm-cache" },
@@ -741,7 +786,7 @@ requires-dist = [
     { name = "firm-ui", marker = "extra == 'all'", editable = "packages/firm-ui" },
     { name = "firm-ui", marker = "extra == 'ui'", editable = "packages/firm-ui" },
 ]
-provides-extras = ["queue", "cache", "channel", "audit", "ui", "flask", "fastapi", "postgres", "mysql", "encryption", "msgpack", "all"]
+provides-extras = ["audit-s3", "queue", "cache", "channel", "audit", "ui", "flask", "fastapi", "postgres", "mysql", "encryption", "msgpack", "all"]
 
 [[package]]
 name = "firm-ui"
@@ -971,6 +1016,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/26/45/7f99cc83066139d9e047055919cd748191207513fa1dcfd2e0a3bbfc872d/jinjax-0.65.tar.gz", hash = "sha256:2fb5b141a3f38db01e268fb768f3a404355ff9934ae885efcfb764d576fd7cd2", size = 32144, upload-time = "2026-06-16T22:16:11.489Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/68/35/0c153358e59cc1ee0afe3b497c83222ec45633589f32ada4241f87d189ae/jinjax-0.65-py3-none-any.whl", hash = "sha256:0cebd07dc4c6899b43447512cf23d4439f28ca005aa7ffb0cca0cb12376f9e28", size = 20609, upload-time = "2026-06-16T22:16:10.44Z" },
+]
+
+[[package]]
+name = "jmespath"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/59/322338183ecda247fb5d1763a6cbe46eff7222eaeebafd9fa65d4bf5cb11/jmespath-1.1.0.tar.gz", hash = "sha256:472c87d80f36026ae83c6ddd0f1d05d4e510134ed462851fd5f754c8c3cbb88d", size = 27377, upload-time = "2026-01-22T16:35:26.279Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/2f/967ba146e6d58cf6a652da73885f52fc68001525b4197effc174321d70b4/jmespath-1.1.0-py3-none-any.whl", hash = "sha256:a5663118de4908c91729bea0acadca56526eb2698e83de10cd116ae0f4e97c64", size = 20419, upload-time = "2026-01-22T16:35:24.919Z" },
 ]
 
 [[package]]
@@ -1545,6 +1599,18 @@ wheels = [
 ]
 
 [[package]]
+name = "s3transfer"
+version = "0.19.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/43/35e4d8aa320bffe8287fe8f65f578fa2d2db0a64212f0e710dce58267854/s3transfer-0.19.2.tar.gz", hash = "sha256:ba0309fd86be3c27dbf78cdd813c13c5e1df16e5874b99d2535ebbdfb9892993", size = 165592, upload-time = "2026-07-22T19:30:44.432Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/e7/5c595c75e9f41a44f30e526eda465ea0b4eec93470e074e4a111b253f13a/s3transfer-0.19.2-py3-none-any.whl", hash = "sha256:d8168eccca828cbb2cd573675333f3bddd254313a9c42494b84c76b539e8ba25", size = 90216, upload-time = "2026-07-22T19:30:43.251Z" },
+]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1739,6 +1805,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/92/ff/5a28bdfd8c3ebec42564ac7d0e54ca3db65044a9314a97f9564fa7a1e926/tzdata-2026.3.tar.gz", hash = "sha256:4a1518b8993086a7982523e071643f3c0e5f213e75b21318e78bcabfff9d1415", size = 198674, upload-time = "2026-07-10T08:50:37.887Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/6d/b53b99a9f2766d095985947a5782f1702cabb129a34f7a802d7197af832f/tzdata-2026.3-py2.py3-none-any.whl", hash = "sha256:dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931", size = 348168, upload-time = "2026-07-10T08:50:36.46Z" },
+]
+
+[[package]]
+name = "urllib3"
+version = "2.8.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
 ]
 
 [[package]]

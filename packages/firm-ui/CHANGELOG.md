@@ -8,6 +8,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ### Added
 
+- An `AuditLog` configured with `S3Storage` is shown on the same audit page as SQL (`/audit/s3`): cards, filters,
+  sorting, pagination, the integrity strip and per-row status, under a source strip naming the
+  bucket, prefix and stream. Routes share dashboard authentication, themes, and mount prefixes.
+- A read-only archive view lists the archive's batches (status, event count, time range, signed
+  rows, paged) and opens each as a verified batch with each event's recorded signature.
+- SQL and S3 audit logs can be shown side by side: the audit tab gets a Database / S3 / Archive
+  switcher (`/audit`, `/audit/s3`, `/audit/archive`) when more than one view is configured.
+  `--audit-archive-prefix` defaults to `firm-audit`, matching `ObjectStore`.
+
 - The dashboard can be **mounted inside a host application** — on its domain, in its routing,
   behind its own permissions — instead of running as a second process. One adapter per framework,
   each behind its own extra: `firm.ui.contrib.django.dashboard_urls` (`firm-ui[django]`),

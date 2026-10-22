@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 from jinjax import Catalog
@@ -74,6 +74,9 @@ _ICONS = {
     "sun": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     "moon": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     "monitor": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+    # Storage marks for the audit source strip (S3 history / archive), tinted like the shields.
+    "cloud": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></svg>',
+    "archive": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/></svg>',
     # Shield state marks for the tamper-evidence panel (stroke = currentColor, tinted per state
     # by the .integrity-icon medallion). A crisp icon beats the emoji glyphs that render
     # inconsistently across platforms; the verdict word travels alongside, so meaning never
@@ -429,12 +432,15 @@ def _dash() -> Markup:
 
 
 def _when(value: datetime | None) -> Markup:
+    if value is not None and value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
     return Markup(_CATALOG.render("When", value=value))
 
 
 # Context defaults for the layout chrome -- always present so `layout.html` never has to guard
 # against an undefined variable; a page-specific kwarg of the same name overrides it.
 _LAYOUT_DEFAULTS: dict[str, Any] = {
+    "subnav_items": None,
     "substate": None,
     "substate_counts": None,
     "queue": None,
@@ -457,7 +463,7 @@ def _render(template_name: str, **context: Any) -> str:
     # The two URL builders templates call directly are bound to this render's mount point here;
     # as context values they shadow nothing else, and no template can build an unprefixed URL.
     ctx["jobs_href"] = _markup_fn(lambda *a, **kw: _jobs_href(urls, *a, **kw))
-    ctx["audit_href"] = _markup_fn(lambda *a, **kw: _audit_href(urls, *a, **kw))
+    ctx.setdefault("audit_href", _markup_fn(lambda *a, **kw: _audit_href(urls, *a, **kw)))
     ctx["header_tabs"] = _header_tabs(urls, ctx["parts"], ctx["active_part"])
     refresh = ctx["refresh"]
     ctx["refresh_label"] = _refresh_label(refresh) if refresh is not None else ""
@@ -780,6 +786,7 @@ def _audit_href(
     dir: str = AUDIT_DEFAULT_DIR,
     page: int = 1,
     per_page: int = AUDIT_DEFAULT_PER_PAGE,
+    base: str = "/audit",
 ) -> str:
     """Build an ``/audit`` URL carrying only the params that differ from their defaults, so a
     plain unsorted/unpaginated view still round-trips to the same short ``/audit?...`` links the
@@ -794,7 +801,7 @@ def _audit_href(
     if per_page != AUDIT_DEFAULT_PER_PAGE:
         params["per_page"] = str(per_page)
     query = f"?{urlencode(params, quote_via=quote)}" if params else ""
-    return urls.path(f"/audit{query}")
+    return urls.path(f"{base}{query}")
 
 
 def _ref_display(type_: str | None, id_: str | None, label: str | None) -> str | None:
@@ -813,7 +820,7 @@ def _ref_filter(type_: str, id_: str | None) -> str:
 
 
 def _sort_columns(
-    urls: Urls, filters: dict[str, str], sort: str, dir_: str, per_page: int
+    urls: Urls, filters: dict[str, str], sort: str, dir_: str, per_page: int, base: str = "/audit"
 ) -> list[dict[str, Any]]:
     """One entry per column header: its toggled sort URL, whether it is the active sort, and the
     arrow (``↑``/``↓``) to show when active. Clicking the active column flips its direction."""
@@ -825,7 +832,7 @@ def _sort_columns(
             {
                 "label": label,
                 "url": Markup(
-                    _audit_href(urls, filters, sort=key, dir=next_dir, per_page=per_page)
+                    _audit_href(urls, filters, sort=key, dir=next_dir, per_page=per_page, base=base)
                 ),
                 "active": active,
                 "arrow": ("↑" if dir_ == "asc" else "↓") if active else "",
@@ -898,7 +905,7 @@ def _cause_text(
     return cause
 
 
-def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
+def _affected_cells(urls: Urls, raw: str | None, base: str = "/audit") -> list[dict[str, Any]]:
     """Parse the verifier's ``affected_identifiers`` — a JSON list of
     ``{"kind", "label", "id"?, "message"?, "verdict"?}`` — into render-ready rows. Each row carries a
     ``chip`` (a link into ``/audit/<id>`` when the finding names a specific row id, else the plain
@@ -926,7 +933,7 @@ def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
             message = str(item["message"]) if item.get("message") else ""
             id_ = item.get("id")
             chip: Any = (
-                Markup(f'<a href="{escape(urls.path(f"/audit/{id_}"))}">{escape(label)}</a>')
+                Markup(f'<a href="{escape(urls.path(f"{base}/{id_}"))}">{escape(label)}</a>')
                 if isinstance(id_, int)
                 else label
             )
@@ -936,7 +943,9 @@ def _affected_cells(urls: Urls, raw: str | None) -> list[dict[str, Any]]:
     return cells
 
 
-def _integrity_view(urls: Urls, state: IntegrityState | None) -> dict[str, Any] | None:
+def _integrity_view(
+    urls: Urls, state: IntegrityState | None, base: str = "/audit"
+) -> dict[str, Any] | None:
     """Build the <Integrity/> component's ready-made data from a derived state, or ``None`` when
     there is no audit part to report on. The component stays dumb: every string, link, and colour
     token it renders is decided here."""
@@ -998,7 +1007,7 @@ def _integrity_view(urls: Urls, state: IntegrityState | None) -> dict[str, Any] 
         # the generic ``meaning`` above to stand alone.
         view["findings"] = [
             {"ref": c["chip"], "why": c["message"]}
-            for c in _affected_cells(urls, s["affected_identifiers"])
+            for c in _affected_cells(urls, s["affected_identifiers"], base)
         ]
         # What to do: verify it yourself, and don't disturb the evidence.
         view["next_step"] = Markup(
@@ -1097,9 +1106,15 @@ def audit_page(
     dir: str = AUDIT_DEFAULT_DIR,
     refresh: int = 10,
     request_path: str = "/audit",
+    views: list[dict[str, Any]] | None = None,
+    base: str = "/audit",
+    source: dict[str, Any] | None = None,
     theme: str = "system",
     urls: Urls = ROOT_URLS,
 ) -> str:
+    """The audit events page, for SQL tables (``base="/audit"``) or an S3 log
+    (``base="/audit/s3"``, with its ``source`` strip): the same cards, filters, sorting and
+    integrity column either way."""
     cards = [
         _card("events", _num(stats["events"])),
         _card("actions", _num(stats["actions"])),
@@ -1118,6 +1133,10 @@ def audit_page(
             r["status_icon"] = _row_status_icon(status) if status else Markup("")
     return _render(
         "audit.html",
+        audit_base=urls.path(base),
+        audit_href=_markup_fn(lambda *a, **kw: _audit_href(urls, *a, base=base, **kw)),
+        source=source,
+        subnav_items=views,
         title="Audit",
         parts=parts,
         active_part="audit",
@@ -1125,7 +1144,7 @@ def audit_page(
         request_path=request_path,
         theme=theme,
         urls=urls,
-        integrity_view=_integrity_view(urls, integrity),
+        integrity_view=_integrity_view(urls, integrity, base),
         integrity_active=integrity_active,
         cards=cards,
         rows=rows,
@@ -1133,15 +1152,18 @@ def audit_page(
         sort=sort,
         dir=dir,
         per_page=per_page,
-        columns=_sort_columns(urls, filters, sort, dir, per_page),
+        columns=_sort_columns(urls, filters, sort, dir, per_page, base),
         pagination=_pagination(
             page,
             per_page,
             total,
-            lambda n: _audit_href(urls, filters, sort=sort, dir=dir, page=n, per_page=per_page),
+            lambda n: _audit_href(
+                urls, filters, sort=sort, dir=dir, page=n, per_page=per_page, base=base
+            ),
         ),
         pagesize=_pagesize_options(
-            per_page, lambda n: _audit_href(urls, filters, sort=sort, dir=dir, per_page=n)
+            per_page,
+            lambda n: _audit_href(urls, filters, sort=sort, dir=dir, per_page=n, base=base),
         ),
     )
 
@@ -1151,6 +1173,8 @@ def audit_detail_page(
     event: dict[str, Any],
     *,
     row_ctx: dict[str, Any] | None = None,
+    back: str = "/audit",
+    views: list[dict[str, Any]] | None = None,
     theme: str = "system",
     request_path: str = "",
     urls: Urls = ROOT_URLS,
@@ -1174,12 +1198,201 @@ def audit_detail_page(
         title=f"Event #{event['id']}",
         parts=parts,
         active_part="audit",
+        subnav_items=views,
+        back_url=urls.path(back),
         event=event,
         cells=cells,
         theme=theme,
         request_path=request_path,
         urls=urls,
     )
+
+
+def audit_views(
+    urls: Urls, *, sql: bool, s3: bool, archive: bool, active: str
+) -> list[dict[str, Any]] | None:
+    """The audit tab's source switcher: one pill per configured view (database / S3 / archive),
+    or ``None`` when there is only one, so a plain SQL dashboard looks exactly as before."""
+    views = [
+        (key, label, path)
+        for key, label, path, enabled in (
+            ("sql", "Database", "/audit", sql),
+            ("s3", "S3", "/audit/s3", s3),
+            ("archive", "Archive", "/audit/archive", archive),
+        )
+        if enabled
+    ]
+    if len(views) < 2:
+        return None
+    return [
+        {"label": label, "url": urls.path(path), "active": key == active}
+        for key, label, path in views
+    ]
+
+
+def _endpoint_host(endpoint: str) -> str | None:
+    """The host[:port] of a custom S3 endpoint, or ``None`` for an injected client."""
+    if endpoint == "injected":
+        return None
+    return urlsplit(endpoint).netloc or endpoint
+
+
+def _source_view(
+    icon: str, word: str, note: str, store: Any, *extra: tuple[str, str], hint: str = ""
+) -> dict:
+    """The <Source/> strip's data: which storage this audit view reads and where it lives."""
+    facts = [{"label": "bucket", "value": store.bucket}, {"label": "prefix", "value": store.prefix}]
+    facts += [{"label": label, "value": value} for label, value in extra]
+    if host := _endpoint_host(store.endpoint_url):
+        facts.append({"label": "endpoint", "value": host})
+    return {"icon": Markup(_ICONS[icon]), "word": word, "note": note, "hint": hint, "facts": facts}
+
+
+def _event_row(item: dict[str, Any]) -> dict[str, Any]:
+    """Display fields shared by the S3 history and archive tables (labels, filters, preview)."""
+    subject_type, actor_type = item.get("subject_type"), item.get("actor_type")
+    return {
+        **item,
+        "when": _when(item.get("created_at")),
+        "subject_display": _ref_display(
+            subject_type, item.get("subject_id"), item.get("subject_label")
+        ),
+        "subject_filter": _ref_filter(subject_type, item.get("subject_id"))
+        if subject_type
+        else None,
+        "actor_display": _ref_display(actor_type, item.get("actor_id"), item.get("actor_label")),
+        "actor_filter": _ref_filter(actor_type, item.get("actor_id")) if actor_type else None,
+    }
+
+
+def s3_source(log: Any) -> dict[str, Any]:
+    """The source strip over an S3 audit log's page: same log, objects as storage."""
+    return _source_view(
+        "cloud",
+        "S3",
+        "stored as objects; counts and sorts read index objects",
+        log.storage.store,
+        ("stream", f"…{log.storage.stream[-4:]}"),
+        hint="Ids come from one compare-and-swap counter; sealing, retention and verification "
+        "run under one maintenance lease",
+    )
+
+
+def archive_page(
+    parts: list[str],
+    entries: list[dict[str, Any]],
+    key: str,
+    archive: Any,
+    *,
+    batches: list[dict[str, Any]] | None = None,
+    batches_next: str | None = None,
+    views: list[dict[str, Any]] | None = None,
+    theme: str = "system",
+    urls: Urls = ROOT_URLS,
+) -> str:
+    """One verified batch when ``key`` is set; otherwise a page of the archive's batches (from
+    ``Archive.batches``), each linking to its verified view."""
+    from firm.audit.event_format import read_event
+
+    seen: set[tuple[str, str, str]] = set()
+    rows = []
+    for entry in entries:
+        identity = entry["source"], entry["stream"], entry["identity"]
+        if identity not in seen:
+            seen.add(identity)
+            event = read_event(entry["event"])
+            payload = {
+                name: event[name] for name in ("data", "changes", "context") if event.get(name)
+            }
+            # Name the event the way its source does: SQL row #id, or the S3 event UUID's head.
+            envelope_id = (entry.get("envelope") or {}).get("id") or entry["identity"]
+            original_id = entry.get("original_id")
+            rows.append(
+                {
+                    **_event_row(event),
+                    "origin": entry["source"],
+                    "identity": entry["identity"],
+                    "event_label": f"#{original_id}"
+                    if original_id is not None
+                    else envelope_id[:8],
+                    "signature": _signature(entry),
+                    "payload": payload,
+                }
+            )
+    source = _source_view(
+        "archive",
+        "Archive",
+        "each batch is checksum-verified before it is shown",
+        archive.store,
+    )
+    return _render(
+        "audit_archive.html",
+        title="Audit · Archive",
+        parts=parts,
+        active_part="audit",
+        subnav_items=views,
+        theme=theme,
+        urls=urls,
+        source=source,
+        rows=rows,
+        key=key,
+        batches=[_batch_row(urls, batch) for batch in batches or []],
+        batches_next=Markup(
+            urls.path("/audit/archive") + "?" + urlencode({"continuation": batches_next})
+        )
+        if batches_next
+        else None,
+    )
+
+
+def _signature(entry: dict[str, Any]) -> dict[str, Any]:
+    """An archived row's signature as recorded (shown, not re-checked here): the row MAC and
+    its key id, or none. SQL and S3 rows carry it the same way."""
+    integrity = entry.get("integrity") or {}
+    if integrity.get("row_mac"):
+        key_id = integrity.get("key_id")
+        return {
+            "kind": "signed",
+            "icon": Markup(_ICONS["shield-check"]),
+            "label": f"signed · key {key_id}" if key_id else "signed",
+            "title": "Row MAC recorded when the row was written; restore it with the original "
+            "key to re-check it",
+        }
+    return {
+        "kind": "unsigned",
+        "icon": None,
+        "label": "unsigned",
+        "title": "Written without FIRM_AUDIT_KEY: no row MAC",
+    }
+
+
+def _batch_signing(batch: dict[str, Any]) -> dict[str, str] | None:
+    """The batch list's Signed cell: signed rows out of the batch's events."""
+    signed, count = batch.get("signed"), batch.get("count")
+    if signed is None or count is None:
+        return None  # pending, unreadable, or a manifest written before signing summaries
+    cls = "sig-all" if signed == count else ("text-warn" if signed else "muted")
+    return {"cls": cls, "text": f"{_num(signed)} / {_num(count)}"}
+
+
+def _batch_row(urls: Urls, batch: dict[str, Any]) -> dict[str, Any]:
+    """A listed archive batch: short id, a link to verify it, and its manifest summary."""
+    manifest_key = batch["manifest_key"]
+
+    def when(field: str) -> Markup:
+        value = batch.get(field)
+        return _when(datetime.fromisoformat(value) if value else None)
+
+    return {
+        **batch,
+        "short_id": batch["batch_id"][:8],
+        "href": urls.path("/audit/archive") + "?" + urlencode({"key": manifest_key})
+        if manifest_key
+        else None,
+        "first": when("min_created_at"),
+        "last": when("max_created_at"),
+        "signing": _batch_signing(batch),
+    }
 
 
 # -- misc --------------------------------------------------------------------------------------

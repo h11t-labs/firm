@@ -1,5 +1,9 @@
 # Retention & querying
 
+The same `AuditLog` query and retention methods work with `SqlStorage` and `S3Storage`.
+SQL examples below use the existing `database_url` shorthand; see [S3 & archives](s3-and-archives.md)
+for S3 setup and its object indexes.
+
 ## Querying with `history()`
 
 ```python
@@ -94,8 +98,10 @@ boundaries and only prunes what verifies**:
   and a later `firm-audit verify` still reports it as `TAMPERED`.
 - When an anchor is configured, retention appends the `FLOOR` line **before** committing the floor
   row and deletions and fsyncs the file. If either anchor sink fails, pruning is refused. The signed
-  floor row, event deletion, and retired covering-seal deletion then commit in one write
-  transaction; serialization/deadlock failures get a bounded retry.
+  floor row, event deletion, and retired covering-seal deletion then commit in one SQL write
+  transaction; serialization/deadlock failures get a bounded retry. S3 records a durable prune
+  intent under its maintenance lease, then finishes the floor, event and seal changes; the next
+  lease holder completes an interrupted intent.
 - A host missing any current or retired seal key needed by existing records refuses loudly and
   sets `last_refused_no_seal_key`; it never categorizes the evidence as prunable tampering.
 - The refusal repeats on every subsequent run until you preserve the database and investigate with
@@ -103,3 +109,16 @@ boundaries and only prunes what verifies**:
 
 The one cost of the guarantee is a read: pre-prune verification re-reads (keyset-paginated) every
 row it is about to delete.
+
+
+### Require archival before pruning
+
+`Archiver(log, archive).enable()` persists an archive-before-prune guard for either storage
+(SQL also needs an explicit `stream`). Retention then deletes only expired events whose exact
+content belongs to an acknowledged, verified archive batch. An unarchived event holds back its
+whole sealed range. `last_blocked_unarchived` counts expired events kept by this guard.
+
+Run the archiver separately on a schedule; configuring `max_age` or `background_retention`
+does not start archival. Manual `export_sql`/`export_s3` copies do not satisfy the guard's batch
+membership ledger. See [Archive-before-prune](s3-and-archives.md#archive-before-prune) for
+activation, recovery and scheduling.

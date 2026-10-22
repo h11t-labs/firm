@@ -6,6 +6,7 @@
 pip install firm-audit              # or: uv add firm-audit
 pip install "firm-audit[postgres]"     # psycopg, for PostgreSQL
 pip install "firm-audit[mysql]"        # PyMySQL, for MySQL/MariaDB
+pip install "firm-audit[s3]"           # S3 primary storage or archives
 ```
 
 See **[Installation](../installation.md)** for the full list of extras.
@@ -18,9 +19,23 @@ from firm.audit import AuditLog
 audit = AuditLog(database_url="sqlite:///audit.db")
 ```
 
-By default `AuditLog(...)` creates the `firm_audit_events` table if it's missing
+With the default SQL storage, `AuditLog(...)` creates the `firm_audit_events` table if it's missing
 (`create_schema=True`). For production schema management, use the bundled Alembic migration and
 pass `create_schema=False` — see [Database backends](../database-backends.md#migrations).
+
+For a database-free deployment, supply S3 storage instead:
+
+```python
+from firm.audit import AuditLog, S3Storage
+
+audit = AuditLog(
+    storage=S3Storage("audit-events", stream="00000000-0000-0000-0000-000000000001")
+)
+```
+
+The bucket must exist and SDK credentials must be configured. Share the stream UUID across
+replicas. The same event and integrity methods apply; see [S3 & archives](s3-and-archives.md)
+for conditional-write requirements, retries and archive-before-prune.
 
 ## Record events
 
@@ -82,14 +97,17 @@ with engine.begin() as conn:
 # both commit together, or both roll back — there is no in-between state
 ```
 
-`AuditLog.record(..., conn=...)` does the same thing through the facade — pass `conn` to join an
-existing transaction, or omit it to let `AuditLog` open and commit its own (a separate,
-non-atomic write — see [Configuration](configuration.md#two-topologies)).
+With SQL storage, `AuditLog.record(..., conn=...)` does the same thing through the facade —
+pass `conn` to join an existing transaction, or omit it for a separate audit write. With S3
+storage, `conn=` stages the event in an SQL outbox in the caller's transaction; a relay publishes
+it to S3 after commit. Atomic staging does not mean immediate S3 visibility. See
+[Configuration](configuration.md#two-topologies) and [the S3 outbox](s3-and-archives.md#recording-inside-your-transaction).
 
 ## Clean up
 
-An `AuditLog` owns a connection pool (and, optionally, a background retention thread). Close it
-when you're done, or use it as a context manager:
+An `AuditLog` closes its storage and stops its background loops. Storage closes any engine,
+SDK client or worker pool it created; explicitly injected engines and SDK clients remain
+caller-owned. Close the log when you're done, or use it as a context manager:
 
 ```python
 with AuditLog(database_url="sqlite:///audit.db") as audit:

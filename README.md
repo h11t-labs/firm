@@ -31,6 +31,8 @@ Add database drivers and features as extras — `firm-queue[postgres]`,
 `firm-cache[encryption]`, … (see **[Installation](docs/installation.md)**). All four modules run
 on **SQLite**, **PostgreSQL**, and **MySQL/MariaDB** — verified live against all three. The top-level
 package imports nothing heavy, so a queue-only process never loads the cache, pub/sub, or audit code.
+Audit also offers [S3 primary storage and archives](docs/audit/s3-and-archives.md) through
+`firm-audit[s3]`, for deployments without an audit database or persistent volume.
 
 ## Quickstart
 

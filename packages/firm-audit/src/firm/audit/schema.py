@@ -14,8 +14,9 @@ a column is a breaking change. Writes must go through :func:`~firm.audit.record`
 
 **Tamper-evidence runtime behavior is opt-in and inert without a key** (design review 4A).
 The columns and side tables always exist in the migrated schema. When no ``FIRM_AUDIT_KEY`` is
-configured, :mod:`.events` leaves ``entry_id``/``row_mac``/``key_id`` NULL and the side tables stay
-empty until the opt-in sealer or verifier writes to them:
+configured, ordinary SQL writes leave ``entry_id``/``row_mac``/``key_id`` NULL. Explicitly
+prepared retries use an ``entry_id`` even without a key, with no MAC or signer. The side tables
+stay empty until the opt-in sealer or verifier writes to them:
 
 * ``firm_audit_events.entry_id`` — client-generated ULID, unique index; identity + anti-replay.
 * ``firm_audit_events.row_mac`` — hex ``HMAC-SHA256`` over the canonical row (:mod:`.integrity`).
@@ -42,7 +43,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, Engine
 
 from .._core.clock import now_utc
-from .._core.schema import dt_type, pk_bigint
+from .._core.dialects import get_dialect
+from .._core.schema import dt_type, long_text, pk_bigint
 from .._core.schema_setup import create_all_and_stamp, drop_all_and_unstamp
 
 metadata = MetaData()
@@ -135,12 +137,74 @@ verify_status = Table(
 )
 
 
+# Archival state is independent of the supported audit event Table read surface.
+archive_policy = Table(
+    "firm_audit_archive_policy",
+    metadata,
+    Column("id", String(1), primary_key=True),
+    Column("stream", String(36)),
+    Column("destination", Text),
+)
+
+archive_batches = Table(
+    "firm_audit_archive_batches",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("body", long_text()),
+    Column("receipt", Text),
+)
+
+archive_members = Table(
+    "firm_audit_archive_members",
+    metadata,
+    Column("fingerprint", String(64), primary_key=True),
+    Column("event_id", pk_bigint(), nullable=False, unique=True),
+    Column("batch_id", String(36), nullable=False, index=True),
+)
+
+
+archive_imports = Table(
+    "firm_audit_archive_imports",
+    metadata,
+    Column("event_id", pk_bigint(), primary_key=True, autoincrement=False),
+    Column("provenance", Text, nullable=False),
+)
+
+
+# Events an AuditLog with S3 storage staged in the caller's transaction (record(conn=...)),
+# waiting for the relay. The caller's database needs no other audit table;
+# firm.audit.s3_outbox.create_outbox creates just this table.
+s3_outbox = Table(
+    "firm_audit_s3_outbox",
+    metadata,
+    Column("id", pk_bigint(), primary_key=True),
+    Column("stream", String(36), nullable=False),
+    Column("entry_id", String(26), nullable=False, unique=True),
+    Column("body", long_text(), nullable=False),
+    Column("created_at", _DT, nullable=False, default=now_utc),
+    Index("index_firm_audit_s3_outbox_on_stream_id", "stream", "id"),
+)
+
+
 def create_all(bind: Engine | Connection) -> None:
     """Create the firm-audit table and stamp the Alembic baseline, so an auto-created schema
     stays ``alembic upgrade``-able later."""
     create_all_and_stamp(
         bind, metadata, migrations_package="firm.audit.migrations", version_table=VERSION_TABLE
     )
+    if isinstance(bind, Engine):
+        with bind.begin() as conn:
+            conn.execute(
+                get_dialect(conn.engine).insert_ignore(
+                    archive_policy, {"id": "1"}, index_elements=("id",)
+                )
+            )
+    else:
+        bind.execute(
+            get_dialect(bind.engine).insert_ignore(
+                archive_policy, {"id": "1"}, index_elements=("id",)
+            )
+        )
 
 
 def drop_all(bind: Engine | Connection) -> None:

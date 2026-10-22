@@ -205,12 +205,16 @@ def test_grace_excludes_young_rows(db_url: str, at_time) -> None:
     audit = AuditLog(database_url=db_url, mac_key=_SECRET, grace=3600.0)
     try:
         _activate(audit)
-        audit.record("young")
-        assert audit.sealer.run_once() == 0
         with at_time(now_utc() - timedelta(hours=2)):
             audit.record("old")
+        audit.record("young")
+        with at_time(now_utc() - timedelta(hours=2)):
+            audit.record("late")  # an old created_at at a higher id (a retried prepared event)
+        # Seals "old"; "young" is not settled and holds back "late" instead of being skipped.
         assert audit.sealer.run_once() == 1
-        assert [row["action"] for row in audit.history()] == ["old", "young"]
+        assert audit.sealer.run_once() == 0
+        assert audit.verify(full=True).outcome != "tampered"
+        assert [row["action"] for row in audit.history()] == ["late", "young", "old"]
     finally:
         audit.close()
 

@@ -68,6 +68,54 @@ Notes:
 - **Offline dialect-compile** tests (`test_dialect_compile.py`) assert the DDL and `SKIP LOCKED` SQL
   render correctly for Postgres/MySQL with no live database.
 
+## Running against S3 (RustFS)
+
+The S3 tests run against an in-memory fake by default. `tests/audit/test_s3_integration.py` adds
+real round-trips (concurrent writes, retries, sealing, verification, export, restore, and process
+recovery) and skips unless `FIRM_TEST_S3_BUCKET` is set. CI runs it against
+[RustFS](https://docs.rustfs.com/en/installation/container/docker); to do the same locally:
+
+```bash
+# The same official image and readiness endpoint as CI; credentials are for this test server.
+docker run -d --rm --name bb_rustfs \
+  -e RUSTFS_ACCESS_KEY=firm -e RUSTFS_SECRET_KEY=firm-test-secret \
+  -e RUSTFS_VOLUMES=/data -e RUSTFS_CONSOLE_ENABLE=false \
+  -p 127.0.0.1:9000:9000 \
+  rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 \
+  --max-time 2 --retry-max-time 60 http://localhost:9000/health/ready
+
+export FIRM_TEST_S3_REQUIRED=1
+export FIRM_TEST_S3_BUCKET=firm-test
+export FIRM_TEST_S3_ENDPOINT=http://localhost:9000
+export AWS_ACCESS_KEY_ID=firm AWS_SECRET_ACCESS_KEY=firm-test-secret AWS_REGION=us-east-1
+
+# The library never creates buckets; enable versioning so receipts can carry version IDs.
+uv run python - <<'PYTHON'
+import os
+
+import boto3
+
+s3 = boto3.client("s3", endpoint_url=os.environ["FIRM_TEST_S3_ENDPOINT"])
+bucket = os.environ["FIRM_TEST_S3_BUCKET"]
+s3.create_bucket(Bucket=bucket)
+s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+PYTHON
+
+uv run pytest tests/audit/test_s3_integration.py -rs
+docker stop bb_rustfs
+```
+
+Notes:
+
+- The tests write under a random prefix and delete only their own objects and versions, but use a
+  dedicated **test** bucket anyway.
+- `FIRM_TEST_S3_REQUIRED=1` makes a missing bucket configuration fail instead of silently skipping
+  the live tests, both locally and in CI.
+- Other S3-compatible endpoints must support conditional creation (`If-None-Match: *`),
+  compare-and-swap (`If-Match`), and lexicographic listing with `StartAfter`. See
+  [S3 & archives](audit/s3-and-archives.md) for the full provider contract.
+
 ## Upstream test parity
 
 firm is a port of the Rails Solid stack (`solid_queue` / `solid_cache` / `solid_cable`), but it is

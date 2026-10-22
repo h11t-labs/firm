@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from firm.audit import AuditLog
+    from firm.audit.archive import Archive
 
 from sqlalchemy import Engine, inspect
 from sqlalchemy.exc import SQLAlchemyError
@@ -52,6 +57,8 @@ class Dashboard:
     cache: Engine | None = None
     channel: Engine | None = None
     audit: Engine | None = None
+    audit_s3: AuditLog | None = None
+    audit_archive: Archive | None = None
 
     @property
     def parts(self) -> list[str]:
@@ -62,13 +69,17 @@ class Dashboard:
             names.append("cache")
         if self.channel is not None:
             names.append("channel")
-        if self.audit is not None:
+        if self.audit is not None or self.audit_s3 is not None or self.audit_archive is not None:
             names.append("audit")
         return names
 
     def close(self) -> None:
         if self.queue is not None:
             self.queue.reset()
+        for source in (self.audit_s3, self.audit_archive):
+            if source is not None:
+                with contextlib.suppress(Exception):
+                    source.close()
         for engine in (self.cache, self.channel, self.audit):
             if engine is not None:
                 with contextlib.suppress(Exception):
@@ -96,8 +107,10 @@ def build_dashboard(
     cache_url: str | None = None,
     channel_url: str | None = None,
     audit_url: str | None = None,
+    audit_s3: AuditLog | None = None,
+    audit_archive: Archive | None = None,
 ) -> Dashboard:
-    dash = Dashboard()
+    dash = Dashboard(audit_s3=audit_s3, audit_archive=audit_archive)
 
     queue_resolved = queue_url or database_url
     if queue_resolved:

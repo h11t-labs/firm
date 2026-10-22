@@ -22,16 +22,13 @@ import fcntl
 import os
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
-
-from sqlalchemy import Connection, func, or_, select
-from sqlalchemy.exc import IntegrityError
+from typing import TYPE_CHECKING, Any
 
 from .._core.clock import now_utc
-from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
-from . import integrity, schema
+from . import integrity
 from .integrity import HmacSigner, Key
+from .storage import ACTIVATION_FROM_ID, SealConflict, StorageBusy
 from .verify import (
     _format_anchor_event,
     _format_checkpoint,
@@ -43,12 +40,9 @@ from .verify import (
 if TYPE_CHECKING:
     from .log import AuditLog
 
-_audits = schema.audit_events
-_seals = schema.seals
-
 # A real event id is positive. Reserving this unique ``from_id`` gives concurrent activation
 # attempts the same database arbiter as concurrent range seals without adding another table/index.
-_ACTIVATION_FROM_ID = -1
+_ACTIVATION_FROM_ID = ACTIVATION_FROM_ID
 
 
 def _is_young_seal_line(line: str, cutoff: datetime) -> bool:
@@ -92,8 +86,8 @@ class Sealer:
 
         try:
             activation = self._ensure_activation(key)
-        except IntegrityError:
-            return 0
+        except (SealConflict, StorageBusy):
+            return 0  # another process is activating or doing maintenance; try next round
         if activation is not None:
             boundary, mac, at = activation
             self._emit_anchor(kind="activation", from_id=None, to_id=boundary, mac=mac, at=at)
@@ -102,7 +96,7 @@ class Sealer:
         while True:
             try:
                 sealed = self._seal_next_batch(key)
-            except IntegrityError:
+            except (SealConflict, StorageBusy):
                 return total
             if sealed is None:
                 return total
@@ -118,7 +112,7 @@ class Sealer:
         assert path is not None
         try:
             seal_keyring = self.audit.verifier.seal_keyring
-            with self.audit.engine.connect() as conn:
+            with self.audit.storage.connect() as conn:
                 records = load_seal_records(conn)
             anchor = _read_anchor(
                 path,
@@ -162,27 +156,18 @@ class Sealer:
             seal_keyring = self.audit.verifier.seal_keyring
             row_keyring = self.audit.verifier.keyring
             allowed = tuple(seal_keyring)
-            with self.audit.engine.connect() as conn:
-                mismatch = conn.execute(
-                    select(_seals.c.key_id)
-                    .where(
-                        or_(
-                            _seals.c.key_id.is_(None),
-                            _seals.c.key_id.not_in(allowed),
-                        )
-                    )
-                    .limit(1)
-                ).first()
+            with self.audit.storage.connect() as conn:
+                mismatched, signer = conn.signer_mismatch(allowed)
         except Exception as exc:
             self.audit.on_error(exc)
             return False
-        if mismatch is None:
+        if not mismatched:
             return True
         self.audit.on_error(
             RuntimeError(
                 "audit sealer REFUSED to extend Layer-2 history: existing "
-                f"key_id={mismatch.key_id!r} is "
-                f"{'known only as a row key' if mismatch.key_id in row_keyring else 'unknown'}; "
+                f"key_id={signer!r} is "
+                f"{'known only as a row key' if signer in row_keyring else 'unknown'}; "
                 f"configured signer key_id={key.id!r}"
             )
         )
@@ -190,70 +175,38 @@ class Sealer:
 
     def _ensure_activation(self, key: Key) -> tuple[int, str, datetime] | None:
         """Insert activation and return its anchor payload, or ``None`` if already present."""
-        engine = self.audit.engine
-        with get_dialect(engine).begin_claim_tx(engine) as conn:
-            exists = conn.execute(
-                select(_seals.c.id).where(_seals.c.kind == "activation").limit(1)
-            ).first()
-            if exists is not None:
+        with self.audit.storage.claim() as conn:
+            if conn.activation_exists():
                 return None
             at = now_utc()
             cutoff = at - timedelta(seconds=self.audit.grace)
-            boundary = (
-                conn.execute(
-                    select(func.max(_audits.c.id)).where(
-                        _audits.c.row_mac.is_(None), _audits.c.created_at <= cutoff
-                    )
-                ).scalar_one()
-                or 0
-            )
+            boundary = conn.max_unsigned_settled_id(cutoff)
             signer = HmacSigner(key)
             mac = signer.sign(
                 integrity.activation_mac_input(boundary_id=boundary, at=at, key_id=signer.key_id)
             )
-            conn.execute(
-                _seals.insert().values(
-                    kind="activation",
-                    from_id=_ACTIVATION_FROM_ID,
-                    to_id=boundary,
-                    row_count=None,
-                    rows_mac=None,
-                    seal_mac=mac,
-                    sealed_at=at,
-                    key_id=key.id,
-                )
+            conn.insert_seal(
+                kind="activation",
+                from_id=_ACTIVATION_FROM_ID,
+                to_id=boundary,
+                row_count=None,
+                rows_mac=None,
+                seal_mac=mac,
+                sealed_at=at,
+                key_id=key.id,
             )
         return boundary, mac, at
 
     def _seal_next_batch(self, key: Key) -> tuple[int, int, str, datetime, int] | None:
         """Insert one independent covering seal, or return ``None`` when no rows are eligible."""
         cutoff = now_utc() - timedelta(seconds=self.audit.grace)
-        engine = self.audit.engine
-        dialect = get_dialect(engine)
-        with dialect.begin_claim_tx(engine) as conn:
+        with self.audit.storage.claim() as conn:
             # SQLite is already serialized by BEGIN IMMEDIATE. PostgreSQL/MySQL hold this
             # never-deleted activation row FOR UPDATE until the new seal commits.
-            activation_lock = dialect.with_row_lock(
-                # Lock by the reserved, uniquely-indexed ``from_id`` (not the un-indexed ``kind``):
-                # on MySQL a FOR UPDATE over a non-indexed predicate escalates to a table/gap lock.
-                select(_seals.c.id).where(_seals.c.from_id == _ACTIVATION_FROM_ID).limit(1)
-            )
-            if conn.execute(activation_lock).first() is None:
+            if not conn.lock_activation():
                 return None
-            hwm = (
-                conn.execute(
-                    select(func.max(_seals.c.to_id)).where(
-                        _seals.c.kind.in_(("activation", "floor", "seal"))
-                    )
-                ).scalar_one()
-                or 0
-            )
-            rows = conn.execute(
-                select(_audits.c.id, _audits.c.row_mac)
-                .where(_audits.c.id > hwm, _audits.c.created_at <= cutoff)
-                .order_by(_audits.c.id)
-                .limit(self.audit.seal_batch_size)
-            ).all()
+            hwm = conn.seal_hwm()
+            rows = conn.settled_rows_after(hwm, cutoff, self.audit.seal_batch_size)
             if not rows:
                 return None
             if any(row.row_mac is None for row in rows):
@@ -269,7 +222,7 @@ class Sealer:
 
     def _insert_seal(
         self,
-        conn: Connection,
+        conn: Any,
         key: Key,
         *,
         from_id: int,
@@ -291,17 +244,15 @@ class Sealer:
                 key_id=signer.key_id,
             )
         )
-        conn.execute(
-            _seals.insert().values(
-                kind="seal",
-                from_id=from_id,
-                to_id=to_id,
-                row_count=row_count,
-                rows_mac=aggregate,
-                seal_mac=mac,
-                sealed_at=at,
-                key_id=key.id,
-            )
+        conn.insert_seal(
+            kind="seal",
+            from_id=from_id,
+            to_id=to_id,
+            row_count=row_count,
+            rows_mac=aggregate,
+            seal_mac=mac,
+            sealed_at=at,
+            key_id=key.id,
         )
         return from_id, to_id, mac, at, row_count
 

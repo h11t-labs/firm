@@ -13,7 +13,9 @@ database you already run — no Redis, no extra broker, no new infrastructure.
 > Inspired by the Rails Solid stack from 37signals.
 
 The four packages are **independent** — install only what you need — but share a design: your
-database is the single source of truth, accessed through SQLAlchemy with per-dialect locking.
+database is the default source of truth, accessed through SQLAlchemy with per-dialect locking.
+Audit can instead use S3 primary storage with the same `AuditLog`, and can archive either
+storage to S3 — see [S3 storage and archives](audit/s3-and-archives.md).
 
 ## Why database-backed?
 
@@ -63,6 +65,8 @@ audit.record("invoice.paid", subject=invoice, actor=user, data={"amount": 4200})
 
 SQLite (default), **PostgreSQL**, and **MySQL/MariaDB** are all supported and tested live. See
 [Database backends](database-backends.md) for drivers, locking semantics, and when to use which.
+Audit additionally supports [optional S3 primary storage and archival](audit/s3-and-archives.md),
+including deployments without an audit database or persistent volume.
 
 ## Where to next
 

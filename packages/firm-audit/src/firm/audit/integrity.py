@@ -389,6 +389,22 @@ def seal_mac_input(
     )
 
 
+def s3_event_mac_input(envelope: bytes) -> bytes:
+    """Canonical message for one S3 event: its canonical envelope bytes without ``sig``.
+
+    The envelope (stream, id, every event field, provenance) is already canonical JSON, so it is
+    framed as one length-prefixed field behind a domain tag that keeps it apart from the row and
+    seal recipes. The object key is not included: the reader ties content to its key path, and a
+    restore legitimately copies an event under another prefix.
+    """
+    return CANON_VERSION + _field("s3-event") + _field(envelope.decode("utf-8"))
+
+
+def s3_event_mac(key: Key, envelope: bytes) -> str:
+    """Hex ``HMAC-SHA256`` over :func:`s3_event_mac_input` — an S3 event's signature."""
+    return HmacSigner(key).sign(s3_event_mac_input(envelope))
+
+
 def floor_mac(key: Key, *, through_id: int, retired_at: datetime, key_id: str) -> str:
     """Sign one append-only retirement-floor advance, including its signer id."""
     return HmacSigner(key).sign(

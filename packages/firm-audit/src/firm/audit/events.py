@@ -1,14 +1,12 @@
-"""Row-level audit I/O: the append-only write primitive and the read query.
+"""Shared event normalization and signing, plus the standalone SQL read/write functions.
 
-``append`` is the *only* function in this package that inserts a row — both the module-level
-``firm.audit.record`` and ``AuditLog.record`` funnel through it, which is what makes the
-append-only contract enforceable: there is one writer, and it only inserts. (The only other
-mutator anywhere in the package is :mod:`.retention`'s opt-in, age-based pruning.)
+Every writer uses build_values so the signed bytes and timestamps are independent of storage.
+Storage adapters only persist those values; retention is the explicit opt-in deletion path.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, NamedTuple, Union
 
 from sqlalchemy import Connection, select
@@ -142,8 +140,7 @@ def _ref(obj: Reference) -> tuple[str | None, str | None, str | None]:
     return type(obj).__name__, _norm(obj.id), None
 
 
-def append(
-    conn: Connection,
+def build_values(
     *,
     action: str,
     subject: Reference = None,
@@ -153,19 +150,15 @@ def append(
     correlation_id: str | None = None,
     context: dict[str, Any] | None = None,
     key: Key | None = None,
-) -> None:
-    """Insert one audit row on ``conn``. The sole mutating call on the write path.
-
-    Without ``key`` this is exactly the pre-tamper-evidence insert: the same columns, one
-    statement, no extra reads or round-trips, ``entry_id``/``row_mac``/``key_id`` left NULL.
-
-    With ``key`` (Layer 1) the writer additionally, still in this one INSERT and without any
-    coordination: mints a ULID ``entry_id``, captures ``created_at`` **once** and feeds that
-    same value to both the MAC input and the row (two ``now_utc()`` calls would differ by
-    microseconds and make the row verify as TAMPERED), and computes ``row_mac`` over the
-    canonical row. The JSON payloads are serialized once and fed verbatim to both the MAC and
-    the insert, so the signed bytes are exactly the bytes stored.
-    """
+    created_at: datetime | None = None,
+    identity: bool = False,
+) -> dict[str, Any]:
+    """Normalize, timestamp and sign once, independently of storage."""
+    if not isinstance(action, str):
+        raise TypeError("action must be a string")
+    stamp = created_at if created_at is not None else now_utc()
+    if stamp.tzinfo is not None:
+        stamp = stamp.astimezone(UTC).replace(tzinfo=None)
     subject_type, subject_id, subject_label = _ref(subject)
     actor_type, actor_id, actor_label = _ref(actor)
     data_json = dump_json(data)
@@ -183,12 +176,13 @@ def append(
         "data": data_json,
         "changes": changes_json,
         "context": context_json,
-        "created_at": now_utc(),
+        "created_at": stamp,
     }
+    if key is not None or identity:
+        values["entry_id"] = new_ulid(stamp)
     if key is not None:
         _validate_signed_lengths(values)
-        entry_id = new_ulid(values["created_at"])
-        values["entry_id"] = entry_id
+        entry_id = values["entry_id"]
         values["key_id"] = key.id
         values["row_mac"] = row_mac(
             key,
@@ -206,6 +200,32 @@ def append(
             context=context_json,
             created_at=values["created_at"],
         )
+    return values
+
+
+def append(
+    conn: Connection,
+    *,
+    action: str,
+    subject: Reference = None,
+    actor: Reference = None,
+    data: dict[str, Any] | None = None,
+    changes: dict[str, Any] | None = None,
+    correlation_id: str | None = None,
+    context: dict[str, Any] | None = None,
+    key: Key | None = None,
+) -> None:
+    """Insert one event in the caller's transaction, using the shared event builder."""
+    values = build_values(
+        action=action,
+        subject=subject,
+        actor=actor,
+        data=data,
+        changes=changes,
+        correlation_id=correlation_id,
+        context=context,
+        key=key,
+    )
     conn.execute(_audits.insert().values(**values))
 
 

@@ -271,7 +271,8 @@ enqueue_after_commit(session, my_job, x)   # enqueues iff the session commits
 ```python
 from firm.ui import BasicAuth, build_dashboard, serve, static_dir
 dash = build_dashboard(database_url=None, queue_url=None, cache_url=None,
-                       channel_url=None, audit_url=None)   # -> Dashboard (close() when done)
+                       channel_url=None, audit_url=None,
+                       audit_s3=None, audit_archive=None)   # -> Dashboard (close() when done)
 serve(dash, host="127.0.0.1", port=8787, authenticator=None, channel_trim_retention=None)
 
 # the dashboard without a transport: handle(UIRequest) -> UIResponse
@@ -303,3 +304,33 @@ firm-ui --database-url ... [--queue-url ... --cache-url ... --channel-url ... --
 
 Database URLs come from `--database-url` or the `FIRM_*_DATABASE_URL` env vars. Bare
 `postgresql://` / `mysql://` URLs auto-normalize to the shipped drivers (`[postgres]` / `[mysql]`).
+
+
+## Optional S3 audit and archival APIs
+
+`firm.audit` exports `AuditLog`, `SqlStorage`, `S3Storage`, `Storage`, `PreparedEvent` and
+`UnknownEventOutcome`; archives live in `firm.audit.archive`. Importing `firm.audit` loads no boto3;
+`S3Storage` and archives need `firm-audit[s3]`.
+
+- `firm.audit.AuditLog(database_url=None, *, engine=None, storage=None, ...)` selects persistence with a `Storage` adapter. Without `storage`, the existing SQL shorthand remains supported. Keys, sealing, verification and retention options always belong to this one log; `storage` cannot be combined with `database_url` or `engine`.
+- `firm.audit.SqlStorage(engine=None, *, database_url=None, create_schema=True)` stores events and integrity records in SQL tables. Configure schema creation here when passing it explicitly to `AuditLog`.
+- `firm.audit.S3Storage(bucket, stream, *, prefix="firm-audit", region=None, endpoint_url=None, client=None, workers=16, lease_ttl=300.0, lease_wait=5.0)` stores the same events and integrity records in S3. It requires an existing bucket; construction does not provision one.
+- `AuditLog.record(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, conn=None) -> Receipt | None`. SQL keeps its `None` return; S3 returns a receipt for direct writes. A supplied connection joins the SQL transaction, or stages an S3 event in its outbox (`firm_audit_s3_outbox`).
+- `AuditLog.prepare(action, *, subject=None, actor=None, data=None, changes=None, correlation_id=None, context=None, created_at=None, provenance=None) -> PreparedEvent`; `write(prepared) -> int | Receipt` is idempotent per body and returns the SQL id or S3 receipt. Ambiguous S3 failures raise `UnknownEventOutcome` carrying `.prepared`.
+- `AuditLog.history(*, subject=None, subject_type=None, subject_id=None, actor=None, actor_type=None, actor_id=None, action=None, correlation_id=None, since=None, limit=100) -> list[dict]`; `get(id) -> dict | None`; `import_provenance(id) -> dict | None`. S3 also accepts an object key or `Receipt` in `get()`.
+- `AuditLog(..., outbox_engine=None, outbox_interval=5.0, create_outbox=True)` optionally relays committed S3 events in the background; `flush_outbox(engine, *, limit=1000) -> int` runs it explicitly. SQL writes already join their caller's transaction and need no relay.
+- `firm.audit.PreparedEvent(body)` with property `entry_id`; `firm.audit.storage.StorageBusy` reports a busy maintenance lease. Retry envelopes freeze timestamps, typed JSON strings and signatures before persistence.
+- `AuditLog.close()` closes its adapter and any resources the adapter created. Injected engines and SDK clients stay caller-owned. Context-manager exit does the same; closing the log twice is safe.
+- `firm.audit.Storage` is the typed persistence contract. Its consistent maintenance scopes implement `firm.audit.storage.StorageView`; see [internals](audit/internals.md#storage-adapters).
+- `firm.audit.s3.S3AuditLog(bucket, *, stream, ...)` remains a compatibility constructor for `AuditLog(storage=S3Storage(...))`. It inherits every audit operation without overriding signing or policy.
+- `firm.audit.storage.s3.outbox`: `create_outbox(bind)`, `pending(engine, stream) -> int`, `flush(engine, log, *, limit=1000) -> int`.
+- `firm.audit.storage.s3.queries` mirrors `firm.audit.queries` over an `AuditLog` configured with `S3Storage` (`audit_stats`, `audit_count`, `audit_search`, `audit_detail`, `verify_status_row`, `integrity_config`) for the dashboard.
+- `firm.audit.object_store.Receipt(key, sha256, version_id=None)`; `ObjectStore(bucket, *, prefix="firm-audit", region=None, endpoint_url=None, client=None)`.
+- `firm.audit.archive.Archive(store)`; `publish(entries, *, batch_id=None, scope=None) -> Receipt`; `resume(batch_id) -> Receipt`; `read(receipt_or_key) -> list`; `inspect(receipt_or_key) -> dict`; `read_many(receipts, *, max_events=10000) -> list`; `batches(*, limit=25, continuation=None) -> tuple[list, str | None]` (unverified summaries, batch-ID order).
+- `Archive.export_sql(source, *, stream, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`; `Archive.export_s3(source, *, batch_id, limit=100, since=None, until=None, continuation=None) -> Receipt`.
+- `Archive.restore_s3(receipts, target) -> int` and `firm.audit.storage.sql.archive.restore_sql(archive, receipts, target) -> int` require an empty target; native SQL archives and native S3 archives of the same stream keep ids and row signatures. Cross-source restores into S3 use its configured signing key; S3-to-SQL restores currently preserve provenance without re-signing imported rows.
+- `firm.audit.archive.Archiver(log, archive, *, stream=None)` for an `AuditLog` with either storage (SQL needs `stream`; S3 uses its configured stream); `enable()` persists the pruning guard, `run_once(*, batch_size=100) -> Receipt | None`, `status() -> dict` (`events`, `unarchived`, `pending_batches`). `SQLArchiver` is the same class.
+
+See [S3 & archives](audit/s3-and-archives.md) for guarantees, supported restore paths, and limits.
+
+Imported SQL event provenance is available through `firm.audit.storage.sql.archive.import_provenance(conn, event_id)`. Cross-storage restores retain source identities separately from destination IDs.

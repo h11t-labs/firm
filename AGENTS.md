@@ -23,7 +23,8 @@ uv run pre-commit run --all-files            # ruff + ty + llms-full + hygiene
 ```
 
 Before finishing any change, run the suite + `ruff check` + `ty check`. Live PG/MySQL tests run
-when `FIRM_TEST_PG_URL` / `FIRM_TEST_MYSQL_URL` are set.
+when `FIRM_TEST_PG_URL` / `FIRM_TEST_MYSQL_URL` are set; live S3 tests when `FIRM_TEST_S3_BUCKET`
+is (RustFS setup: `docs/testing-and-contributing.md`).
 
 ## Layout
 
@@ -76,7 +77,7 @@ module carries its own.
 - **Retention patterns (pick deliberately):** cache and channel trim probabilistically on
   write; audit prunes only on explicit opt-in (never delete audit data silently). Concurrent
   delete sweeps select victims with the skip-locked seam (see `channel/trim.py`,
-  `audit/retention.py`).
+  `audit/storage/sql/store.py`).
 - **Style:** ruff (`E,F,I,UP,B,SIM,C4,RUF,S` with `S101`/`S311` ignored, line-length 100) +
   ruff format; full type hints; a module docstring per file. `migrations/*` are ruff-excluded.
 - **New sibling module:** create `packages/firm-<m>/` mirroring `firm-cache` (its `pyproject.toml`

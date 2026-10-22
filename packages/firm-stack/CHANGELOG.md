@@ -6,6 +6,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project a
 
 ## [Unreleased]
 
+### Added
+
+- `firm-stack[audit-s3]` installs the optional audit S3 SDK; `[all]` includes it too.
+
+
 ## [1.1.0] - 2026-07-28
 
 ### Changed

@@ -7,8 +7,16 @@ prevented (anyone with `DELETE` can delete), but impossible to do without leavin
 verification will find.
 
 It is off until you configure a key. **Without `FIRM_AUDIT_KEY`, the runtime behavior on this page
-is inert**: writes leave the evidence columns NULL and reads behave as before. The nullable columns
+is inert**: writes have no row MAC or signer and reads behave as before. A retry entry id alone
+is not cryptographic protection. The nullable columns
 and two side tables are always part of the migrated schema, independent of key configuration.
+
+These algorithms belong to `AuditLog`, independently of storage. They also run unchanged with
+[`S3Storage`](s3-and-archives.md#tamper-evidence-retention-and-verification): the same layers,
+keys, findings and retention, with S3 objects in place of the tables. The SQL table, transaction
+and constraint descriptions below refer to SQL storage. S3 uses conditional object writes, an
+id counter, a maintenance lease and recoverable prune intents as described on that page. For
+either backend, compromising source storage must not grant write access to the external anchor.
 
 ## Threat model
 
@@ -201,6 +209,12 @@ water mark: no later sealer pass and no `verify --full` run can self-heal it. Ea
 the rows its `row_count`/`rows_mac` signed; there are no recorded gaps or lenient classification.
 `AuditLog` emits a startup hint restating this when sealing is enabled.
 
+Sealing stops at the first row that has not settled yet, so a row whose `created_at` is already
+older than `grace` when it is written (a prepared event retried later with `write()`, an S3
+outbox relay that fell behind) never pulls fresher lower ids into a seal. Such a row is eligible
+the moment it lands, however, so the window does not protect a slower lower id that is still in
+flight at that moment: if that row commits after the sealer ran, it lands inside a sealed range.
+
 `grace` also bounds the anchor's truncation guard: the coverage watermark only enforces seals older
 than `grace` (so a just-committed seal that a verifier's snapshot cannot yet see is not read as a
 truncation). The flip side is that deleting a seal **younger than `grace`** is not caught by the
@@ -231,7 +245,7 @@ appearing inside a range whose exact membership was already sealed.
 ## Key management
 
 The key comes from `FIRM_AUDIT_KEY` (or `AuditLog(..., mac_key=...)`). No key means the feature is
-off: columns stay NULL and everything behaves as it did before tamper-evidence existed.
+off: no row MAC or signer is written, and ordinary SQL writes also leave the entry id NULL.
 
 - **The key must be a UTF-8 string of at least 32 characters.** A shorter key is a **hard error at
   startup**, not a warning — a weak key silently voids all three layers, so it fails loudly

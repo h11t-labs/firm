@@ -22,27 +22,23 @@ import os
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Connection, String, case, cast, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from .._core.clock import now_utc
-from .._core.database import snapshot_transaction
-from .._core.dialects import get_dialect
 from .._core.poller import InterruptiblePoller
-from . import integrity, schema
+from . import integrity
 from .integrity import HmacSigner, Key, parse_keyring
+from .storage import StorageBusy
 
 if TYPE_CHECKING:
     from .log import AuditLog
 
-_audits = schema.audit_events
-_seals = schema.seals
-_status = schema.verify_status
 
 _RETIRED_KEYS_ENV = "FIRM_AUDIT_RETIRED_KEYS"
 _RETIRED_SEAL_KEYS_ENV = "FIRM_AUDIT_RETIRED_SEAL_KEYS"
@@ -115,49 +111,9 @@ class SealRecords(list[SealRecord]):
     capped: bool = False
 
 
-def load_seal_records(conn: Connection) -> SealRecords:
-    """Load side-table rows without invoking dialect datetime/integer result processors.
-
-    Casting attacker-controlled typed fields to text lets verification classify malformed values
-    instead of raising while SQLAlchemy decodes them.
-    """
-
-    def bounded(column: Any, chars: int, label: str) -> Any:
-        return func.substr(cast(column, String), 1, chars + 1).label(label)
-
-    columns = (
-        _seals.c.id,
-        bounded(_seals.c.kind, 32, "kind"),
-        bounded(_seals.c.from_id, 64, "from_id"),
-        bounded(_seals.c.to_id, 64, "to_id"),
-        bounded(_seals.c.row_count, 64, "row_count"),
-        bounded(_seals.c.rows_mac, 64, "rows_mac"),
-        bounded(_seals.c.seal_mac, 64, "seal_mac"),
-        bounded(_seals.c.sealed_at, 64, "sealed_at"),
-        bounded(_seals.c.key_id, 16, "key_id"),
-    )
-    records = SealRecords()
-    last_id = 0
-    while len(records) < _MAX_SEAL_RECORDS:
-        rows = conn.execute(
-            select(*columns).where(_seals.c.id > last_id).order_by(_seals.c.id).limit(_PAGE)
-        ).all()
-        if not rows:
-            break
-        for row in rows:
-            if len(records) >= _MAX_SEAL_RECORDS:
-                records.capped = True
-                break
-            records.append(_parse_seal_record(row))
-        last_id = rows[-1].id
-        if len(rows) < _PAGE:
-            break
-    if len(records) == _MAX_SEAL_RECORDS:
-        records.capped = (
-            conn.execute(select(_seals.c.id).where(_seals.c.id > last_id).limit(1)).first()
-            is not None
-        )
-    return records
+def load_seal_records(conn: Any) -> SealRecords:
+    """All seal-side records from a storage view (activation, seals, floors)."""
+    return conn.seal_records()
 
 
 def _parse_seal_record(row: Any) -> SealRecord:
@@ -211,53 +167,9 @@ def _parse_seal_record(row: Any) -> SealRecord:
     )
 
 
-def _iter_rows(conn: Connection, low: int, high: int | None) -> Iterator[Any]:
-    """Yield bounded event projections in id order with keyset pagination."""
-    text_limits = {
-        "action": _MAX_SCALAR_CHARS,
-        "subject_type": _MAX_SCALAR_CHARS,
-        "subject_id": _MAX_SCALAR_CHARS,
-        "subject_label": _MAX_SCALAR_CHARS,
-        "actor_type": _MAX_SCALAR_CHARS,
-        "actor_id": _MAX_SCALAR_CHARS,
-        "actor_label": _MAX_SCALAR_CHARS,
-        "correlation_id": _MAX_SCALAR_CHARS,
-        "data": _MAX_JSON_CHARS,
-        "changes": _MAX_JSON_CHARS,
-        "context": _MAX_JSON_CHARS,
-        "entry_id": 26,
-        "row_mac": 64,
-        "key_id": 16,
-    }
-    oversized = or_(
-        *(func.length(_audits.c[name]) > limit for name, limit in text_limits.items()),
-        func.length(cast(_audits.c.created_at, String)) > 64,
-    )
-    columns = [
-        _audits.c.id,
-        *(
-            func.substr(_audits.c[name], 1, limit + 1).label(name)
-            for name, limit in text_limits.items()
-            if name not in {"entry_id", "row_mac", "key_id"}
-        ),
-        func.substr(cast(_audits.c.created_at, String), 1, 65).label("created_at"),
-        func.substr(_audits.c.entry_id, 1, 27).label("entry_id"),
-        func.substr(_audits.c.row_mac, 1, 65).label("row_mac"),
-        func.substr(_audits.c.key_id, 1, 17).label("key_id"),
-        case((oversized, True), else_=False).label("oversized"),
-    ]
-    last = low
-    while True:
-        stmt = select(*columns).where(_audits.c.id > last)
-        if high is not None:
-            stmt = stmt.where(_audits.c.id <= high)
-        rows = conn.execute(stmt.order_by(_audits.c.id).limit(_PAGE)).all()
-        if not rows:
-            return
-        yield from rows
-        if len(rows) < _PAGE:
-            return
-        last = rows[-1].id
+def _iter_rows(conn: Any, low: int, high: int | None) -> Iterator[Any]:
+    """Bounded event projections with id in ``(low, high]``, in id order, from a storage view."""
+    return conn.iter_rows(low, high)
 
 
 def _row_mac_input(row: Any) -> bytes:
@@ -300,7 +212,7 @@ RowCallback = Callable[[Any, str], None]
 
 
 def classify_range(
-    conn: Connection,
+    conn: Any,
     seal: SealRecord,
     boundary: int | None,
     keyring: dict[str, Key],
@@ -354,7 +266,7 @@ def classify_range(
 
 
 def range_is_prunable(
-    conn: Connection,
+    conn: Any,
     seal: SealRecord,
     boundary: int | None,
     keyring: dict[str, Key],
@@ -706,7 +618,10 @@ class Verifier:
     def run(self, *, anchor_path: str | None = None, full: bool = False) -> VerifyReport:
         started = time.monotonic()
         try:
-            report = self._verify(anchor_path=anchor_path, full=full)
+            try:
+                report = self._verify(anchor_path=anchor_path, full=full)
+            except StorageBusy as exc:
+                raise VerifyError(f"verification could not start: {exc}") from exc
         except VerifyError as exc:
             self._persist_error(str(exc))
             self.audit.on_error(exc)
@@ -748,7 +663,7 @@ class Verifier:
         findings: list[Finding] = _Findings()
         unresolved_rows = _UnresolvedRows()
 
-        with snapshot_transaction(self.audit.engine) as conn:
+        with self._snapshot() as conn:
             # The first SQL read acquires the PG/MySQL snapshot. Read the external anchor only
             # afterward so both verify and retention compare it with an already-fixed DB view.
             records = load_seal_records(conn)
@@ -761,12 +676,7 @@ class Verifier:
                 if anchor_path is not None
                 else None
             )
-            prior = conn.execute(
-                select(
-                    _status.c.last_full_coverage_at,
-                    _status.c.sealing_observed,
-                ).where(_status.c.id == _STATUS_ID)
-            ).first()
+            prior = conn.status_prior()
             if records.capped:
                 findings.append(
                     Finding(
@@ -934,7 +844,7 @@ class Verifier:
 
     def _reconcile_pending_prune(
         self,
-        conn: Connection,
+        conn: Any,
         database_floor: int,
         floor: int,
         counters: _Counters,
@@ -957,12 +867,7 @@ class Verifier:
         """
         if floor <= database_floor:
             return floor
-        pending = conn.execute(
-            select(_audits.c.id)
-            .where(_audits.c.id > database_floor, _audits.c.id <= floor)
-            .limit(1)
-        ).first()
-        if pending is None:
+        if not conn.any_row_between(database_floor, floor):
             return floor
         findings.append(
             Finding(
@@ -1007,7 +912,7 @@ class Verifier:
 
     def _check_missing_activation_guard(
         self,
-        conn: Connection,
+        conn: Any,
         records: Sequence[SealRecord],
         *,
         anchor_configured: bool,
@@ -1023,8 +928,7 @@ class Verifier:
             or any(record.kind in {"activation", "seal"} for record in records)
         ):
             return
-        events_present = conn.execute(select(_audits.c.id).limit(1)).first() is not None
-        if not events_present:
+        if not conn.any_row():
             return
         findings.append(
             Finding(
@@ -1084,7 +988,7 @@ class Verifier:
 
     def _verify_one_range(
         self,
-        conn: Connection,
+        conn: Any,
         record: SealRecord,
         boundary: int | None,
         keyring: dict[str, Key],
@@ -1116,7 +1020,7 @@ class Verifier:
 
     def _verify_legacy_prefix(
         self,
-        conn: Connection,
+        conn: Any,
         floor: int,
         boundary: int | None,
         keyring: dict[str, Key],
@@ -1137,7 +1041,7 @@ class Verifier:
 
     def _verify_tail(
         self,
-        conn: Connection,
+        conn: Any,
         max_covered: int,
         boundary: int | None,
         keyring: dict[str, Key],
@@ -1207,18 +1111,16 @@ class Verifier:
 
     def _check_pruned_region_empty(
         self,
-        conn: Connection,
+        conn: Any,
         floor: int,
         counters: _Counters,
         findings: list[Finding],
     ) -> None:
         if floor <= 0:
             return
-        rows = conn.execute(
-            select(_audits.c.id).where(_audits.c.id <= floor).order_by(_audits.c.id).limit(5)
-        ).all()
-        if rows:
-            ids = ", ".join(str(row.id) for row in rows)
+        present = conn.rows_at_or_below(floor, 5)
+        if present:
+            ids = ", ".join(str(row_id) for row_id in present)
             findings.append(
                 Finding(
                     "tampered",
@@ -1228,22 +1130,13 @@ class Verifier:
             )
             counters.tampered += 1
 
-    def _check_duplicates(
-        self, conn: Connection, counters: _Counters, findings: list[Finding]
-    ) -> None:
-        rows = conn.execute(
-            select(_audits.c.entry_id)
-            .where(_audits.c.entry_id.is_not(None))
-            .group_by(_audits.c.entry_id)
-            .having(func.count() > 1)
-            .limit(_MAX_FINDINGS)
-        ).all()
-        for row in rows:
+    def _check_duplicates(self, conn: Any, counters: _Counters, findings: list[Finding]) -> None:
+        for entry_id in conn.duplicate_entry_ids(_MAX_FINDINGS):
             findings.append(
                 Finding(
                     "tampered",
-                    f"entry_id {row.entry_id!r} appears more than once (replay)",
-                    f"entry_id {row.entry_id}",
+                    f"entry_id {entry_id!r} appears more than once (replay)",
+                    f"entry_id {entry_id}",
                 )
             )
             counters.tampered += 1
@@ -1437,25 +1330,18 @@ class Verifier:
 
     def _prior_sealing_observed(self) -> bool:
         try:
-            with self.audit.engine.connect() as conn:
-                value = conn.execute(
-                    select(_status.c.sealing_observed).where(_status.c.id == _STATUS_ID)
-                ).scalar_one_or_none()
-            return bool(value)
+            return self.audit.storage.prior_sealing_observed()
         except Exception:
             return False
 
     def _upsert_status(self, **values: Any) -> None:
-        dialect = get_dialect(self.audit.engine)
-        payload = {"id": _STATUS_ID, **values}
-        stmt = dialect.upsert(
-            _status,
-            payload,
-            index_elements=["id"],
-            update_columns=[column for column in payload if column != "id"],
-        )
-        with dialect.begin_claim_tx(self.audit.engine) as conn:
-            conn.execute(stmt)
+        self.audit.storage.upsert_status(values)
+
+    @contextmanager
+    def _snapshot(self) -> Iterator[Any]:
+        """The run's consistent read view: a SQL snapshot transaction, or the storage's own."""
+        with self.audit.storage.snapshot() as view:
+            yield view
 
 
 class VerifyLoop(InterruptiblePoller):

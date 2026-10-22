@@ -30,6 +30,10 @@ class Dialect(ABC):
 
     name: str
 
+    def reset_identity(self, conn: Connection, table: Table) -> None:
+        """Reconcile generated IDs after an explicit-ID import (automatic on SQLite/MySQL)."""
+        return None
+
     @abstractmethod
     def begin_claim_tx(self, engine: Engine) -> AbstractContextManager[Connection]:
         """Open the transaction a claim/mutate sequence runs inside (``BEGIN IMMEDIATE`` on
